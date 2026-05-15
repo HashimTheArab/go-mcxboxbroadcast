@@ -17,6 +17,8 @@ import (
 	"github.com/sandertv/gophertunnel/minecraft/room"
 )
 
+var defaultRoomStatus = room.DefaultStatus()
+
 func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 	if b.conf.StatusProvider != nil {
 		return normalizeStatus(b.conf.StatusProvider.RoomStatus()), nil
@@ -57,7 +59,7 @@ func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 }
 
 func normalizeStatus(status room.Status) room.Status {
-	defaults := room.DefaultStatus()
+	defaults := defaultRoomStatus
 	if status.HostName == "" {
 		status.HostName = defaults.HostName
 	}

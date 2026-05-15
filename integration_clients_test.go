@@ -62,6 +62,15 @@ func TestSlackNotifierErrorDoesNotLeakWebhookURL(t *testing.T) {
 	if strings.Contains(err.Error(), secretURL) || strings.Contains(err.Error(), "SECRET") {
 		t.Fatalf("webhook URL leaked in transport error: %v", err)
 	}
+
+	n.WebhookURL = "https://hooks.slack.com/services/TOKEN/%zzSECRET"
+	err = n.Notify(context.Background(), "hello")
+	if err == nil {
+		t.Fatal("expected malformed URL error")
+	}
+	if strings.Contains(err.Error(), "TOKEN") || strings.Contains(err.Error(), "SECRET") {
+		t.Fatalf("webhook URL leaked in malformed URL error: %v", err)
+	}
 }
 
 func TestSessionUpdateFailureNotificationCanBeSuppressed(t *testing.T) {

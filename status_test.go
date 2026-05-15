@@ -3,6 +3,8 @@ package broadcaster
 import (
 	"context"
 	"testing"
+
+	"github.com/sandertv/gophertunnel/minecraft/room"
 )
 
 func TestStatusDefaults(t *testing.T) {
@@ -35,5 +37,16 @@ func TestStatusDefaults(t *testing.T) {
 	}
 	if status.MaxMemberCount != 2 {
 		t.Fatalf("unexpected max member count %d", status.MaxMemberCount)
+	}
+}
+
+func TestNormalizeStatusKeepsDefaultLevelIDStable(t *testing.T) {
+	first := normalizeStatus(room.Status{HostName: "Host", WorldName: "World"})
+	second := normalizeStatus(room.Status{HostName: "Host", WorldName: "World"})
+	if first.LevelID == "" {
+		t.Fatal("expected default level ID")
+	}
+	if first.LevelID != second.LevelID {
+		t.Fatalf("default level ID changed: %q != %q", first.LevelID, second.LevelID)
 	}
 }

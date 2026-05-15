@@ -28,7 +28,7 @@ func (s SlackNotifier) Notify(ctx context.Context, message string) error {
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.WebhookURL, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return fmt.Errorf("make webhook request: %w", sanitizeWebhookError(err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := s.client().Do(req)
