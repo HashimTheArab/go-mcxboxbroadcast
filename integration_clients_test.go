@@ -261,6 +261,19 @@ func TestRoomStatusProviderNormalizesConfiguredProvider(t *testing.T) {
 	if status.BroadcastSetting == 0 || status.Joinability == "" {
 		t.Fatalf("provider session controls were not normalized: %#v", status)
 	}
+	if !status.OnlineCrossPlatformGame {
+		t.Fatalf("provider status missing cross-platform default: %#v", status)
+	}
+}
+
+func TestRoomListenConfigDisablesServerStatusOverrideForConfiguredProvider(t *testing.T) {
+	b := &Broadcaster{conf: Config{
+		StatusProvider: staticStatusProvider{host: "Provider Host", world: "Provider World"},
+	}}
+	conf := b.roomListenConfig(room.Status{})
+	if !conf.DisableServerStatusOverride {
+		t.Fatal("custom status provider should not be overwritten by listener server status")
+	}
 }
 
 func TestStartupFailureCleanupClosesSignaling(t *testing.T) {

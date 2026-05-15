@@ -113,11 +113,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 					API:                b.conf.NetherNetListenConfig.API,
 				},
 			},
-			ListenConfig: room.ListenConfig{
-				Announcer:      b.announcer,
-				StatusProvider: b.roomStatusProvider(status),
-				Log:            b.log,
-			},
+			ListenConfig: b.roomListenConfig(status),
 		}
 	})
 
@@ -160,6 +156,15 @@ func (b *Broadcaster) roomStatusProvider(status room.Status) room.StatusProvider
 		return normalizedStatusProvider{Provider: b.conf.StatusProvider}
 	}
 	return room.NewStatusProvider(status)
+}
+
+func (b *Broadcaster) roomListenConfig(status room.Status) room.ListenConfig {
+	return room.ListenConfig{
+		Announcer:                   b.announcer,
+		StatusProvider:              b.roomStatusProvider(status),
+		DisableServerStatusOverride: b.conf.StatusProvider != nil,
+		Log:                         b.log,
+	}
 }
 
 func (b *Broadcaster) signalingFor(ctx context.Context) (nethernet.Signaling, error) {

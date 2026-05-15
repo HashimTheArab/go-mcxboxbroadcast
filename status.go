@@ -90,6 +90,7 @@ func normalizeStatus(status room.Status) room.Status {
 	if status.TitleID == 0 {
 		status.TitleID = TitleID
 	}
+	status.OnlineCrossPlatformGame = true
 	if status.LevelID == "" {
 		status.LevelID = defaults.LevelID
 	}
