@@ -108,6 +108,20 @@ func (p normalizedStatusProvider) RoomStatus() room.Status {
 	return normalizeStatus(p.Provider.RoomStatus())
 }
 
+type roomMinecraftStatusProvider struct {
+	Provider room.StatusProvider
+}
+
+func (p roomMinecraftStatusProvider) ServerStatus(int, int) minecraft.ServerStatus {
+	status := normalizeStatus(p.Provider.RoomStatus())
+	return minecraft.ServerStatus{
+		ServerName:    status.WorldName,
+		ServerSubName: status.HostName,
+		PlayerCount:   status.MemberCount,
+		MaxPlayers:    status.MaxMemberCount,
+	}
+}
+
 func levelID(id string) string {
 	if id == "" {
 		return ""

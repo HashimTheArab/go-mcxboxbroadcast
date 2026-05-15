@@ -266,13 +266,19 @@ func TestRoomStatusProviderNormalizesConfiguredProvider(t *testing.T) {
 	}
 }
 
-func TestRoomListenConfigDisablesServerStatusOverrideForConfiguredProvider(t *testing.T) {
+func TestMinecraftStatusProviderMirrorsConfiguredProvider(t *testing.T) {
 	b := &Broadcaster{conf: Config{
 		StatusProvider: staticStatusProvider{host: "Provider Host", world: "Provider World"},
 	}}
-	conf := b.roomListenConfig(room.Status{})
-	if !conf.DisableServerStatusOverride {
-		t.Fatal("custom status provider should not be overwritten by listener server status")
+	status := b.minecraftStatusProvider(room.Status{}).ServerStatus(0, 0)
+	if status.ServerName != "Provider World" || status.ServerSubName != "Provider Host" {
+		t.Fatalf("minecraft status provider did not mirror room provider: %#v", status)
+	}
+	if status.PlayerCount != 1 || status.MaxPlayers != 2 {
+		t.Fatalf("minecraft status provider did not mirror counts: %#v", status)
+	}
+	if b.roomListenConfig(room.Status{}).DisableServerStatusOverride {
+		t.Fatal("room server status override must stay enabled so connection metadata is merged")
 	}
 }
 

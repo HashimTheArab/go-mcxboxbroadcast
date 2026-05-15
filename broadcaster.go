@@ -119,7 +119,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 
 	listenConf := b.conf.ListenConfig
 	listenConf.ErrorLog = b.log
-	listenConf.StatusProvider = minecraft.NewStatusProvider(status.WorldName, status.HostName)
+	listenConf.StatusProvider = b.minecraftStatusProvider(status)
 	listenConf.AuthenticationDisabled = true
 	l, err := listenConf.Listen("nethernet", "")
 	if err != nil {
@@ -160,11 +160,17 @@ func (b *Broadcaster) roomStatusProvider(status room.Status) room.StatusProvider
 
 func (b *Broadcaster) roomListenConfig(status room.Status) room.ListenConfig {
 	return room.ListenConfig{
-		Announcer:                   b.announcer,
-		StatusProvider:              b.roomStatusProvider(status),
-		DisableServerStatusOverride: b.conf.StatusProvider != nil,
-		Log:                         b.log,
+		Announcer:      b.announcer,
+		StatusProvider: b.roomStatusProvider(status),
+		Log:            b.log,
 	}
+}
+
+func (b *Broadcaster) minecraftStatusProvider(status room.Status) minecraft.ServerStatusProvider {
+	if b.conf.StatusProvider != nil {
+		return roomMinecraftStatusProvider{Provider: normalizedStatusProvider{Provider: b.conf.StatusProvider}}
+	}
+	return minecraft.NewStatusProvider(status.WorldName, status.HostName)
 }
 
 func (b *Broadcaster) signalingFor(ctx context.Context) (nethernet.Signaling, error) {
