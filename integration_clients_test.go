@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/df-mc/go-nethernet"
 	"github.com/sandertv/gophertunnel/minecraft/room"
 )
 
@@ -249,6 +250,30 @@ func TestStatusUsesConfiguredProvider(t *testing.T) {
 	}
 }
 
+func TestRoomStatusProviderNormalizesConfiguredProvider(t *testing.T) {
+	b := &Broadcaster{conf: Config{
+		StatusProvider: staticStatusProvider{host: "Provider Host", world: "Provider World"},
+	}}
+	status := b.roomStatusProvider(room.Status{}).RoomStatus()
+	if status.Protocol == 0 || status.Version == "" || status.TitleID == 0 {
+		t.Fatalf("provider status was not normalized: %#v", status)
+	}
+	if status.BroadcastSetting == 0 || status.Joinability == "" {
+		t.Fatalf("provider session controls were not normalized: %#v", status)
+	}
+}
+
+func TestStartupFailureCleanupClosesSignaling(t *testing.T) {
+	sig := &fakeSignaling{}
+	b := &Broadcaster{signaling: sig}
+	if err := b.cleanupStartupFailure(false); err != nil {
+		t.Fatal(err)
+	}
+	if !sig.closed {
+		t.Fatal("signaling was not closed")
+	}
+}
+
 func TestQueryStatusFallsBackToWeb(t *testing.T) {
 	status, err := queryStatusWithFallback(context.Background(), QueryOptions{
 		Address:            "127.0.0.1:1",
@@ -330,5 +355,22 @@ func (f fakeNotifier) Notify(ctx context.Context, message string) error {
 	if f.notify != nil {
 		f.notify(ctx, message)
 	}
+	return nil
+}
+
+type fakeSignaling struct {
+	closed bool
+}
+
+func (f *fakeSignaling) Signal(context.Context, *nethernet.Signal) error { return nil }
+func (f *fakeSignaling) Notify(chan<- *nethernet.Signal) func()          { return func() {} }
+func (f *fakeSignaling) Context() context.Context                        { return context.Background() }
+func (f *fakeSignaling) Credentials(context.Context) (*nethernet.Credentials, error) {
+	return nil, nil
+}
+func (f *fakeSignaling) NetworkID() string { return "network" }
+func (f *fakeSignaling) PongData([]byte)   {}
+func (f *fakeSignaling) Close() error {
+	f.closed = true
 	return nil
 }

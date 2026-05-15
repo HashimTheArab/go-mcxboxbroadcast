@@ -96,6 +96,17 @@ func normalizeStatus(status room.Status) room.Status {
 	return status
 }
 
+type normalizedStatusProvider struct {
+	Provider room.StatusProvider
+}
+
+func (p normalizedStatusProvider) RoomStatus() room.Status {
+	if p.Provider == nil {
+		return normalizeStatus(room.Status{})
+	}
+	return normalizeStatus(p.Provider.RoomStatus())
+}
+
 func levelID(id string) string {
 	if id == "" {
 		return ""

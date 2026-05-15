@@ -95,7 +95,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	}
 	if err := b.startSubAccounts(b.ctx); err != nil {
 		b.cancel()
-		err = errors.Join(err, b.cleanupPublishedSessions(true))
+		err = errors.Join(err, b.cleanupStartupFailure(true))
 		return err
 	}
 	b.uploadGallery(b.ctx)
@@ -128,7 +128,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	l, err := listenConf.Listen("nethernet", "")
 	if err != nil {
 		b.cancel()
-		err = errors.Join(fmt.Errorf("listen nethernet: %w", err), b.cleanupPublishedSessions(true))
+		err = errors.Join(fmt.Errorf("listen nethernet: %w", err), b.cleanupStartupFailure(true))
 		return err
 	}
 	b.listener = l
@@ -157,7 +157,7 @@ func (b *Broadcaster) friendSyncer() FriendSyncer {
 
 func (b *Broadcaster) roomStatusProvider(status room.Status) room.StatusProvider {
 	if b.conf.StatusProvider != nil {
-		return b.conf.StatusProvider
+		return normalizedStatusProvider{Provider: b.conf.StatusProvider}
 	}
 	return room.NewStatusProvider(status)
 }
@@ -354,6 +354,16 @@ func (b *Broadcaster) cleanupPublishedSessions(closeAnnouncer bool) error {
 	b.subSessions = nil
 	if closeAnnouncer && b.announcer != nil {
 		err = errors.Join(err, b.announcer.Close())
+	}
+	return err
+}
+
+func (b *Broadcaster) cleanupStartupFailure(closeAnnouncer bool) error {
+	err := b.cleanupPublishedSessions(closeAnnouncer)
+	if b.signaling != nil {
+		if c, ok := b.signaling.(interface{ Close() error }); ok {
+			err = errors.Join(err, c.Close())
+		}
 	}
 	return err
 }
