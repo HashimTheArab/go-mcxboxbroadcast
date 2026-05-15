@@ -10,9 +10,11 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/HashimTheArab/go-mcxboxbroadcast"
 	"github.com/sandertv/gophertunnel/minecraft/auth"
+	"github.com/sandertv/gophertunnel/minecraft/service"
 	"golang.org/x/oauth2"
 )
 
@@ -52,9 +54,14 @@ func main() {
 	if err := broadcaster.SaveLiveToken(cachePath, tok); err != nil {
 		log.Warn("could not save token cache", "err", err)
 	}
-	minecraftTokens, err := broadcaster.NewMinecraftTokenSource(ctx, live, http.DefaultClient)
-	if err != nil {
-		log.Warn("minecraft services token source unavailable", "err", err)
+	var minecraftTokens service.TokenSource
+	if galleryImageExists(baseDir, cfg.Gallery) {
+		tokenCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		minecraftTokens, err = broadcaster.NewMinecraftTokenSource(tokenCtx, live, http.DefaultClient)
+		cancel()
+		if err != nil {
+			log.Warn("minecraft services token source unavailable", "err", err)
+		}
 	}
 
 	runtime, err := cfg.RuntimeConfig(broadcaster.RuntimeConfigInput{
@@ -69,11 +76,22 @@ func main() {
 		log.Error("configure", "err", err)
 		os.Exit(1)
 	}
+	accountCachePaths := map[string]string{cachePath: "primary"}
 	for _, account := range cfg.Accounts.SubAccounts {
 		if !account.Enabled {
 			continue
 		}
-		subLive, err := loadAccountToken(resolveConfigPath(baseDir, account.CachePath), os.Stdout)
+		subCachePath, err := subAccountCachePath(baseDir, account)
+		if err != nil {
+			log.Error("configure sub-account", "id", account.ID, "err", err)
+			os.Exit(1)
+		}
+		if owner, ok := accountCachePaths[subCachePath]; ok {
+			log.Error("duplicate account cache path", "id", account.ID, "owner", owner, "path", subCachePath)
+			os.Exit(1)
+		}
+		accountCachePaths[subCachePath] = account.ID
+		subLive, err := loadAccountToken(subCachePath, os.Stdout)
 		if err != nil {
 			log.Error("authenticate sub-account", "id", account.ID, "err", err)
 			os.Exit(1)
@@ -124,10 +142,35 @@ func loadAccountToken(path string, out *os.File) (oauth2.TokenSource, error) {
 	return src, broadcaster.SaveLiveToken(path, tok)
 }
 
+func galleryImageExists(base string, gallery broadcaster.GalleryFileConfig) bool {
+	if !gallery.Enabled || gallery.ImagePath == "" {
+		return false
+	}
+	_, err := os.Stat(resolvePath(base, gallery.ImagePath))
+	return err == nil
+}
+
+func subAccountCachePath(base string, account broadcaster.SubAccountFile) (string, error) {
+	if account.CachePath != "" {
+		return resolveConfigPath(base, account.CachePath), nil
+	}
+	if account.ID == "" {
+		return "", errors.New("sub-account id or cachePath is required")
+	}
+	return filepath.Join(base, "cache", "sub_accounts", account.ID, "live_token.json"), nil
+}
+
 func resolveConfigPath(base, path string) string {
 	if path == "" {
 		return defaultCachePath()
 	}
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(base, path)
+}
+
+func resolvePath(base, path string) string {
 	if filepath.IsAbs(path) {
 		return path
 	}

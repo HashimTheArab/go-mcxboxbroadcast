@@ -98,7 +98,6 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 		err = errors.Join(err, b.cleanupStartupFailure(true))
 		return err
 	}
-	b.uploadGallery(b.ctx)
 
 	minecraft.RegisterNetwork("nethernet", func(l *slog.Logger) minecraft.Network {
 		return room.Network{
@@ -132,6 +131,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 
 	go b.accept()
 	go b.updateLoop()
+	go b.uploadGalleryWithTimeout()
 	if b.conf.FriendSync != nil {
 		go b.friendSyncer().Run(b.ctx)
 	}
@@ -259,6 +259,12 @@ func (b *Broadcaster) uploadGallery(ctx context.Context) {
 		b.log.Error("set showcase image", "err", err)
 		b.notify(ctx, "Showcase image upload failed: "+err.Error())
 	}
+}
+
+func (b *Broadcaster) uploadGalleryWithTimeout() {
+	ctx, cancel := context.WithTimeout(b.ctx, 30*time.Second)
+	defer cancel()
+	b.uploadGallery(ctx)
 }
 
 func (b *Broadcaster) notify(ctx context.Context, message string) {
