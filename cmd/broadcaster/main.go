@@ -119,8 +119,8 @@ func defaultCachePath() string {
 
 func loadAccountToken(path string, out *os.File) (oauth2.TokenSource, error) {
 	tok, err := broadcaster.LoadLiveToken(path)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, err
+	if err != nil {
+		tok = nil
 	}
 	src := auth.RefreshTokenSourceWriter(tok, out)
 	tok, err = src.Token()
