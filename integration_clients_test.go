@@ -1,0 +1,230 @@
+package broadcaster
+
+import (
+	"context"
+	"io"
+	"net/http"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/sandertv/gophertunnel/minecraft/room"
+)
+
+func TestSlackNotifierPostsConfiguredMessage(t *testing.T) {
+	var body string
+	n := SlackNotifier{
+		WebhookURL: "https://example.test/slack",
+		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.String() != "https://example.test/slack" {
+				t.Fatalf("unexpected URL %s", req.URL)
+			}
+			data, _ := io.ReadAll(req.Body)
+			body = string(data)
+			return response(http.StatusOK, ""), nil
+		})},
+	}
+	if err := n.Notify(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body, "hello") {
+		t.Fatalf("message missing from body %q", body)
+	}
+}
+
+func TestGalleryClientUploadsImageWhenConfigured(t *testing.T) {
+	var uploaded, listed bool
+	g := GalleryClient{
+		TokenSource: staticMinecraftTokenSource{},
+		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch {
+			case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/xuid/1"):
+				listed = true
+				return response(http.StatusOK, `{"result":{"showcasedImages":[]}}`), nil
+			case req.Method == http.MethodPost && req.URL.Path == "/api/v1.0/gallery":
+				uploaded = true
+				return response(http.StatusAccepted, `{"result":{"id":"img","isFeatured":true}}`), nil
+			default:
+				t.Fatalf("unexpected request %s %s", req.Method, req.URL)
+				return nil, nil
+			}
+		})},
+	}
+	if err := g.SetShowcase(context.Background(), "1", testImageFile(t), true); err != nil {
+		t.Fatal(err)
+	}
+	if !listed || !uploaded {
+		t.Fatalf("listed=%v uploaded=%v", listed, uploaded)
+	}
+}
+
+func TestFriendSyncerFollowsAndUnfollows(t *testing.T) {
+	var followed, unfollowed bool
+	syncer := FriendSyncer{
+		Client: fakeFriendClient{
+			people: []Person{
+				{XUID: "1", Gamertag: "Follower", IsFollowingCaller: true},
+				{XUID: "2", Gamertag: "Old", IsFollowedByCaller: true},
+			},
+			follow:   func(xuid string) { followed = xuid == "1" },
+			unfollow: func(xuid string) { unfollowed = xuid == "2" },
+		},
+		Config: FriendSyncConfig{AutoFollow: true, AutoUnfollow: true},
+	}
+	if err := syncer.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !followed || !unfollowed {
+		t.Fatalf("followed=%v unfollowed=%v", followed, unfollowed)
+	}
+}
+
+func TestFriendSyncerSendsInitialInvite(t *testing.T) {
+	var invited string
+	syncer := FriendSyncer{
+		Client: fakeFriendClient{
+			people: []Person{{XUID: "1", Gamertag: "Follower", IsFollowingCaller: true}},
+		},
+		Inviter: fakeInviter{invite: func(xuid string) { invited = xuid }},
+		Config:  FriendSyncConfig{AutoFollow: true, InitialInvite: true},
+	}
+	if err := syncer.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if invited != "1" {
+		t.Fatalf("expected invite for xuid 1, got %q", invited)
+	}
+}
+
+func TestFriendSyncerExpiresInactiveFriends(t *testing.T) {
+	var unfollowed bool
+	syncer := FriendSyncer{
+		Client: fakeFriendClient{
+			people:   []Person{{XUID: "1", Gamertag: "Old", IsFollowedByCaller: true}},
+			unfollow: func(xuid string) { unfollowed = xuid == "1" },
+		},
+		History: fakeHistoryStore{seen: map[string]time.Time{"1": time.Now().Add(-48 * time.Hour)}},
+		Config:  FriendSyncConfig{ExpiryEnabled: true, ExpiryDays: 1},
+	}
+	if err := syncer.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !unfollowed {
+		t.Fatal("expected inactive friend to be unfollowed")
+	}
+}
+
+func TestFileHistoryStoreRecordsAndClearsLastSeen(t *testing.T) {
+	store := NewFileHistoryStore(filepath.Join(t.TempDir(), "player_history.json"))
+	when := time.Now().Add(-time.Hour).Truncate(time.Second)
+
+	if err := store.Seen(context.Background(), "1", when); err != nil {
+		t.Fatal(err)
+	}
+	lastSeen, ok, err := store.LastSeen(context.Background(), "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || !lastSeen.Equal(when) {
+		t.Fatalf("last seen = %s, %v", lastSeen, ok)
+	}
+	if err := store.Clear(context.Background(), "1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := store.LastSeen(context.Background(), "1"); err != nil || ok {
+		t.Fatalf("expected cleared history, ok=%v err=%v", ok, err)
+	}
+}
+
+func TestStatusUsesConfiguredProvider(t *testing.T) {
+	b, err := New(Config{
+		TokenSource:     staticTokenSource{},
+		LiveTokenSource: staticOAuthSource{},
+		Server:          ServerInfo{Host: "127.0.0.1", Port: 19132},
+		StatusProvider:  staticStatusProvider{host: "Provider Host", world: "Provider World"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := b.status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.HostName != "Provider Host" || status.WorldName != "Provider World" {
+		t.Fatalf("provider not used: %#v", status)
+	}
+}
+
+func TestQueryStatusFallsBackToWeb(t *testing.T) {
+	status, err := queryStatusWithFallback(context.Background(), QueryOptions{
+		Address:            "127.0.0.1:1",
+		Timeout:            time.Nanosecond,
+		WebFallbackEnabled: true,
+		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return response(http.StatusOK, `{"success":true,"ping":{"pong":{"motd":"World","subMotd":"Host","playerCount":3,"maximumPlayerCount":10}}}`), nil
+		})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.ServerName != "World" || status.ServerSubName != "Host" || status.PlayerCount != 3 {
+		t.Fatalf("unexpected status %#v", status)
+	}
+}
+
+type staticStatusProvider struct {
+	host, world string
+}
+
+func (s staticStatusProvider) RoomStatus() room.Status {
+	return room.Status{
+		HostName:       s.host,
+		WorldName:      s.world,
+		MemberCount:    1,
+		MaxMemberCount: 2,
+	}
+}
+
+type fakeFriendClient struct {
+	people   []Person
+	follow   func(string)
+	unfollow func(string)
+}
+
+func (f fakeFriendClient) Friends(context.Context) ([]Person, error) { return f.people, nil }
+func (f fakeFriendClient) Follow(_ context.Context, xuid string) error {
+	if f.follow != nil {
+		f.follow(xuid)
+	}
+	return nil
+}
+func (f fakeFriendClient) Unfollow(_ context.Context, xuid string) error {
+	if f.unfollow != nil {
+		f.unfollow(xuid)
+	}
+	return nil
+}
+
+type fakeInviter struct {
+	invite func(string)
+}
+
+func (f fakeInviter) Invite(xuid string, _ int32) error {
+	f.invite(xuid)
+	return nil
+}
+
+type fakeHistoryStore struct {
+	seen map[string]time.Time
+}
+
+func (f fakeHistoryStore) LastSeen(_ context.Context, xuid string) (time.Time, bool, error) {
+	t, ok := f.seen[xuid]
+	return t, ok, nil
+}
+
+func (f fakeHistoryStore) Clear(_ context.Context, xuid string) error {
+	delete(f.seen, xuid)
+	return nil
+}

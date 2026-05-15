@@ -7,6 +7,8 @@ import (
 
 	"github.com/df-mc/go-xsapi"
 	"github.com/sandertv/gophertunnel/minecraft/auth"
+	"github.com/sandertv/gophertunnel/minecraft/protocol"
+	"github.com/sandertv/gophertunnel/minecraft/service"
 	"golang.org/x/oauth2"
 )
 
@@ -17,6 +19,27 @@ func NewXBLTokenSource(ctx context.Context, live oauth2.TokenSource) xsapi.Token
 		ctx = context.Background()
 	}
 	return &xblTokenSource{ctx: ctx, src: live}
+}
+
+func NewMinecraftTokenSource(ctx context.Context, live oauth2.TokenSource, client *http.Client) (service.TokenSource, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if client != nil {
+		ctx = context.WithValue(ctx, oauth2.HTTPClient, client)
+	}
+	discovery, err := service.Discover(ctx, service.ApplicationTypeMinecraftPE, protocol.CurrentVersion)
+	if err != nil {
+		return nil, fmt.Errorf("discover minecraft services: %w", err)
+	}
+	env := new(service.AuthorizationEnvironment)
+	if err := discovery.Environment(env); err != nil {
+		return nil, fmt.Errorf("load auth environment: %w", err)
+	}
+	if client != nil {
+		env.HTTPClient = client
+	}
+	return env.TokenSource(context.WithoutCancel(ctx), live, service.TokenConfig{}), nil
 }
 
 type xblTokenSource struct {

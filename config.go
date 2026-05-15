@@ -14,6 +14,7 @@ import (
 	"github.com/df-mc/go-xsapi/mpsd"
 	"github.com/sandertv/gophertunnel/minecraft"
 	"github.com/sandertv/gophertunnel/minecraft/room"
+	"github.com/sandertv/gophertunnel/minecraft/service"
 	"golang.org/x/oauth2"
 )
 
@@ -24,6 +25,9 @@ type Config struct {
 	// LiveTokenSource supplies Microsoft Live tokens for Minecraft service
 	// signaling. It is used by the gophertunnel lunar signaling implementation.
 	LiveTokenSource oauth2.TokenSource
+	// MinecraftTokenSource supplies Minecraft franchise service tokens for
+	// gallery/profile image requests.
+	MinecraftTokenSource service.TokenSource
 
 	// Server is the target Bedrock server clients are transferred to.
 	Server ServerInfo
@@ -35,6 +39,17 @@ type Config struct {
 	Status Status
 	// StatusProvider may dynamically provide room status for announcements.
 	StatusProvider room.StatusProvider
+	// Gallery controls optional Minecraft profile showcase image upload.
+	Gallery *GalleryConfig
+	// Notifier receives operator-facing notifications.
+	Notifier Notifier
+	// FriendSync controls optional follower/friend synchronization.
+	FriendSync *FriendSyncConfig
+	// FriendHistory records player activity for friend expiry.
+	FriendHistory HistoryStore
+	// SubAccounts contains additional accounts that join/publish the same MPSD
+	// session to extend friend-list visibility.
+	SubAccounts []SubAccountConfig
 
 	// Signaling is the NetherNet signaling connection used to accept clients.
 	// If nil, SignalingFactory is called.
@@ -81,15 +96,66 @@ func (s ServerInfo) validate() error {
 
 // Status is the server metadata shown in the Xbox friend-list world.
 type Status struct {
-	HostName      string
-	WorldName     string
-	WorldType     string
-	Players       int
-	MaxPlayers    int
-	Broadcast     int32
-	Joinability   string
-	LevelID       string
-	QueryTarget   bool
-	QueryTimeout  time.Duration
-	QueryFallback bool
+	HostName         string
+	WorldName        string
+	WorldType        string
+	Players          int
+	MaxPlayers       int
+	Broadcast        int32
+	Joinability      string
+	LevelID          string
+	QueryTarget      bool
+	QueryTimeout     time.Duration
+	WebQueryFallback bool
+	QueryFallback    bool
+	WebQueryClient   *http.Client
+}
+
+type BroadcastSetting int32
+
+const (
+	BroadcastSettingInviteOnly BroadcastSetting = iota + 1
+	BroadcastSettingFriendsOnly
+	BroadcastSettingFriendsOfFriends
+)
+
+const (
+	JoinabilityInviteOnly        = room.JoinabilityInviteOnly
+	JoinabilityJoinableByFriends = room.JoinabilityJoinableByFriends
+
+	WorldTypeCreative  = room.WorldTypeCreative
+	WorldTypeSurvival  = "Survival"
+	WorldTypeAdventure = "Adventure"
+)
+
+type GalleryConfig struct {
+	Enabled           bool
+	ImagePath         string
+	DeleteOtherImages bool
+	TokenSource       service.TokenSource
+	Client            *http.Client
+}
+
+type Notifier interface {
+	Notify(ctx context.Context, message string) error
+}
+
+type FriendSyncConfig struct {
+	UpdateInterval  time.Duration
+	AutoFollow      bool
+	AutoUnfollow    bool
+	InitialInvite   bool
+	ExpiryEnabled   bool
+	ExpiryDays      int
+	ExpiryCheck     time.Duration
+	IgnoreGuestXUID bool
+}
+
+type SubAccountConfig struct {
+	ID              string
+	Enabled         bool
+	TokenSource     xsapi.TokenSource
+	LiveTokenSource oauth2.TokenSource
+	PublishConfig   mpsd.PublishConfig
+	FriendSync      *FriendSyncConfig
 }

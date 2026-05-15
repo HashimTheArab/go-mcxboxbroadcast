@@ -4,35 +4,32 @@ import (
 	"context"
 	"errors"
 	"flag"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
-	"time"
 
-	"github.com/mcxboxbroadcast/broadcaster-go"
+	"github.com/HashimTheArab/go-mcxboxbroadcast"
 	"github.com/sandertv/gophertunnel/minecraft/auth"
+	"golang.org/x/oauth2"
 )
 
 func main() {
 	var (
-		host      = flag.String("host", "127.0.0.1", "target Bedrock server host")
-		port      = flag.Uint("port", 19132, "target Bedrock server port")
-		name      = flag.String("name", "MCXboxBroadcast", "host name shown in the friend list")
-		world     = flag.String("world", "", "world name shown in the friend list")
-		players   = flag.Int("players", 1, "displayed player count")
-		max       = flag.Int("max-players", 20, "displayed maximum player count")
-		query     = flag.Bool("query", true, "query target server status before announcements")
-		cachePath = flag.String("cache", defaultCachePath(), "Microsoft Live token cache path")
-		debug     = flag.Bool("debug", false, "enable debug logs")
+		configPath = flag.String("config", "config.yml", "configuration file path")
+		debug      = flag.Bool("debug", false, "enable debug logs")
 	)
 	flag.Parse()
 
+	cfg, err := broadcaster.LoadConfigFile(*configPath)
+	if err != nil {
+		slog.Error("load config", "err", err)
+		os.Exit(1)
+	}
 	level := slog.LevelInfo
-	if *debug {
+	if *debug || cfg.DebugMode {
 		level = slog.LevelDebug
 	}
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
@@ -40,7 +37,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	tok, err := broadcaster.LoadLiveToken(*cachePath)
+	baseDir := filepath.Dir(*configPath)
+	cachePath := resolveConfigPath(baseDir, cfg.Accounts.PrimaryCachePath)
+	tok, err := broadcaster.LoadLiveToken(cachePath)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		log.Warn("could not load token cache", "err", err)
 	}
@@ -50,34 +49,43 @@ func main() {
 		log.Error("authenticate", "err", err)
 		os.Exit(1)
 	}
-	if err := broadcaster.SaveLiveToken(*cachePath, tok); err != nil {
+	if err := broadcaster.SaveLiveToken(cachePath, tok); err != nil {
 		log.Warn("could not save token cache", "err", err)
 	}
-
-	worldName := *world
-	if worldName == "" {
-		worldName = *name
+	minecraftTokens, err := broadcaster.NewMinecraftTokenSource(ctx, live, http.DefaultClient)
+	if err != nil {
+		log.Warn("minecraft services token source unavailable", "err", err)
 	}
-	b, err := broadcaster.New(broadcaster.Config{
-		TokenSource:     broadcaster.NewXBLTokenSource(ctx, live),
-		LiveTokenSource: live,
-		Server: broadcaster.ServerInfo{
-			Host: *host,
-			Port: uint16(*port),
-		},
-		Status: broadcaster.Status{
-			HostName:      *name,
-			WorldName:     worldName,
-			Players:       *players,
-			MaxPlayers:    *max,
-			QueryTarget:   *query,
-			QueryTimeout:  5 * time.Second,
-			QueryFallback: true,
-		},
-		UpdateInterval: 30 * time.Second,
-		HTTPClient:     http.DefaultClient,
-		Log:            log,
+
+	runtime, err := cfg.RuntimeConfig(broadcaster.RuntimeConfigInput{
+		TokenSource:          broadcaster.NewXBLTokenSource(ctx, live),
+		LiveTokenSource:      live,
+		MinecraftTokenSource: minecraftTokens,
+		HTTPClient:           http.DefaultClient,
+		Log:                  log,
+		BaseDir:              baseDir,
 	})
+	if err != nil {
+		log.Error("configure", "err", err)
+		os.Exit(1)
+	}
+	for _, account := range cfg.Accounts.SubAccounts {
+		if !account.Enabled {
+			continue
+		}
+		subLive, err := loadAccountToken(resolveConfigPath(baseDir, account.CachePath), os.Stdout)
+		if err != nil {
+			log.Error("authenticate sub-account", "id", account.ID, "err", err)
+			os.Exit(1)
+		}
+		runtime.SubAccounts = append(runtime.SubAccounts, broadcaster.SubAccountConfig{
+			ID:          account.ID,
+			Enabled:     true,
+			TokenSource: broadcaster.NewXBLTokenSource(ctx, subLive),
+		})
+	}
+
+	b, err := broadcaster.New(runtime)
 	if err != nil {
 		log.Error("configure", "err", err)
 		os.Exit(1)
@@ -86,7 +94,7 @@ func main() {
 		log.Error("start", "err", err)
 		os.Exit(1)
 	}
-	log.Info("broadcasting", "target", fmt.Sprintf("%s:%d", *host, *port))
+	log.Info("broadcasting", "target", runtime.Server.Address())
 
 	<-ctx.Done()
 	if err := b.Close(); err != nil {
@@ -101,4 +109,27 @@ func defaultCachePath() string {
 		return "cache/live_token.json"
 	}
 	return filepath.Join(dir, "mcxboxbroadcast-go", "live_token.json")
+}
+
+func loadAccountToken(path string, out *os.File) (oauth2.TokenSource, error) {
+	tok, err := broadcaster.LoadLiveToken(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	src := auth.RefreshTokenSourceWriter(tok, out)
+	tok, err = src.Token()
+	if err != nil {
+		return nil, err
+	}
+	return src, broadcaster.SaveLiveToken(path, tok)
+}
+
+func resolveConfigPath(base, path string) string {
+	if path == "" {
+		return defaultCachePath()
+	}
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(base, path)
 }

@@ -1,4 +1,4 @@
-module github.com/mcxboxbroadcast/broadcaster-go
+module github.com/HashimTheArab/go-mcxboxbroadcast
 
 go 1.26.2
 
@@ -6,9 +6,11 @@ require (
 	github.com/df-mc/go-nethernet v1.0.11
 	github.com/df-mc/go-xsapi v1.0.1
 	github.com/google/uuid v1.6.0
+	github.com/pelletier/go-toml/v2 v2.2.4
 	github.com/sandertv/go-raknet v1.15.0
 	github.com/sandertv/gophertunnel v0.0.0-20260515200219-7274f17795dc
 	golang.org/x/oauth2 v0.34.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

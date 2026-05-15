@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -25,9 +26,11 @@ type Broadcaster struct {
 	conf Config
 	log  *slog.Logger
 
-	announcer *room.XBLAnnouncer
-	listener  *minecraft.Listener
-	signaling nethernet.Signaling
+	announcer   *room.XBLAnnouncer
+	listener    *minecraft.Listener
+	signaling   nethernet.Signaling
+	sessionRef  mpsd.SessionReference
+	subSessions []*mpsd.Session
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -90,6 +93,11 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 		b.cancel()
 		return fmt.Errorf("announce session: %w", err)
 	}
+	if err := b.startSubAccounts(b.ctx); err != nil {
+		b.cancel()
+		return err
+	}
+	b.uploadGallery(b.ctx)
 
 	minecraft.RegisterNetwork("nethernet", func(l *slog.Logger) minecraft.Network {
 		return room.Network{
@@ -106,7 +114,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 			},
 			ListenConfig: room.ListenConfig{
 				Announcer:      b.announcer,
-				StatusProvider: room.NewStatusProvider(status),
+				StatusProvider: b.roomStatusProvider(status),
 				Log:            b.log,
 			},
 		}
@@ -126,7 +134,30 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 
 	go b.accept()
 	go b.updateLoop()
+	if b.conf.FriendSync != nil {
+		go b.friendSyncer().Run(b.ctx)
+	}
 	return nil
+}
+
+func (b *Broadcaster) friendSyncer() FriendSyncer {
+	syncer := FriendSyncer{
+		Client:  FriendClient{TokenSource: b.conf.TokenSource, Client: b.conf.HTTPClient},
+		Config:  *b.conf.FriendSync,
+		History: b.conf.FriendHistory,
+		Log:     b.log,
+	}
+	if b.announcer != nil && b.announcer.Session != nil {
+		syncer.Inviter = sessionInviter{session: b.announcer.Session}
+	}
+	return syncer
+}
+
+func (b *Broadcaster) roomStatusProvider(status room.Status) room.StatusProvider {
+	if b.conf.StatusProvider != nil {
+		return b.conf.StatusProvider
+	}
+	return room.NewStatusProvider(status)
 }
 
 func (b *Broadcaster) signalingFor(ctx context.Context) (nethernet.Signaling, error) {
@@ -152,12 +183,77 @@ func (b *Broadcaster) newAnnouncer() *room.XBLAnnouncer {
 	if ref.Name == "" {
 		ref.Name = strings.ToUpper(uuid.NewString())
 	}
+	b.sessionRef = ref
 	pub := b.conf.PublishConfig
 	pub.Logger = b.log
 	return &room.XBLAnnouncer{
 		TokenSource:      b.conf.TokenSource,
 		SessionReference: ref,
 		PublishConfig:    pub,
+	}
+}
+
+func (b *Broadcaster) startSubAccounts(ctx context.Context) error {
+	for _, account := range b.conf.SubAccounts {
+		if !account.Enabled || account.TokenSource == nil {
+			continue
+		}
+		pub := account.PublishConfig
+		pub.Logger = b.log.With("sub_account", account.ID)
+		s, err := pub.PublishContext(ctx, account.TokenSource, b.sessionRef)
+		if err != nil {
+			return fmt.Errorf("start sub-account %q: %w", account.ID, err)
+		}
+		b.subSessions = append(b.subSessions, s)
+	}
+	return nil
+}
+
+func (b *Broadcaster) uploadGallery(ctx context.Context) {
+	cfg := b.conf.Gallery
+	if cfg == nil || !cfg.Enabled {
+		return
+	}
+	if _, err := os.Stat(cfg.ImagePath); errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	src := cfg.TokenSource
+	if src == nil {
+		src = b.conf.MinecraftTokenSource
+	}
+	if src == nil {
+		b.log.Warn("gallery enabled without minecraft token source")
+		b.notify(ctx, "Showcase image upload skipped: Minecraft token source is not configured.")
+		return
+	}
+	tok, err := b.conf.TokenSource.Token()
+	if err != nil {
+		b.log.Error("gallery xuid token", "err", err)
+		b.notify(ctx, "Showcase image upload failed while reading the Xbox profile: "+err.Error())
+		return
+	}
+	xuid := tok.DisplayClaims().XUID
+	if xuid == "" {
+		b.log.Warn("gallery skipped because token XUID is empty")
+		b.notify(ctx, "Showcase image upload skipped: Xbox profile XUID is empty.")
+		return
+	}
+	client := GalleryClient{TokenSource: src, Client: cfg.Client}
+	if client.Client == nil {
+		client.Client = b.conf.HTTPClient
+	}
+	if err := client.SetShowcase(ctx, xuid, cfg.ImagePath, cfg.DeleteOtherImages); err != nil {
+		b.log.Error("set showcase image", "err", err)
+		b.notify(ctx, "Showcase image upload failed: "+err.Error())
+	}
+}
+
+func (b *Broadcaster) notify(ctx context.Context, message string) {
+	if b.conf.Notifier == nil {
+		return
+	}
+	if err := b.conf.Notifier.Notify(ctx, message); err != nil {
+		b.log.Error("send notification", "err", err)
 	}
 }
 
@@ -192,6 +288,11 @@ func (b *Broadcaster) transfer(conn *minecraft.Conn) {
 		return
 	}
 	_ = conn.Flush()
+	if recorder, ok := b.conf.FriendHistory.(HistoryRecorder); ok && id.XUID != "" {
+		if err := recorder.Seen(b.ctx, id.XUID, time.Now()); err != nil {
+			b.log.Error("record player history", "xuid", id.XUID, "err", err)
+		}
+	}
 	b.log.Info("transferred client", "xuid", id.XUID, "name", id.DisplayName, "target", b.conf.Server.Address())
 }
 
@@ -204,6 +305,7 @@ func (b *Broadcaster) updateLoop() {
 			ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
 			if err := b.Update(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				b.log.Error("update session", "err", err)
+				b.notify(ctx, "Xbox session update failed: "+err.Error())
 			}
 			cancel()
 		case <-b.ctx.Done():
@@ -235,6 +337,10 @@ func (b *Broadcaster) Close() error {
 	}
 	b.cancel()
 	err := b.listener.Close()
+	for _, s := range b.subSessions {
+		err = errors.Join(err, s.Close())
+	}
+	b.subSessions = nil
 	if b.signaling != nil {
 		if c, ok := b.signaling.(interface{ Close() error }); ok {
 			err = errors.Join(err, c.Close())
