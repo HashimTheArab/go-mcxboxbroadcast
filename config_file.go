@@ -285,6 +285,9 @@ func (c ConfigFile) serverInfo(ctx context.Context, in RuntimeConfigInput) (Serv
 }
 
 func (f FriendFileConfig) runtime() *FriendSyncConfig {
+	if !f.AutoFollow && !f.AutoUnfollow && !f.Expiry.Enabled {
+		return nil
+	}
 	return &FriendSyncConfig{
 		UpdateInterval:  time.Duration(f.UpdateInterval) * time.Second,
 		AutoFollow:      f.AutoFollow,

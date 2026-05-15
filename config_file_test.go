@@ -88,6 +88,24 @@ func TestConfigFileMapsSuppressSessionUpdateMessage(t *testing.T) {
 	}
 }
 
+func TestConfigFileDisablesFriendSyncWhenNoActionsConfigured(t *testing.T) {
+	cfg := DefaultConfigFile()
+	cfg.FriendSync.AutoFollow = false
+	cfg.FriendSync.AutoUnfollow = false
+	cfg.FriendSync.Expiry.Enabled = false
+
+	runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{
+		TokenSource:     staticTokenSource{},
+		LiveTokenSource: staticOAuthSource{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.FriendSync != nil {
+		t.Fatalf("expected friend sync disabled, got %#v", runtime.FriendSync)
+	}
+}
+
 func TestLoadConfigFileMigratesVersion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(path, []byte(`

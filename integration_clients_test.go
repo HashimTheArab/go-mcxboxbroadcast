@@ -162,6 +162,32 @@ func TestGalleryClientDoesNotSendAuthToImageURL(t *testing.T) {
 	}
 }
 
+func TestGalleryClientReportsDeleteFailures(t *testing.T) {
+	imagePath := filepath.Join(t.TempDir(), "image.jpg")
+	if err := os.WriteFile(imagePath, []byte("same-image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g := GalleryClient{
+		TokenSource: staticMinecraftTokenSource{},
+		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch {
+			case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/xuid/1"):
+				return response(http.StatusOK, `{"result":{"showcasedImages":[{"id":"keep","url":"https://cdn.example.test/image.jpg"},{"id":"old"}]}}`), nil
+			case req.Method == http.MethodGet && req.URL.Host == "cdn.example.test":
+				return response(http.StatusOK, "same-image"), nil
+			case req.Method == http.MethodDelete && strings.HasSuffix(req.URL.Path, "/old"):
+				return response(http.StatusForbidden, ""), nil
+			default:
+				t.Fatalf("unexpected request %s %s", req.Method, req.URL)
+			}
+			return nil, nil
+		})},
+	}
+	if err := g.SetShowcase(context.Background(), "1", imagePath, true); err == nil {
+		t.Fatal("expected delete failure")
+	}
+}
+
 func TestFriendSyncerFollowsAndUnfollows(t *testing.T) {
 	var followed, unfollowed bool
 	syncer := FriendSyncer{

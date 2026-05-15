@@ -73,10 +73,14 @@ func (g GalleryClient) SetShowcase(ctx context.Context, xuid, imagePath string, 
 		imageID = img.ID
 	}
 	if deleteOther {
+		var deleteErr error
 		for _, img := range images {
 			if img.ID != "" && img.ID != imageID {
-				_ = g.Delete(ctx, img.ID)
+				deleteErr = errors.Join(deleteErr, g.Delete(ctx, img.ID))
 			}
+		}
+		if deleteErr != nil {
+			return fmt.Errorf("delete old gallery images: %w", deleteErr)
 		}
 	}
 	return nil
