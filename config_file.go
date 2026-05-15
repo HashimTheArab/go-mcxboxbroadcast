@@ -71,10 +71,8 @@ type FriendExpiryFile struct {
 }
 
 type NotificationConfig struct {
-	Enabled                  bool   `yaml:"enabled" toml:"enabled"`
-	WebhookURL               string `yaml:"webhookUrl" toml:"webhookUrl"`
-	SessionExpiredMessage    string `yaml:"sessionExpiredMessage" toml:"sessionExpiredMessage"`
-	FriendRestrictionMessage string `yaml:"friendRestrictionMessage" toml:"friendRestrictionMessage"`
+	Enabled    bool   `yaml:"enabled" toml:"enabled"`
+	WebhookURL string `yaml:"webhookUrl" toml:"webhookUrl"`
 }
 
 type GalleryFileConfig struct {
@@ -140,10 +138,7 @@ func DefaultConfigFile() ConfigFile {
 				HistoryPath: "cache/player_history.json",
 			},
 		},
-		Notifications: NotificationConfig{
-			SessionExpiredMessage:    "<!here> Xbox Session expired, sign in again to update it.\n\nUse the following link to sign in: %s\nEnter the code: %s",
-			FriendRestrictionMessage: "%s (%s) has restrictions in place that prevent them from being friends with our account.",
-		},
+		Notifications: NotificationConfig{},
 		Gallery: GalleryFileConfig{
 			Enabled:           true,
 			ImagePath:         "screenshot.jpg",

@@ -39,7 +39,7 @@ func NewMinecraftTokenSource(ctx context.Context, live oauth2.TokenSource, clien
 	if client != nil {
 		env.HTTPClient = client
 	}
-	return env.TokenSource(context.WithoutCancel(ctx), live, service.TokenConfig{}), nil
+	return env.TokenSource(ctx, live, service.TokenConfig{}), nil
 }
 
 type xblTokenSource struct {
