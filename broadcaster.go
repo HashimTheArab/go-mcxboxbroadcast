@@ -280,7 +280,16 @@ func (b *Broadcaster) notify(ctx context.Context, message string) {
 	if b.conf.Notifier == nil {
 		return
 	}
-	if err := b.conf.Notifier.Notify(ctx, message); err != nil {
+	notifyCtx := ctx
+	if notifyCtx == nil || notifyCtx.Err() != nil {
+		notifyCtx = b.ctx
+	}
+	if notifyCtx == nil || notifyCtx.Err() != nil {
+		notifyCtx = context.Background()
+	}
+	notifyCtx, cancel := context.WithTimeout(notifyCtx, 15*time.Second)
+	defer cancel()
+	if err := b.conf.Notifier.Notify(notifyCtx, message); err != nil {
 		b.log.Error("send notification", "err", err)
 	}
 }
@@ -289,16 +298,7 @@ func (b *Broadcaster) notifySessionUpdateFailure(ctx context.Context, err error)
 	if b.conf.SuppressSessionUpdateMessage {
 		return
 	}
-	notifyCtx := b.ctx
-	if notifyCtx == nil || notifyCtx.Err() != nil {
-		notifyCtx = context.Background()
-	}
-	if ctx != nil && ctx.Err() == nil {
-		notifyCtx = ctx
-	}
-	notifyCtx, cancel := context.WithTimeout(notifyCtx, 15*time.Second)
-	defer cancel()
-	b.notify(notifyCtx, "Xbox session update failed: "+err.Error())
+	b.notify(ctx, "Xbox session update failed: "+err.Error())
 }
 
 func (b *Broadcaster) accept() {

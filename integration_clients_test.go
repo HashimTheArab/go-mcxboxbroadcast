@@ -107,6 +107,24 @@ func TestSessionUpdateFailureNotificationUsesLiveContext(t *testing.T) {
 	}
 }
 
+func TestNotifyUsesLiveContextWhenInputContextIsCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var gotErr error
+	b := &Broadcaster{
+		ctx: context.Background(),
+		conf: Config{
+			Notifier: fakeNotifier{notify: func(ctx context.Context, _ string) {
+				gotErr = ctx.Err()
+			}},
+		},
+	}
+	b.notify(ctx, "message")
+	if gotErr != nil {
+		t.Fatalf("notification used canceled context: %v", gotErr)
+	}
+}
+
 func TestGalleryClientUploadsImageWhenConfigured(t *testing.T) {
 	var uploaded, listed bool
 	g := GalleryClient{
