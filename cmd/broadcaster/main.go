@@ -10,11 +10,9 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
-	"time"
 
 	"github.com/HashimTheArab/go-mcxboxbroadcast"
 	"github.com/sandertv/gophertunnel/minecraft/auth"
-	"github.com/sandertv/gophertunnel/minecraft/service"
 	"golang.org/x/oauth2"
 )
 
@@ -54,23 +52,13 @@ func main() {
 	if err := broadcaster.SaveLiveToken(cachePath, tok); err != nil {
 		log.Warn("could not save token cache", "err", err)
 	}
-	var minecraftTokens service.TokenSource
-	if galleryImageExists(baseDir, cfg.Gallery) {
-		tokenCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		minecraftTokens, err = broadcaster.NewMinecraftTokenSource(tokenCtx, live, http.DefaultClient)
-		cancel()
-		if err != nil {
-			log.Warn("minecraft services token source unavailable", "err", err)
-		}
-	}
 
 	runtime, err := cfg.RuntimeConfig(broadcaster.RuntimeConfigInput{
-		TokenSource:          broadcaster.NewXBLTokenSource(ctx, live),
-		LiveTokenSource:      live,
-		MinecraftTokenSource: minecraftTokens,
-		HTTPClient:           http.DefaultClient,
-		Log:                  log,
-		BaseDir:              baseDir,
+		TokenSource:     broadcaster.NewXBLTokenSource(ctx, live),
+		LiveTokenSource: live,
+		HTTPClient:      http.DefaultClient,
+		Log:             log,
+		BaseDir:         baseDir,
 	})
 	if err != nil {
 		log.Error("configure", "err", err)
@@ -142,14 +130,6 @@ func loadAccountToken(path string, out *os.File) (oauth2.TokenSource, error) {
 	return src, broadcaster.SaveLiveToken(path, tok)
 }
 
-func galleryImageExists(base string, gallery broadcaster.GalleryFileConfig) bool {
-	if !gallery.Enabled || gallery.ImagePath == "" {
-		return false
-	}
-	_, err := os.Stat(resolvePath(base, gallery.ImagePath))
-	return err == nil
-}
-
 func subAccountCachePath(base string, account broadcaster.SubAccountFile) (string, error) {
 	if account.CachePath != "" {
 		return resolveConfigPath(base, account.CachePath), nil
@@ -164,13 +144,6 @@ func resolveConfigPath(base, path string) string {
 	if path == "" {
 		return defaultCachePath()
 	}
-	if filepath.IsAbs(path) {
-		return path
-	}
-	return filepath.Join(base, path)
-}
-
-func resolvePath(base, path string) string {
 	if filepath.IsAbs(path) {
 		return path
 	}
