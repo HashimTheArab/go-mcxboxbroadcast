@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 )
 
 type SlackNotifier struct {
@@ -32,7 +33,7 @@ func (s SlackNotifier) Notify(ctx context.Context, message string) error {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := s.client().Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("POST webhook: %w", sanitizeWebhookError(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -46,4 +47,12 @@ func (s SlackNotifier) client() *http.Client {
 		return s.Client
 	}
 	return http.DefaultClient
+}
+
+func sanitizeWebhookError(err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return fmt.Errorf("%s failed", urlErr.Op)
+	}
+	return errors.New("request failed")
 }

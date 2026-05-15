@@ -128,7 +128,8 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	l, err := listenConf.Listen("nethernet", "")
 	if err != nil {
 		b.cancel()
-		return fmt.Errorf("listen nethernet: %w", err)
+		err = errors.Join(fmt.Errorf("listen nethernet: %w", err), b.cleanupPublishedSessions(true))
+		return err
 	}
 	b.listener = l
 	b.started = true
@@ -262,7 +263,16 @@ func (b *Broadcaster) notifySessionUpdateFailure(ctx context.Context, err error)
 	if b.conf.SuppressSessionUpdateMessage {
 		return
 	}
-	b.notify(ctx, "Xbox session update failed: "+err.Error())
+	notifyCtx := b.ctx
+	if notifyCtx == nil || notifyCtx.Err() != nil {
+		notifyCtx = context.Background()
+	}
+	if ctx != nil && ctx.Err() == nil {
+		notifyCtx = ctx
+	}
+	notifyCtx, cancel := context.WithTimeout(notifyCtx, 15*time.Second)
+	defer cancel()
+	b.notify(notifyCtx, "Xbox session update failed: "+err.Error())
 }
 
 func (b *Broadcaster) accept() {

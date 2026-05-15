@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -49,6 +50,17 @@ func TestSlackNotifierErrorDoesNotLeakWebhookURL(t *testing.T) {
 	if strings.Contains(err.Error(), secretURL) || strings.Contains(err.Error(), "SECRET") {
 		t.Fatalf("webhook URL leaked in error: %v", err)
 	}
+
+	n.Client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("network down")
+	})}
+	err = n.Notify(context.Background(), "hello")
+	if err == nil {
+		t.Fatal("expected transport error")
+	}
+	if strings.Contains(err.Error(), secretURL) || strings.Contains(err.Error(), "SECRET") {
+		t.Fatalf("webhook URL leaked in transport error: %v", err)
+	}
 }
 
 func TestSessionUpdateFailureNotificationCanBeSuppressed(t *testing.T) {
@@ -56,7 +68,7 @@ func TestSessionUpdateFailureNotificationCanBeSuppressed(t *testing.T) {
 	b := &Broadcaster{
 		conf: Config{
 			SuppressSessionUpdateMessage: true,
-			Notifier: fakeNotifier{notify: func(string) {
+			Notifier: fakeNotifier{notify: func(context.Context, string) {
 				notified = true
 			}},
 		},
@@ -64,6 +76,24 @@ func TestSessionUpdateFailureNotificationCanBeSuppressed(t *testing.T) {
 	b.notifySessionUpdateFailure(context.Background(), errors.New("boom"))
 	if notified {
 		t.Fatal("session update notification was not suppressed")
+	}
+}
+
+func TestSessionUpdateFailureNotificationUsesLiveContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var gotErr error
+	b := &Broadcaster{
+		ctx: context.Background(),
+		conf: Config{
+			Notifier: fakeNotifier{notify: func(ctx context.Context, _ string) {
+				gotErr = ctx.Err()
+			}},
+		},
+	}
+	b.notifySessionUpdateFailure(ctx, errors.New("boom"))
+	if gotErr != nil {
+		t.Fatalf("notification used expired context: %v", gotErr)
 	}
 }
 
@@ -90,6 +120,35 @@ func TestGalleryClientUploadsImageWhenConfigured(t *testing.T) {
 	}
 	if !listed || !uploaded {
 		t.Fatalf("listed=%v uploaded=%v", listed, uploaded)
+	}
+}
+
+func TestGalleryClientDoesNotSendAuthToImageURL(t *testing.T) {
+	imagePath := filepath.Join(t.TempDir(), "image.jpg")
+	if err := os.WriteFile(imagePath, []byte("same-image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g := GalleryClient{
+		TokenSource: staticMinecraftTokenSource{},
+		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch {
+			case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/xuid/1"):
+				return response(http.StatusOK, `{"result":{"showcasedImages":[{"id":"img","url":"https://cdn.example.test/image.jpg"}]}}`), nil
+			case req.Method == http.MethodGet && req.URL.Host == "cdn.example.test":
+				if req.Header.Get("Authorization") != "" {
+					t.Fatal("authorization header sent to gallery image URL")
+				}
+				return response(http.StatusOK, "same-image"), nil
+			case req.Method == http.MethodPost && req.URL.Path == "/api/v1.0/gallery":
+				t.Fatal("image should have been reused instead of uploaded")
+			default:
+				t.Fatalf("unexpected request %s %s", req.Method, req.URL)
+			}
+			return nil, nil
+		})},
+	}
+	if err := g.SetShowcase(context.Background(), "1", imagePath, true); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -264,10 +323,12 @@ func (f fakeHistoryStore) Clear(_ context.Context, xuid string) error {
 }
 
 type fakeNotifier struct {
-	notify func(string)
+	notify func(context.Context, string)
 }
 
-func (f fakeNotifier) Notify(_ context.Context, message string) error {
-	f.notify(message)
+func (f fakeNotifier) Notify(ctx context.Context, message string) error {
+	if f.notify != nil {
+		f.notify(ctx, message)
+	}
 	return nil
 }
