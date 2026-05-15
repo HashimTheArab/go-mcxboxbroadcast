@@ -235,7 +235,7 @@ func (b *Broadcaster) uploadGallery(ctx context.Context) {
 		src = b.conf.MinecraftTokenSource
 	}
 	if src == nil && b.conf.LiveTokenSource != nil {
-		tokens, err := NewMinecraftTokenSource(ctx, b.conf.LiveTokenSource, b.conf.HTTPClient)
+		tokens, err := newMinecraftTokenSource(ctx, ctx, b.conf.LiveTokenSource, b.conf.HTTPClient)
 		if err != nil {
 			b.log.Warn("minecraft services token source unavailable", "err", err)
 			b.notify(ctx, "Showcase image upload skipped: Minecraft services token source is unavailable.")

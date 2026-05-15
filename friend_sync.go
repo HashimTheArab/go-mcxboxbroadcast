@@ -82,7 +82,11 @@ func (s FriendSyncer) sync(ctx context.Context, expire bool) error {
 				}
 				continue
 			}
-			if ok && lastSeen.Before(time.Now().Add(-time.Duration(s.Config.ExpiryDays)*24*time.Hour)) {
+			expiryDays := s.Config.ExpiryDays
+			if expiryDays <= 0 {
+				expiryDays = 15
+			}
+			if ok && lastSeen.Before(time.Now().Add(-time.Duration(expiryDays)*24*time.Hour)) {
 				if err := s.Client.Unfollow(ctx, p.XUID); err != nil {
 					return err
 				}

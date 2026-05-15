@@ -22,11 +22,25 @@ func NewXBLTokenSource(ctx context.Context, live oauth2.TokenSource) xsapi.Token
 }
 
 func NewMinecraftTokenSource(ctx context.Context, live oauth2.TokenSource, client *http.Client) (service.TokenSource, error) {
+	tokenCtx := context.Background()
+	if ctx == nil {
+		ctx = context.Background()
+	} else {
+		tokenCtx = context.WithoutCancel(ctx)
+	}
+	return newMinecraftTokenSource(ctx, tokenCtx, live, client)
+}
+
+func newMinecraftTokenSource(ctx, tokenCtx context.Context, live oauth2.TokenSource, client *http.Client) (service.TokenSource, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if tokenCtx == nil {
+		tokenCtx = context.Background()
+	}
 	if client != nil {
 		ctx = context.WithValue(ctx, oauth2.HTTPClient, client)
+		tokenCtx = context.WithValue(tokenCtx, oauth2.HTTPClient, client)
 	}
 	discovery, err := service.Discover(ctx, service.ApplicationTypeMinecraftPE, protocol.CurrentVersion)
 	if err != nil {
@@ -39,7 +53,7 @@ func NewMinecraftTokenSource(ctx context.Context, live oauth2.TokenSource, clien
 	if client != nil {
 		env.HTTPClient = client
 	}
-	return env.TokenSource(ctx, live, service.TokenConfig{}), nil
+	return env.TokenSource(tokenCtx, live, service.TokenConfig{}), nil
 }
 
 type xblTokenSource struct {

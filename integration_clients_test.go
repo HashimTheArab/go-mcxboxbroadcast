@@ -262,6 +262,24 @@ func TestFriendSyncerExpiresInactiveFriends(t *testing.T) {
 	}
 }
 
+func TestFriendSyncerDefaultsExpiryDays(t *testing.T) {
+	var unfollowed bool
+	syncer := FriendSyncer{
+		Client: fakeFriendClient{
+			people:   []Person{{XUID: "1", Gamertag: "Recent", IsFollowedByCaller: true}},
+			unfollow: func(string) { unfollowed = true },
+		},
+		History: fakeHistoryStore{seen: map[string]time.Time{"1": time.Now().Add(-24 * time.Hour)}},
+		Config:  FriendSyncConfig{ExpiryEnabled: true},
+	}
+	if err := syncer.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if unfollowed {
+		t.Fatal("zero expiry days should default instead of pruning recent friends")
+	}
+}
+
 func TestFileHistoryStoreRecordsAndClearsLastSeen(t *testing.T) {
 	store := NewFileHistoryStore(filepath.Join(t.TempDir(), "player_history.json"))
 	when := time.Now().Add(-time.Hour).Truncate(time.Second)
