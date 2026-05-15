@@ -2,6 +2,7 @@ package broadcaster
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -30,6 +31,39 @@ func TestSlackNotifierPostsConfiguredMessage(t *testing.T) {
 	}
 	if !strings.Contains(body, "hello") {
 		t.Fatalf("message missing from body %q", body)
+	}
+}
+
+func TestSlackNotifierErrorDoesNotLeakWebhookURL(t *testing.T) {
+	secretURL := "https://hooks.slack.com/services/TOKEN/SECRET"
+	n := SlackNotifier{
+		WebhookURL: secretURL,
+		Client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return response(http.StatusForbidden, ""), nil
+		})},
+	}
+	err := n.Notify(context.Background(), "hello")
+	if err == nil {
+		t.Fatal("expected webhook error")
+	}
+	if strings.Contains(err.Error(), secretURL) || strings.Contains(err.Error(), "SECRET") {
+		t.Fatalf("webhook URL leaked in error: %v", err)
+	}
+}
+
+func TestSessionUpdateFailureNotificationCanBeSuppressed(t *testing.T) {
+	var notified bool
+	b := &Broadcaster{
+		conf: Config{
+			SuppressSessionUpdateMessage: true,
+			Notifier: fakeNotifier{notify: func(string) {
+				notified = true
+			}},
+		},
+	}
+	b.notifySessionUpdateFailure(context.Background(), errors.New("boom"))
+	if notified {
+		t.Fatal("session update notification was not suppressed")
 	}
 }
 
@@ -226,5 +260,14 @@ func (f fakeHistoryStore) LastSeen(_ context.Context, xuid string) (time.Time, b
 
 func (f fakeHistoryStore) Clear(_ context.Context, xuid string) error {
 	delete(f.seen, xuid)
+	return nil
+}
+
+type fakeNotifier struct {
+	notify func(string)
+}
+
+func (f fakeNotifier) Notify(_ context.Context, message string) error {
+	f.notify(message)
 	return nil
 }

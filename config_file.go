@@ -232,10 +232,11 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 			QueryFallback:    c.Session.ConfigFallback,
 			WebQueryClient:   in.HTTPClient,
 		},
-		UpdateInterval: time.Duration(c.Session.UpdateInterval) * time.Second,
-		HTTPClient:     in.HTTPClient,
-		Log:            in.Log,
-		FriendSync:     c.FriendSync.runtime(),
+		UpdateInterval:               time.Duration(c.Session.UpdateInterval) * time.Second,
+		HTTPClient:                   in.HTTPClient,
+		Log:                          in.Log,
+		SuppressSessionUpdateMessage: c.SuppressSessionUpdateMessage,
+		FriendSync:                   c.FriendSync.runtime(),
 	}
 	if c.FriendSync.Expiry.Enabled {
 		cfg.FriendHistory = NewFileHistoryStore(resolvePath(in.BaseDir, c.FriendSync.Expiry.HistoryPath))

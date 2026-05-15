@@ -43,6 +43,9 @@ type Config struct {
 	Gallery *GalleryConfig
 	// Notifier receives operator-facing notifications.
 	Notifier Notifier
+	// SuppressSessionUpdateMessage suppresses operator-facing session update
+	// notifications.
+	SuppressSessionUpdateMessage bool
 	// FriendSync controls optional follower/friend synchronization.
 	FriendSync *FriendSyncConfig
 	// FriendHistory records player activity for friend expiry.

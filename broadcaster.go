@@ -95,6 +95,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	}
 	if err := b.startSubAccounts(b.ctx); err != nil {
 		b.cancel()
+		err = errors.Join(err, b.cleanupPublishedSessions(true))
 		return err
 	}
 	b.uploadGallery(b.ctx)
@@ -257,6 +258,13 @@ func (b *Broadcaster) notify(ctx context.Context, message string) {
 	}
 }
 
+func (b *Broadcaster) notifySessionUpdateFailure(ctx context.Context, err error) {
+	if b.conf.SuppressSessionUpdateMessage {
+		return
+	}
+	b.notify(ctx, "Xbox session update failed: "+err.Error())
+}
+
 func (b *Broadcaster) accept() {
 	defer close(b.done)
 	for {
@@ -305,7 +313,7 @@ func (b *Broadcaster) updateLoop() {
 			ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
 			if err := b.Update(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				b.log.Error("update session", "err", err)
-				b.notify(ctx, "Xbox session update failed: "+err.Error())
+				b.notifySessionUpdateFailure(ctx, err)
 			}
 			cancel()
 		case <-b.ctx.Done():
@@ -328,6 +336,18 @@ func (b *Broadcaster) Update(ctx context.Context) error {
 	return b.announcer.Announce(ctx, status)
 }
 
+func (b *Broadcaster) cleanupPublishedSessions(closeAnnouncer bool) error {
+	var err error
+	for _, s := range b.subSessions {
+		err = errors.Join(err, s.Close())
+	}
+	b.subSessions = nil
+	if closeAnnouncer && b.announcer != nil {
+		err = errors.Join(err, b.announcer.Close())
+	}
+	return err
+}
+
 // Close stops the listener and removes the Xbox session.
 func (b *Broadcaster) Close() error {
 	b.mu.Lock()
@@ -337,10 +357,7 @@ func (b *Broadcaster) Close() error {
 	}
 	b.cancel()
 	err := b.listener.Close()
-	for _, s := range b.subSessions {
-		err = errors.Join(err, s.Close())
-	}
-	b.subSessions = nil
+	err = errors.Join(err, b.cleanupPublishedSessions(false))
 	if b.signaling != nil {
 		if c, ok := b.signaling.(interface{ Close() error }); ok {
 			err = errors.Join(err, c.Close())

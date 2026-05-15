@@ -58,6 +58,9 @@ func TestConfigFileToConfigMapsOperatorSettings(t *testing.T) {
 	if runtime.UpdateInterval != 45*time.Second {
 		t.Fatalf("unexpected runtime interval %s", runtime.UpdateInterval)
 	}
+	if runtime.SuppressSessionUpdateMessage {
+		t.Fatal("unexpected suppressed session update message")
+	}
 	if runtime.Status.Broadcast != int32(BroadcastSettingFriendsOnly) {
 		t.Fatalf("unexpected broadcast setting %d", runtime.Status.Broadcast)
 	}
@@ -66,6 +69,22 @@ func TestConfigFileToConfigMapsOperatorSettings(t *testing.T) {
 	}
 	if runtime.FriendHistory == nil {
 		t.Fatal("friend history store not mapped")
+	}
+}
+
+func TestConfigFileMapsSuppressSessionUpdateMessage(t *testing.T) {
+	cfg := DefaultConfigFile()
+	cfg.SuppressSessionUpdateMessage = true
+
+	runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{
+		TokenSource:     staticTokenSource{},
+		LiveTokenSource: staticOAuthSource{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !runtime.SuppressSessionUpdateMessage {
+		t.Fatal("suppress session update message was not mapped")
 	}
 }
 

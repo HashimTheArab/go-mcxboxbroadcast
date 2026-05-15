@@ -36,7 +36,7 @@ func (s SlackNotifier) Notify(ctx context.Context, message string) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("%s %s: %s", req.Method, req.URL, resp.Status)
+		return fmt.Errorf("%s webhook: %s", req.Method, resp.Status)
 	}
 	return nil
 }
