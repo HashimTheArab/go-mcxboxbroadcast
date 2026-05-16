@@ -32,6 +32,14 @@ The config exposes the same operator-facing areas as MCXboxBroadcast:
 - Slack/Discord-compatible webhook notifications
 - primary and sub-account token cache paths
 
+## Acknowledgements
+
+This project is a Go port inspired by the original
+[MCXboxBroadcast](https://github.com/rtm516/MCXboxBroadcast) work and the
+[GeyserMC](https://geysermc.org/) ecosystem. Credit goes to the GeyserMC
+project and contributors for the Geyser Bedrock listener behavior and
+configuration model that this implementation follows.
+
 ## Library
 
 ```go
