@@ -31,6 +31,19 @@ func TestLoadConfigFileCreatesDefaults(t *testing.T) {
 	}
 }
 
+func TestExampleConfigLoads(t *testing.T) {
+	cfg, err := LoadConfigFile("config.example.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ConfigVersion != CurrentConfigVersion {
+		t.Fatalf("unexpected config version %d", cfg.ConfigVersion)
+	}
+	if cfg.Gallery.ImagePath != "screenshot.jpg" {
+		t.Fatalf("unexpected gallery image path %q", cfg.Gallery.ImagePath)
+	}
+}
+
 func TestConfigFileToConfigMapsOperatorSettings(t *testing.T) {
 	cfg := DefaultConfigFile()
 	cfg.Session.UpdateInterval = 45

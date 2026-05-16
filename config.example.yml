@@ -1,0 +1,45 @@
+configVersion: 2
+debugMode: false
+suppressSessionUpdateMessage: false
+
+session:
+  remoteAddress: auto
+  remotePort: auto
+  updateInterval: 30
+  queryServer: true
+  webQueryFallback: false
+  configFallback: true
+  broadcastSetting: 3
+  joinability: JoinableByFriends
+  worldType: Survival
+  sessionInfo:
+    hostName: Minecraft Server
+    worldName: Minecraft World
+    players: 1
+    maxPlayers: 20
+    ip: play.example.net
+    port: 19132
+
+friendSync:
+  updateInterval: 60
+  autoFollow: true
+  autoUnfollow: true
+  initialInvite: true
+  expiry:
+    enabled: true
+    days: 15
+    check: 1800
+    historyPath: cache/player_history.json
+
+notifications:
+  enabled: false
+  webhookUrl: ""
+
+gallery:
+  enabled: true
+  imagePath: screenshot.jpg
+  deleteOtherImages: true
+
+accounts:
+  primaryCachePath: cache/live_token.json
+  subAccounts: []

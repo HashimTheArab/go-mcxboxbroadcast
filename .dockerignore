@@ -1,0 +1,11 @@
+.git
+.github
+.dockerignore
+Dockerfile
+README.md
+coverage.out
+dist
+tmp
+cache
+config.yml
+*.test

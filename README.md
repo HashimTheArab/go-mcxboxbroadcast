@@ -82,3 +82,20 @@ defer b.Close()
 
 Contexts are accepted for start, update, signaling setup, announcement, and
 shutdown-sensitive operations.
+
+## Docker
+
+The image runs the CLI with `/opt/app/config/config.yml` as the default config
+path. Mount that directory to persist the generated config, auth cache, player
+history, and gallery assets:
+
+```sh
+docker run --rm -it \
+  -v "$PWD/mcxboxbroadcast:/opt/app/config" \
+  ghcr.io/hashimthearab/go-mcxboxbroadcast:latest
+```
+
+The repo includes `config.example.yml` with the same defaults the CLI writes on
+first run. `gallery.imagePath` is resolved relative to the config file, so with
+the Docker default config path users can place `screenshot.jpg` in the mounted
+`/opt/app/config` directory to have it uploaded as the showcased image.
