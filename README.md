@@ -10,8 +10,10 @@ Go-first building blocks:
 
 - `github.com/df-mc/go-xsapi` for Xbox Live MPSD/RTA session publishing.
 - `github.com/df-mc/go-nethernet` for NetherNet/WebRTC listener support.
-- the confirmed-stable `hashimthearab/gophertunnel` `lunar` branch for
-  NetherNet, signaling, room announcements, and auth helpers.
+- `hashimthearab/gophertunnel` `lunar` branch for NetherNet, signaling, room
+  announcements, and auth helpers. This should be updated to the official
+  `sandertv/gophertunnel` once it supports Xbox friend-list NetherNet
+  signaling.
 - `FriendClient` for the Xbox follower/social endpoints used by friend sync.
 
 ## CLI
