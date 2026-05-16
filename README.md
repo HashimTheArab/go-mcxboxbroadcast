@@ -4,8 +4,9 @@
 friend-list world and transfers clients that join the published NetherNet
 session to the configured Bedrock server.
 
-The library is modelled after MCXboxBroadcast while using Go-first building
-blocks:
+The library is modelled after
+[MCXboxBroadcast](https://github.com/rtm516/MCXboxBroadcast) while using
+Go-first building blocks:
 
 - `github.com/df-mc/go-xsapi` for Xbox Live MPSD/RTA session publishing.
 - `github.com/df-mc/go-nethernet` for NetherNet/WebRTC listener support.
