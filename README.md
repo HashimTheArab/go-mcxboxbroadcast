@@ -15,6 +15,14 @@ Go-first building blocks:
   `sandertv/gophertunnel` once it supports Xbox friend-list NetherNet
   signaling.
 
+## Acknowledgements
+
+This project is a Go port inspired by the original
+[MCXboxBroadcast](https://github.com/rtm516/MCXboxBroadcast) work and the
+[GeyserMC](https://geysermc.org/) ecosystem. Credit goes to the GeyserMC
+project and contributors for the Geyser Bedrock listener behavior and
+configuration model that this implementation follows.
+
 ## CLI
 
 ```sh
@@ -34,13 +42,19 @@ The config exposes the same operator-facing areas as MCXboxBroadcast:
 - Slack/Discord-compatible webhook notifications
 - primary and sub-account token cache paths
 
-## Acknowledgements
+## Docker
 
-This project is a Go port inspired by the original
-[MCXboxBroadcast](https://github.com/rtm516/MCXboxBroadcast) work and the
-[GeyserMC](https://geysermc.org/) ecosystem. Credit goes to the GeyserMC
-project and contributors for the Geyser Bedrock listener behavior and
-configuration model that this implementation follows.
+The standalone container is published at
+`ghcr.io/hashimthearab/go-mcxboxbroadcast:latest`.
+
+```sh
+docker run --rm -it -v /path/to/config:/opt/app/config ghcr.io/hashimthearab/go-mcxboxbroadcast:latest
+```
+
+The mounted config directory is where the app reads or creates `config.yml` and
+stores token cache, player history, and gallery assets. With the default
+configuration, putting `screenshot.jpg` in that directory makes it the showcased
+image.
 
 ## Library
 
@@ -82,17 +96,3 @@ defer b.Close()
 
 Contexts are accepted for start, update, signaling setup, announcement, and
 shutdown-sensitive operations.
-
-## Docker
-
-There is a Docker image available for the standalone version of the tool, this
-can be found at `ghcr.io/hashimthearab/go-mcxboxbroadcast:latest`.
-
-```sh
-docker run --rm -it -v /path/to/config:/opt/app/config ghcr.io/hashimthearab/go-mcxboxbroadcast:latest
-```
-
-Mounting `/opt/app/config` persists the generated config, auth cache, player
-history, and gallery image. `gallery.imagePath` is resolved relative to the
-config file, so users can place `screenshot.jpg` in that mounted directory to
-have it uploaded as the showcased image.
