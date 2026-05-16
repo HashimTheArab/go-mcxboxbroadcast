@@ -19,7 +19,10 @@ func (s SlackNotifier) Notify(ctx context.Context, message string) error {
 	if s.WebhookURL == "" {
 		return errors.New("webhook URL is empty")
 	}
-	body, err := json.Marshal(map[string]string{"text": message})
+	body, err := json.Marshal(map[string]string{
+		"text":    message,
+		"content": message,
+	})
 	if err != nil {
 		return err
 	}

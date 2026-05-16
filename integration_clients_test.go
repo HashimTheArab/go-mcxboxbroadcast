@@ -2,6 +2,7 @@ package broadcaster
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -33,6 +34,13 @@ func TestSlackNotifierPostsConfiguredMessage(t *testing.T) {
 	}
 	if !strings.Contains(body, "hello") {
 		t.Fatalf("message missing from body %q", body)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["text"] != "hello" || payload["content"] != "hello" {
+		t.Fatalf("unexpected webhook payload %#v", payload)
 	}
 }
 
