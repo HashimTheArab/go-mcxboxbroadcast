@@ -14,7 +14,6 @@ Go-first building blocks:
   announcements, and auth helpers. This should be updated to the official
   `sandertv/gophertunnel` once it supports Xbox friend-list NetherNet
   signaling.
-- `FriendClient` for the Xbox follower/social endpoints used by friend sync.
 
 ## CLI
 
