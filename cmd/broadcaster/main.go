@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -12,9 +14,32 @@ import (
 	"syscall"
 
 	"github.com/HashimTheArab/go-mcxboxbroadcast"
+	"github.com/df-mc/go-xsapi"
 	"github.com/sandertv/gophertunnel/minecraft/auth"
 	"golang.org/x/oauth2"
 )
+
+type commandOptions struct {
+	ConfigPath string
+	Debug      bool
+}
+
+type commandBroadcaster interface {
+	Start(context.Context) error
+	Close() error
+}
+
+type commandDeps struct {
+	Stdout             io.Writer
+	HTTPClient         *http.Client
+	LoadConfig         func(string) (broadcaster.ConfigFile, error)
+	LoadLiveToken      func(string) (*oauth2.Token, error)
+	NewLiveTokenSource func(*oauth2.Token, io.Writer) oauth2.TokenSource
+	SaveLiveToken      func(string, *oauth2.Token) error
+	LoadAccountToken   func(string, io.Writer) (oauth2.TokenSource, error)
+	NewXBLTokenSource  func(context.Context, oauth2.TokenSource) xsapi.TokenSource
+	NewBroadcaster     func(broadcaster.Config) (commandBroadcaster, error)
+}
 
 func main() {
 	var (
@@ -23,90 +48,150 @@ func main() {
 	)
 	flag.Parse()
 
-	cfg, err := broadcaster.LoadConfigFile(*configPath)
-	if err != nil {
-		slog.Error("load config", "err", err)
-		os.Exit(1)
-	}
-	level := slog.LevelInfo
-	if *debug || cfg.DebugMode {
-		level = slog.LevelDebug
-	}
-	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	baseDir := filepath.Dir(*configPath)
+	if err := runBroadcasterCommand(ctx, commandOptions{ConfigPath: *configPath, Debug: *debug}, defaultCommandDeps()); err != nil {
+		slog.Error("broadcaster", "err", err)
+		os.Exit(1)
+	}
+}
+
+func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps commandDeps) error {
+	deps = deps.withDefaults()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if opts.ConfigPath == "" {
+		opts.ConfigPath = "config.yml"
+	}
+	cfg, err := deps.LoadConfig(opts.ConfigPath)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	level := slog.LevelInfo
+	if opts.Debug || cfg.DebugMode {
+		level = slog.LevelDebug
+	}
+	log := slog.New(slog.NewTextHandler(deps.Stdout, &slog.HandlerOptions{Level: level}))
+
+	baseDir := filepath.Dir(opts.ConfigPath)
 	cachePath := resolveConfigPath(baseDir, cfg.Accounts.PrimaryCachePath)
-	tok, err := broadcaster.LoadLiveToken(cachePath)
+	if err := validateSubAccountCachePaths(baseDir, cachePath, cfg.Accounts.SubAccounts); err != nil {
+		return err
+	}
+
+	tok, err := deps.LoadLiveToken(cachePath)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		log.Warn("could not load token cache", "err", err)
 	}
-	live := auth.RefreshTokenSourceWriter(tok, os.Stdout)
+	live := deps.NewLiveTokenSource(tok, deps.Stdout)
 	tok, err = live.Token()
 	if err != nil {
-		log.Error("authenticate", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("authenticate: %w", err)
 	}
-	if err := broadcaster.SaveLiveToken(cachePath, tok); err != nil {
+	if err := deps.SaveLiveToken(cachePath, tok); err != nil {
 		log.Warn("could not save token cache", "err", err)
 	}
 
 	runtime, err := cfg.RuntimeConfig(broadcaster.RuntimeConfigInput{
-		TokenSource:     broadcaster.NewXBLTokenSource(ctx, live),
+		TokenSource:     deps.NewXBLTokenSource(ctx, live),
 		LiveTokenSource: live,
-		HTTPClient:      http.DefaultClient,
+		HTTPClient:      deps.HTTPClient,
 		Log:             log,
 		BaseDir:         baseDir,
 	})
 	if err != nil {
-		log.Error("configure", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("configure: %w", err)
 	}
-	accountCachePaths := map[string]string{cachePath: "primary"}
 	for _, account := range cfg.Accounts.SubAccounts {
 		if !account.Enabled {
 			continue
 		}
 		subCachePath, err := subAccountCachePath(baseDir, account)
 		if err != nil {
-			log.Error("configure sub-account", "id", account.ID, "err", err)
-			os.Exit(1)
+			return fmt.Errorf("configure sub-account %q: %w", account.ID, err)
 		}
-		if owner, ok := accountCachePaths[subCachePath]; ok {
-			log.Error("duplicate account cache path", "id", account.ID, "owner", owner, "path", subCachePath)
-			os.Exit(1)
-		}
-		accountCachePaths[subCachePath] = account.ID
-		subLive, err := loadAccountToken(subCachePath, os.Stdout)
+		subLive, err := deps.LoadAccountToken(subCachePath, deps.Stdout)
 		if err != nil {
-			log.Error("authenticate sub-account", "id", account.ID, "err", err)
-			os.Exit(1)
+			return fmt.Errorf("authenticate sub-account %q: %w", account.ID, err)
 		}
 		runtime.SubAccounts = append(runtime.SubAccounts, broadcaster.SubAccountConfig{
 			ID:          account.ID,
 			Enabled:     true,
-			TokenSource: broadcaster.NewXBLTokenSource(ctx, subLive),
+			TokenSource: deps.NewXBLTokenSource(ctx, subLive),
 		})
 	}
 
-	b, err := broadcaster.New(runtime)
+	b, err := deps.NewBroadcaster(runtime)
 	if err != nil {
-		log.Error("configure", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("configure broadcaster: %w", err)
 	}
 	if err := b.Start(ctx); err != nil {
-		log.Error("start", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("start: %w", err)
 	}
 	log.Info("broadcasting", "target", runtime.Server.Address())
 
 	<-ctx.Done()
 	if err := b.Close(); err != nil {
-		log.Error("close", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("close: %w", err)
 	}
+	return nil
+}
+
+func defaultCommandDeps() commandDeps {
+	return commandDeps{}
+}
+
+func (d commandDeps) withDefaults() commandDeps {
+	if d.Stdout == nil {
+		d.Stdout = os.Stdout
+	}
+	if d.HTTPClient == nil {
+		d.HTTPClient = http.DefaultClient
+	}
+	if d.LoadConfig == nil {
+		d.LoadConfig = broadcaster.LoadConfigFile
+	}
+	if d.LoadLiveToken == nil {
+		d.LoadLiveToken = broadcaster.LoadLiveToken
+	}
+	if d.NewLiveTokenSource == nil {
+		d.NewLiveTokenSource = auth.RefreshTokenSourceWriter
+	}
+	if d.SaveLiveToken == nil {
+		d.SaveLiveToken = broadcaster.SaveLiveToken
+	}
+	if d.LoadAccountToken == nil {
+		d.LoadAccountToken = loadAccountToken
+	}
+	if d.NewXBLTokenSource == nil {
+		d.NewXBLTokenSource = broadcaster.NewXBLTokenSource
+	}
+	if d.NewBroadcaster == nil {
+		d.NewBroadcaster = func(conf broadcaster.Config) (commandBroadcaster, error) {
+			return broadcaster.New(conf)
+		}
+	}
+	return d
+}
+
+func validateSubAccountCachePaths(base, primaryCachePath string, accounts []broadcaster.SubAccountFile) error {
+	owners := map[string]string{primaryCachePath: "primary"}
+	for _, account := range accounts {
+		if !account.Enabled {
+			continue
+		}
+		subCachePath, err := subAccountCachePath(base, account)
+		if err != nil {
+			return fmt.Errorf("configure sub-account %q: %w", account.ID, err)
+		}
+		if owner, ok := owners[subCachePath]; ok {
+			return fmt.Errorf("duplicate account cache path for %q and %q: %s", owner, account.ID, subCachePath)
+		}
+		owners[subCachePath] = account.ID
+	}
+	return nil
 }
 
 func defaultCachePath() string {
@@ -117,7 +202,7 @@ func defaultCachePath() string {
 	return filepath.Join(dir, "mcxboxbroadcast-go", "live_token.json")
 }
 
-func loadAccountToken(path string, out *os.File) (oauth2.TokenSource, error) {
+func loadAccountToken(path string, out io.Writer) (oauth2.TokenSource, error) {
 	tok, err := broadcaster.LoadLiveToken(path)
 	if err != nil {
 		tok = nil

@@ -26,11 +26,12 @@ type Broadcaster struct {
 	conf Config
 	log  *slog.Logger
 
-	announcer   *room.XBLAnnouncer
-	listener    *minecraft.Listener
-	signaling   nethernet.Signaling
-	sessionRef  mpsd.SessionReference
-	subSessions []*mpsd.Session
+	announcer        room.Announcer
+	listener         *minecraft.Listener
+	signaling        nethernet.Signaling
+	sessionRef       mpsd.SessionReference
+	subSessions      []*mpsd.Session
+	announcerFactory func(*Broadcaster) room.Announcer
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -91,7 +92,8 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	b.announcer = b.newAnnouncer()
 	if err := b.announcer.Announce(b.ctx, status); err != nil {
 		b.cancel()
-		return fmt.Errorf("announce session: %w", err)
+		err = errors.Join(fmt.Errorf("announce session: %w", err), b.cleanupStartupFailure(true))
+		return err
 	}
 	if err := b.startSubAccounts(b.ctx); err != nil {
 		b.cancel()
@@ -145,8 +147,8 @@ func (b *Broadcaster) friendSyncer() FriendSyncer {
 		History: b.conf.FriendHistory,
 		Log:     b.log,
 	}
-	if b.announcer != nil && b.announcer.Session != nil {
-		syncer.Inviter = sessionInviter{session: b.announcer.Session}
+	if announcer, ok := b.announcer.(*room.XBLAnnouncer); ok && announcer.Session != nil {
+		syncer.Inviter = sessionInviter{session: announcer.Session}
 	}
 	return syncer
 }
@@ -187,7 +189,10 @@ func (b *Broadcaster) signalingFor(ctx context.Context) (nethernet.Signaling, er
 	return d.DialContext(ctx, b.conf.LiveTokenSource)
 }
 
-func (b *Broadcaster) newAnnouncer() *room.XBLAnnouncer {
+func (b *Broadcaster) newAnnouncer() room.Announcer {
+	if b.announcerFactory != nil {
+		return b.announcerFactory(b)
+	}
 	ref := mpsd.SessionReference{
 		ServiceConfigID: serviceConfigUUID,
 		TemplateName:    TemplateName,
