@@ -372,6 +372,32 @@ func TestStartupFailureCleanupClosesSignaling(t *testing.T) {
 	}
 }
 
+func TestStartCleansUpWhenPrimaryAnnounceFails(t *testing.T) {
+	announceErr := errors.New("announce failed")
+	sig := &fakeSignaling{}
+	announcer := &fakeAnnouncer{announceErr: announceErr}
+	b := &Broadcaster{
+		conf: Config{
+			Server:    ServerInfo{Host: "127.0.0.1", Port: 19132},
+			Signaling: sig,
+			Status:    Status{HostName: "Host", WorldName: "World"},
+		},
+		announcerFactory: func(*Broadcaster) room.Announcer {
+			return announcer
+		},
+	}
+	err := b.Start(context.Background())
+	if !errors.Is(err, announceErr) {
+		t.Fatalf("Start() error = %v, want announce error", err)
+	}
+	if !announcer.closed {
+		t.Fatal("announcer was not closed")
+	}
+	if !sig.closed {
+		t.Fatal("signaling was not closed")
+	}
+}
+
 func TestQueryStatusFallsBackToWeb(t *testing.T) {
 	status, err := queryStatusWithFallback(context.Background(), QueryOptions{
 		Address:            "127.0.0.1:1",
@@ -453,6 +479,20 @@ func (f fakeNotifier) Notify(ctx context.Context, message string) error {
 	if f.notify != nil {
 		f.notify(ctx, message)
 	}
+	return nil
+}
+
+type fakeAnnouncer struct {
+	announceErr error
+	closed      bool
+}
+
+func (f *fakeAnnouncer) Announce(context.Context, room.Status) error {
+	return f.announceErr
+}
+
+func (f *fakeAnnouncer) Close() error {
+	f.closed = true
 	return nil
 }
 
