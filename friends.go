@@ -236,8 +236,15 @@ func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]Person
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, c.responseError(req, resp)
 	}
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if len(bytes.TrimSpace(responseBody)) == 0 {
+		return pending.People, nil
+	}
 	var accepted acceptFriendRequestsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&accepted); err != nil {
+	if err := json.Unmarshal(responseBody, &accepted); err != nil {
 		return nil, err
 	}
 	out := make([]Person, 0, len(accepted.UpdatedPeople))

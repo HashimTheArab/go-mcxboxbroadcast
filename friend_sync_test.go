@@ -40,6 +40,28 @@ func TestFriendSyncerAcceptsPendingIncomingRequests(t *testing.T) {
 	}
 }
 
+func TestFriendSyncerContinuesAutoFollowWhenPendingAcceptFails(t *testing.T) {
+	acceptErr := errors.New("pending requests unavailable")
+	client := syncFriendClient{
+		people: []Person{{XUID: "1", Gamertag: "Follower", IsFollowingCaller: true}},
+		accept: func(context.Context) ([]Person, error) {
+			return nil, acceptErr
+		},
+	}
+	syncer := FriendSyncer{
+		Client: &client,
+		Config: FriendSyncConfig{
+			AutoFollow: true,
+		},
+	}
+	if err := syncer.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync() error = %v, want nil", err)
+	}
+	if client.followCalls != 1 {
+		t.Fatalf("follow calls = %d, want 1", client.followCalls)
+	}
+}
+
 func TestFriendSyncerStopsAutoFollowPassWhenFriendListIsFull(t *testing.T) {
 	var log bytes.Buffer
 	fullErr := classifiedSyncErr{kind: "friend_list_full"}

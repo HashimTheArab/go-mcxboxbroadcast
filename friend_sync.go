@@ -101,7 +101,10 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 				}
 			}
 			if err != nil {
-				return err
+				if shouldStopPendingFriendAccept(err) {
+					return err
+				}
+				s.logPendingFriendAcceptError(err)
 			}
 		}
 	}
@@ -169,6 +172,16 @@ func (s FriendSyncer) logFriendSyncError(op string, p Person, err error) {
 	case FriendErrorKindRestricted:
 		s.Log.Warn("friend restricted while syncing friends", "op", op, "xuid", p.XUID, "gamertag", p.Gamertag, "err", err)
 	}
+}
+
+func (s FriendSyncer) logPendingFriendAcceptError(err error) {
+	if s.Log != nil {
+		s.Log.Warn("accept pending friend requests", "err", err)
+	}
+}
+
+func shouldStopPendingFriendAccept(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || retryDelay(err) > 0
 }
 
 func friendErrorKind(err error) string {

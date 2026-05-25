@@ -224,6 +224,31 @@ func TestFriendClientAcceptPendingFriendRequests(t *testing.T) {
 	}
 }
 
+func TestFriendClientAcceptPendingFriendRequestsAllowsNoContentSuccess(t *testing.T) {
+	client := FriendClient{
+		TokenSource: staticTokenSource{},
+		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.Method {
+			case http.MethodGet:
+				return response(http.StatusOK, `{"people":[{"xuid":"1","gamertag":"One"},{"xuid":"2","gamertag":"Two"}]}`), nil
+			case http.MethodPost:
+				return response(http.StatusNoContent, ""), nil
+			default:
+				t.Fatalf("unexpected request %s %s", req.Method, req.URL)
+			}
+			return nil, nil
+		})},
+	}
+
+	accepted, err := client.AcceptPendingFriendRequests(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accepted) != 2 || accepted[0].XUID != "1" || accepted[1].XUID != "2" {
+		t.Fatalf("accepted people = %#v", accepted)
+	}
+}
+
 func TestFriendClientAcceptPendingFriendRequestsReturnsRetryAfterError(t *testing.T) {
 	client := FriendClient{
 		TokenSource: staticTokenSource{},
