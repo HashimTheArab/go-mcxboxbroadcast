@@ -133,11 +133,25 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 
 	go b.accept()
 	go b.updateLoop()
+	for _, client := range b.presenceClients() {
+		go client.Run(b.ctx, b.log)
+	}
 	go b.uploadGalleryWithTimeout()
 	if b.conf.FriendSync != nil {
 		go b.friendSyncer().Run(b.ctx)
 	}
 	return nil
+}
+
+func (b *Broadcaster) presenceClients() []PresenceClient {
+	clients := []PresenceClient{{TokenSource: b.conf.TokenSource, Client: b.conf.HTTPClient}}
+	for _, account := range b.conf.SubAccounts {
+		if !account.Enabled || account.TokenSource == nil {
+			continue
+		}
+		clients = append(clients, PresenceClient{TokenSource: account.TokenSource, Client: b.conf.HTTPClient})
+	}
+	return clients
 }
 
 func (b *Broadcaster) friendSyncer() FriendSyncer {
