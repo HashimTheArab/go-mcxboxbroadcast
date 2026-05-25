@@ -2,6 +2,7 @@ package broadcaster
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,7 +13,9 @@ import (
 	"time"
 
 	"github.com/df-mc/go-nethernet"
+	"github.com/google/uuid"
 	"github.com/sandertv/gophertunnel/minecraft/room"
+	"github.com/sandertv/gophertunnel/minecraft/service"
 )
 
 func TestSlackNotifierPostsConfiguredMessage(t *testing.T) {
@@ -356,6 +359,80 @@ func TestMinecraftStatusProviderMirrorsConfiguredProvider(t *testing.T) {
 	}
 }
 
+func TestSignalingConnectionAnnouncerPublishesJSONRPCConnection(t *testing.T) {
+	pmsgID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
+	inner := &fakeAnnouncer{}
+	announcer := signalingConnectionAnnouncer{
+		Announcer: inner,
+		connection: room.Connection{
+			ConnectionType: room.ConnectionTypeJSONRPCSignaling,
+			NetherNetID:    room.NetherNetID("123456789"),
+			PmsgID:         pmsgID,
+		},
+	}
+
+	err := announcer.Announce(context.Background(), room.Status{
+		SupportedConnections: []room.Connection{{
+			ConnectionType: room.ConnectionTypeWebSocketsWebRTCSignaling,
+			NetherNetID:    room.NetherNetID("old"),
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inner.status.SupportedConnections) != 1 {
+		t.Fatalf("unexpected connections: %#v", inner.status.SupportedConnections)
+	}
+	got := inner.status.SupportedConnections[0]
+	if got.ConnectionType != room.ConnectionTypeJSONRPCSignaling {
+		t.Fatalf("connection type = %d, want %d", got.ConnectionType, room.ConnectionTypeJSONRPCSignaling)
+	}
+	if got.NetherNetID != room.NetherNetID("123456789") {
+		t.Fatalf("nethernet id = %q", got.NetherNetID)
+	}
+	if got.PmsgID != pmsgID {
+		t.Fatalf("pmsg id = %s", got.PmsgID)
+	}
+}
+
+func TestStartAdvertisesJSONRPCConnectionWhenConfigured(t *testing.T) {
+	pmsgID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
+	sig := &fakeSignaling{networkID: "123456789"}
+	announcer := &fakeAnnouncer{}
+	b := &Broadcaster{
+		conf: Config{
+			Server:               ServerInfo{Host: "127.0.0.1", Port: 19132},
+			Signaling:            sig,
+			SignalingMode:        SignalingModeJSONRPC,
+			MinecraftTokenSource: minecraftTokenSourceWithPMID{pmid: pmsgID},
+			Status:               Status{HostName: "Host", WorldName: "World"},
+			UpdateInterval:       30 * time.Second,
+		},
+		announcerFactory: func(*Broadcaster) room.Announcer {
+			return announcer
+		},
+	}
+
+	if err := b.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+
+	if len(announcer.status.SupportedConnections) != 1 {
+		t.Fatalf("unexpected connections: %#v", announcer.status.SupportedConnections)
+	}
+	got := announcer.status.SupportedConnections[0]
+	if got.ConnectionType != room.ConnectionTypeJSONRPCSignaling {
+		t.Fatalf("connection type = %d, want %d", got.ConnectionType, room.ConnectionTypeJSONRPCSignaling)
+	}
+	if got.NetherNetID != room.NetherNetID("123456789") {
+		t.Fatalf("nethernet id = %q", got.NetherNetID)
+	}
+	if got.PmsgID != pmsgID {
+		t.Fatalf("pmsg id = %s", got.PmsgID)
+	}
+}
+
 func TestStartupFailureCleanupClosesSignaling(t *testing.T) {
 	sig := &fakeSignaling{}
 	b := &Broadcaster{signaling: sig}
@@ -480,9 +557,11 @@ func (f fakeNotifier) Notify(ctx context.Context, message string) error {
 type fakeAnnouncer struct {
 	announceErr error
 	closed      bool
+	status      room.Status
 }
 
-func (f *fakeAnnouncer) Announce(context.Context, room.Status) error {
+func (f *fakeAnnouncer) Announce(_ context.Context, status room.Status) error {
+	f.status = status
 	return f.announceErr
 }
 
@@ -492,7 +571,8 @@ func (f *fakeAnnouncer) Close() error {
 }
 
 type fakeSignaling struct {
-	closed bool
+	closed    bool
+	networkID string
 }
 
 func (f *fakeSignaling) Signal(context.Context, *nethernet.Signal) error { return nil }
@@ -501,9 +581,29 @@ func (f *fakeSignaling) Context() context.Context                        { retur
 func (f *fakeSignaling) Credentials(context.Context) (*nethernet.Credentials, error) {
 	return nil, nil
 }
-func (f *fakeSignaling) NetworkID() string { return "network" }
-func (f *fakeSignaling) PongData([]byte)   {}
+func (f *fakeSignaling) NetworkID() string {
+	if f.networkID != "" {
+		return f.networkID
+	}
+	return "network"
+}
+func (f *fakeSignaling) PongData([]byte) {}
 func (f *fakeSignaling) Close() error {
 	f.closed = true
 	return nil
+}
+
+type minecraftTokenSourceWithPMID struct {
+	pmid uuid.UUID
+}
+
+func (s minecraftTokenSourceWithPMID) Token() (*service.Token, error) {
+	payload, err := json.Marshal(map[string]string{"pmid": s.pmid.String()})
+	if err != nil {
+		return nil, err
+	}
+	return &service.Token{
+		AuthorizationHeader: "Bearer header." + base64.RawURLEncoding.EncodeToString(payload) + ".signature",
+		ValidUntil:          time.Now().Add(time.Hour),
+	}, nil
 }

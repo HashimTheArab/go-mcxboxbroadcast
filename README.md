@@ -47,6 +47,9 @@ The config exposes the same operator-facing areas as MCXboxBroadcast:
 - Slack/Discord-compatible webhook notifications
 - primary and sub-account token cache paths
 - optional HTTP proxy URL through `http.proxy`
+- NetherNet signaling mode through `session.signalingMode`; `jsonrpc` is the
+  default and matches MCXboxBroadcast's `ConnectionType=7`/`PmsgId` session
+  metadata, while `websocket` keeps the older signaling service path.
 
 ## Docker
 

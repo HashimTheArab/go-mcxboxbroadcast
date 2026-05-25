@@ -44,6 +44,7 @@ type SessionFileConfig struct {
 	RemoteAddress    string          `yaml:"remoteAddress" toml:"remoteAddress"`
 	RemotePort       string          `yaml:"remotePort" toml:"remotePort"`
 	UpdateInterval   int             `yaml:"updateInterval" toml:"updateInterval"`
+	SignalingMode    string          `yaml:"signalingMode" toml:"signalingMode"`
 	QueryServer      bool            `yaml:"queryServer" toml:"queryServer"`
 	WebQueryFallback bool            `yaml:"webQueryFallback" toml:"webQueryFallback"`
 	ConfigFallback   bool            `yaml:"configFallback" toml:"configFallback"`
@@ -118,6 +119,7 @@ func DefaultConfigFile() ConfigFile {
 			RemoteAddress:    "auto",
 			RemotePort:       "auto",
 			UpdateInterval:   30,
+			SignalingMode:    string(SignalingModeJSONRPC),
 			QueryServer:      true,
 			WebQueryFallback: false,
 			ConfigFallback:   true,
@@ -274,6 +276,7 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 			QueryFallback:    c.Session.ConfigFallback,
 			WebQueryClient:   in.HTTPClient,
 		},
+		SignalingMode: SignalingMode(c.Session.SignalingMode),
 		ListenConfig: minecraft.ListenConfig{
 			HTTPClient: in.HTTPClient,
 		},
@@ -377,6 +380,7 @@ var configKeyAliases = map[string]string{
 	"remote-address":                  "remoteAddress",
 	"remote-port":                     "remotePort",
 	"update-interval":                 "updateInterval",
+	"signaling-mode":                  "signalingMode",
 	"query-server":                    "queryServer",
 	"web-query-fallback":              "webQueryFallback",
 	"config-fallback":                 "configFallback",

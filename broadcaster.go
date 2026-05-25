@@ -21,7 +21,8 @@ import (
 	"github.com/sandertv/gophertunnel/minecraft/protocol/login"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
 	"github.com/sandertv/gophertunnel/minecraft/room"
-	"github.com/sandertv/gophertunnel/minecraft/service/signaling"
+	"github.com/sandertv/gophertunnel/minecraft/service/messaging"
+	websocketsignaling "github.com/sandertv/gophertunnel/minecraft/service/signaling"
 )
 
 // Broadcaster owns the Xbox Live session, NetherNet listener, and redirect
@@ -100,9 +101,18 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	status, err := b.status(b.ctx)
 	if err != nil {
 		b.cancel()
-		return err
+		return errors.Join(err, b.cleanupStartupFailure(false))
 	}
 	b.announcer = b.newAnnouncer()
+	connection, err := b.signalingConnection(b.ctx, sig)
+	if err != nil {
+		b.cancel()
+		return errors.Join(err, b.cleanupStartupFailure(true))
+	}
+	if connection != nil {
+		b.announcer = signalingConnectionAnnouncer{Announcer: b.announcer, connection: *connection}
+		b.debug("using jsonrpc signaling", "nethernet_id", connection.NetherNetID, "pmsg_id", connection.PmsgID)
+	}
 	b.debug("creating xbox live session")
 	if err := b.announcer.Announce(b.ctx, status); err != nil {
 		b.cancel()
@@ -215,7 +225,18 @@ func (b *Broadcaster) signalingFor(ctx context.Context) (nethernet.Signaling, er
 	if b.conf.SignalingFactory != nil {
 		return b.conf.SignalingFactory(ctx, b.conf)
 	}
-	d := signaling.Dialer{
+	mode, err := b.signalingMode()
+	if err != nil {
+		return nil, err
+	}
+	if mode == SignalingModeJSONRPC {
+		d := messaging.Dialer{
+			Log:        b.log,
+			HTTPClient: b.conf.HTTPClient,
+		}
+		return d.DialContext(ctx, b.conf.LiveTokenSource)
+	}
+	d := websocketsignaling.Dialer{
 		Log:        b.log,
 		HTTPClient: b.conf.HTTPClient,
 	}

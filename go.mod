@@ -16,6 +16,8 @@ require (
 require (
 	github.com/coder/websocket v1.8.12 // indirect
 	github.com/coreos/go-oidc/v3 v3.17.0 // indirect
+	github.com/creachadair/jrpc2 v1.3.4 // indirect
+	github.com/creachadair/mds v0.25.13 // indirect
 	github.com/df-mc/go-playfab v1.0.0 // indirect
 	github.com/df-mc/jsonc v1.0.5 // indirect
 	github.com/go-gl/mathgl v1.2.0 // indirect
@@ -40,6 +42,7 @@ require (
 	github.com/wlynxg/anet v0.0.5 // indirect
 	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/net v0.50.0 // indirect
+	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
 	golang.org/x/time v0.10.0 // indirect

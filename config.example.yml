@@ -9,6 +9,7 @@ session:
   remoteAddress: auto
   remotePort: auto
   updateInterval: 30
+  signalingMode: jsonrpc
   queryServer: true
   webQueryFallback: false
   configFallback: true

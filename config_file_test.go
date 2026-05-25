@@ -225,6 +225,9 @@ func TestConfigFileToConfigMapsOperatorSettings(t *testing.T) {
 	if runtime.Status.Broadcast != int32(BroadcastSettingFriendsOnly) {
 		t.Fatalf("unexpected broadcast setting %d", runtime.Status.Broadcast)
 	}
+	if runtime.SignalingMode != SignalingModeJSONRPC {
+		t.Fatalf("unexpected signaling mode %q", runtime.SignalingMode)
+	}
 	if runtime.Gallery == nil || runtime.Gallery.ImagePath != "images/showcase.jpg" {
 		t.Fatalf("gallery config not mapped: %#v", runtime.Gallery)
 	}
