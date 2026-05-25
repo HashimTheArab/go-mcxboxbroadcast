@@ -1,6 +1,9 @@
-configVersion: 2
+configVersion: 3
 debugMode: false
 suppressSessionUpdateMessage: false
+
+http:
+  proxy: ""
 
 session:
   remoteAddress: auto

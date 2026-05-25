@@ -41,6 +41,7 @@ The config exposes the same operator-facing areas as MCXboxBroadcast:
 - friend sync automation and expiry settings, including last-seen history path
 - Slack/Discord-compatible webhook notifications
 - primary and sub-account token cache paths
+- optional HTTP proxy URL through `http.proxy`
 
 ## Docker
 

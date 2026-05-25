@@ -69,6 +69,14 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+	httpClient, err := cfg.HTTP.Client(deps.HTTPClient)
+	if err != nil {
+		return fmt.Errorf("configure http client: %w", err)
+	}
+	authCtx := ctx
+	if httpClient != nil {
+		authCtx = context.WithValue(authCtx, oauth2.HTTPClient, httpClient)
+	}
 	level := slog.LevelInfo
 	if opts.Debug || cfg.DebugMode {
 		level = slog.LevelDebug
@@ -95,9 +103,9 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 	}
 
 	runtime, err := cfg.RuntimeConfig(broadcaster.RuntimeConfigInput{
-		TokenSource:     deps.NewXBLTokenSource(ctx, live),
+		TokenSource:     deps.NewXBLTokenSource(authCtx, live),
 		LiveTokenSource: live,
-		HTTPClient:      deps.HTTPClient,
+		HTTPClient:      httpClient,
 		Log:             log,
 		BaseDir:         baseDir,
 	})
@@ -119,7 +127,7 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 		runtime.SubAccounts = append(runtime.SubAccounts, broadcaster.SubAccountConfig{
 			ID:          account.ID,
 			Enabled:     true,
-			TokenSource: deps.NewXBLTokenSource(ctx, subLive),
+			TokenSource: deps.NewXBLTokenSource(authCtx, subLive),
 		})
 	}
 
