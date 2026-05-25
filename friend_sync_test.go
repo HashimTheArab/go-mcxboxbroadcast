@@ -132,6 +132,33 @@ func TestFriendSyncerDebugLogsPendingFriendAccepts(t *testing.T) {
 	}
 }
 
+func TestFriendSyncerLogsInitialInviteFailure(t *testing.T) {
+	var log bytes.Buffer
+	inviteErr := errors.New("invite rejected")
+	client := syncFriendClient{
+		people: []Person{{XUID: "1", Gamertag: "Follower", IsFollowingCaller: true}},
+	}
+	syncer := FriendSyncer{
+		Client: &client,
+		Config: FriendSyncConfig{
+			AutoFollow:    true,
+			InitialInvite: true,
+		},
+		Inviter: fakeSyncInviter{err: inviteErr},
+		Log:     slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelDebug})),
+	}
+	if err := syncer.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	output := log.String()
+	if !strings.Contains(output, `msg="send initial invite"`) || !strings.Contains(output, `err="invite rejected"`) {
+		t.Fatalf("expected invite failure log, got:\n%s", output)
+	}
+	if strings.Contains(output, `msg="sent initial invite"`) {
+		t.Fatalf("should not log sent invite on failure:\n%s", output)
+	}
+}
+
 func TestFriendSyncerStopsAutoFollowPassWhenFriendListIsFull(t *testing.T) {
 	var log bytes.Buffer
 	fullErr := classifiedSyncErr{kind: "friend_list_full"}
@@ -245,11 +272,14 @@ func (c *syncFriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]P
 
 type fakeSyncInviter struct {
 	invite func(string)
+	err    error
 }
 
 func (f fakeSyncInviter) Invite(xuid string, _ int32) error {
-	f.invite(xuid)
-	return nil
+	if f.invite != nil {
+		f.invite(xuid)
+	}
+	return f.err
 }
 
 type classifiedSyncErr struct {

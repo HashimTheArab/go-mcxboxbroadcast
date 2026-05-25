@@ -92,6 +92,9 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 	if s.Client == nil {
 		return nil
 	}
+	if s.Config.InitialInvite && s.Inviter == nil {
+		s.debug(ctx, "initial invite unavailable", "reason", "session inviter is not configured")
+	}
 	if s.Config.AutoFollow && opts.autoFollow {
 		if accepter, ok := s.Client.(pendingFriendRequestAccepter); ok {
 			s.debug(ctx, "accepting pending friend requests")
@@ -101,7 +104,7 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 			}
 			if s.Config.InitialInvite && s.Inviter != nil {
 				for _, p := range accepted {
-					_ = s.Inviter.Invite(p.XUID, int32(TitleID))
+					s.sendInitialInvite(ctx, p, "pending_requests")
 				}
 			}
 			if err != nil {
@@ -146,8 +149,7 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 			added++
 			s.debug(ctx, "added friend", "xuid", p.XUID, "gamertag", p.Gamertag)
 			if s.Config.InitialInvite && s.Inviter != nil {
-				_ = s.Inviter.Invite(p.XUID, int32(TitleID))
-				s.debug(ctx, "sent initial invite", "xuid", p.XUID, "gamertag", p.Gamertag)
+				s.sendInitialInvite(ctx, p, "auto_follow")
 			}
 		}
 		if s.Config.AutoUnfollow && opts.autoUnfollow && !p.IsFollowingCaller && p.IsFollowedByCaller {
@@ -197,6 +199,17 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 		s.debug(ctx, "removed friends", "count", removed)
 	}
 	return nil
+}
+
+func (s FriendSyncer) sendInitialInvite(ctx context.Context, p Person, source string) {
+	s.debug(ctx, "sending initial invite", "xuid", p.XUID, "gamertag", p.Gamertag, "source", source)
+	if err := s.Inviter.Invite(p.XUID, int32(TitleID)); err != nil {
+		if s.Log != nil {
+			s.Log.Warn("send initial invite", "xuid", p.XUID, "gamertag", p.Gamertag, "source", source, "err", err)
+		}
+		return
+	}
+	s.debug(ctx, "sent initial invite", "xuid", p.XUID, "gamertag", p.Gamertag, "source", source)
 }
 
 type friendSyncStats struct {
