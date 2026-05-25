@@ -2,10 +2,16 @@ package broadcaster
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"image"
+	"image/color"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"net/http"
 	"os"
@@ -168,11 +174,11 @@ func (g GalleryClient) remoteImageHash(ctx context.Context, url string) (uint32,
 	if resp.StatusCode != http.StatusOK {
 		return 0, fmt.Errorf("%s %s: %s", req.Method, req.URL, resp.Status)
 	}
-	data, err := io.ReadAll(resp.Body)
+	hash, err := imageHash(resp.Body)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("hash gallery image pixels %s: %w", url, err)
 	}
-	return crc32.ChecksumIEEE(data), nil
+	return hash, nil
 }
 
 func (g GalleryClient) request(ctx context.Context, method, url string, body io.Reader) (*http.Request, error) {
@@ -202,9 +208,40 @@ func (g GalleryClient) client() *http.Client {
 }
 
 func fileHash(path string) (uint32, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return 0, err
 	}
-	return crc32.ChecksumIEEE(data), nil
+	defer f.Close()
+	hash, err := imageHash(f)
+	if err != nil {
+		return 0, fmt.Errorf("hash image pixels %q: %w", path, err)
+	}
+	return hash, nil
+}
+
+func imageHash(r io.Reader) (uint32, error) {
+	img, _, err := image.Decode(r)
+	if err != nil {
+		return 0, fmt.Errorf("decode image: %w", err)
+	}
+
+	hash := crc32.NewIEEE()
+	bounds := img.Bounds()
+	var buf [8]byte
+	binary.BigEndian.PutUint32(buf[:4], uint32(bounds.Dx()))
+	binary.BigEndian.PutUint32(buf[4:], uint32(bounds.Dy()))
+	_, _ = hash.Write(buf[:])
+
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			c := color.NRGBA64Model.Convert(img.At(x, y)).(color.NRGBA64)
+			binary.BigEndian.PutUint16(buf[0:2], c.R)
+			binary.BigEndian.PutUint16(buf[2:4], c.G)
+			binary.BigEndian.PutUint16(buf[4:6], c.B)
+			binary.BigEndian.PutUint16(buf[6:8], c.A)
+			_, _ = hash.Write(buf[:])
+		}
+	}
+	return hash.Sum32(), nil
 }

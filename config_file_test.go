@@ -46,6 +46,152 @@ func TestExampleConfigLoads(t *testing.T) {
 	}
 }
 
+func TestLoadConfigFileAcceptsUpstreamKebabCaseKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := os.WriteFile(path, []byte(`
+config-version: 2
+debug-mode: true
+suppress-session-update-message: true
+
+session:
+  remote-address: bedrock.example.net
+  remote-port: "19133"
+  update-interval: 45
+  query-server: false
+  web-query-fallback: true
+  config-fallback: false
+  broadcast-setting: 2
+  joinability: InviteOnly
+  world-type: Creative
+  session-info:
+    host-name: Example Host
+    world-name: Example World
+    players: 4
+    max-players: 32
+    ip: ignored.example.net
+    port: 19134
+
+friend-sync:
+  update-interval: 75
+  auto-follow: false
+  auto-unfollow: true
+  initial-invite: false
+  expiry:
+    enabled: false
+    days: 21
+    check: 2400
+    history-path: cache/upstream_history.json
+
+notifications:
+  enabled: true
+  webhook-url: https://example.net/webhook
+
+gallery:
+  enabled: true
+  image-path: images/upstream.jpg
+  delete-other-images: false
+
+accounts:
+  primary-cache-path: cache/upstream_live_token.json
+  sub-accounts:
+    - id: alt
+      enabled: true
+      cache-path: cache/alt_live_token.json
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadConfigFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.ConfigVersion != CurrentConfigVersion {
+		t.Fatalf("expected migrated config version, got %d", cfg.ConfigVersion)
+	}
+	if !cfg.DebugMode || !cfg.SuppressSessionUpdateMessage {
+		t.Fatalf("top-level kebab-case aliases were not loaded: %#v", cfg)
+	}
+	if cfg.Session.RemoteAddress != "bedrock.example.net" || cfg.Session.RemotePort != "19133" {
+		t.Fatalf("session remote aliases were not loaded: %#v", cfg.Session)
+	}
+	if cfg.Session.UpdateInterval != 45 || cfg.Session.QueryServer || !cfg.Session.WebQueryFallback || cfg.Session.ConfigFallback {
+		t.Fatalf("session query aliases were not loaded: %#v", cfg.Session)
+	}
+	if cfg.Session.BroadcastSetting != 2 || cfg.Session.Joinability != "InviteOnly" || cfg.Session.WorldType != "Creative" {
+		t.Fatalf("session status aliases were not loaded: %#v", cfg.Session)
+	}
+	if cfg.Session.SessionInfo.HostName != "Example Host" || cfg.Session.SessionInfo.MaxPlayers != 32 {
+		t.Fatalf("session-info aliases were not loaded: %#v", cfg.Session.SessionInfo)
+	}
+	if cfg.FriendSync.UpdateInterval != 75 || cfg.FriendSync.AutoFollow || !cfg.FriendSync.AutoUnfollow || cfg.FriendSync.InitialInvite {
+		t.Fatalf("friend-sync aliases were not loaded: %#v", cfg.FriendSync)
+	}
+	if cfg.FriendSync.Expiry.HistoryPath != "cache/upstream_history.json" || cfg.FriendSync.Expiry.Enabled {
+		t.Fatalf("friend-sync expiry aliases were not loaded: %#v", cfg.FriendSync.Expiry)
+	}
+	if cfg.Notifications.WebhookURL != "https://example.net/webhook" {
+		t.Fatalf("notification alias was not loaded: %#v", cfg.Notifications)
+	}
+	if cfg.Gallery.ImagePath != "images/upstream.jpg" || cfg.Gallery.DeleteOtherImages {
+		t.Fatalf("gallery aliases were not loaded: %#v", cfg.Gallery)
+	}
+	if cfg.Accounts.PrimaryCachePath != "cache/upstream_live_token.json" || len(cfg.Accounts.SubAccounts) != 1 || cfg.Accounts.SubAccounts[0].CachePath != "cache/alt_live_token.json" {
+		t.Fatalf("account aliases were not loaded: %#v", cfg.Accounts)
+	}
+}
+
+func TestLoadConfigFileMigratesUpstreamLegacyKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := os.WriteFile(path, []byte(`
+config-version: 1
+debug-log: true
+suppress-session-update-info: true
+remote-address: legacy.example.net
+remote-port: "19135"
+update-interval: 55
+
+friend-sync:
+  should-expire: false
+  expire-days: 30
+  expire-check: 3600
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadConfigFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !cfg.DebugMode || !cfg.SuppressSessionUpdateMessage {
+		t.Fatalf("legacy top-level aliases were not migrated: %#v", cfg)
+	}
+	if cfg.Session.RemoteAddress != "legacy.example.net" || cfg.Session.RemotePort != "19135" || cfg.Session.UpdateInterval != 55 {
+		t.Fatalf("legacy session keys were not moved: %#v", cfg.Session)
+	}
+	if cfg.FriendSync.Expiry.Enabled || cfg.FriendSync.Expiry.Days != 30 || cfg.FriendSync.Expiry.Check != 3600 {
+		t.Fatalf("legacy friend expiry aliases were not migrated: %#v", cfg.FriendSync.Expiry)
+	}
+}
+
+func TestLoadConfigFileMigratesLegacySlackWebhook(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := os.WriteFile(path, []byte(`
+slack-webhook: https://example.net/hook
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadConfigFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Notifications.Enabled || cfg.Notifications.WebhookURL != "https://example.net/hook" {
+		t.Fatalf("legacy slack webhook was not migrated: %#v", cfg.Notifications)
+	}
+}
+
 func TestConfigFileToConfigMapsOperatorSettings(t *testing.T) {
 	cfg := DefaultConfigFile()
 	cfg.Session.UpdateInterval = 45

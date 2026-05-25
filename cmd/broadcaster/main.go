@@ -11,11 +11,11 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/HashimTheArab/go-mcxboxbroadcast"
 	"github.com/df-mc/go-xsapi"
-	"github.com/sandertv/gophertunnel/minecraft/auth"
 	"golang.org/x/oauth2"
 )
 
@@ -34,9 +34,9 @@ type commandDeps struct {
 	HTTPClient         *http.Client
 	LoadConfig         func(string) (broadcaster.ConfigFile, error)
 	LoadLiveToken      func(string) (*oauth2.Token, error)
-	NewLiveTokenSource func(*oauth2.Token, io.Writer) oauth2.TokenSource
+	NewLiveTokenSource func(context.Context, *oauth2.Token, io.Writer) oauth2.TokenSource
 	SaveLiveToken      func(string, *oauth2.Token) error
-	LoadAccountToken   func(string, io.Writer) (oauth2.TokenSource, error)
+	LoadAccountToken   func(context.Context, string, io.Writer) (oauth2.TokenSource, error)
 	NewXBLTokenSource  func(context.Context, oauth2.TokenSource) xsapi.TokenSource
 	NewBroadcaster     func(broadcaster.Config) (commandBroadcaster, error)
 }
@@ -74,7 +74,7 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 		return fmt.Errorf("configure http client: %w", err)
 	}
 	authCtx := ctx
-	if httpClient != nil {
+	if httpClient != nil && strings.TrimSpace(cfg.HTTP.Proxy) != "" {
 		authCtx = context.WithValue(authCtx, oauth2.HTTPClient, httpClient)
 	}
 	level := slog.LevelInfo
@@ -93,7 +93,7 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		log.Warn("could not load token cache", "err", err)
 	}
-	live := deps.NewLiveTokenSource(tok, deps.Stdout)
+	live := deps.NewLiveTokenSource(authCtx, tok, deps.Stdout)
 	tok, err = live.Token()
 	if err != nil {
 		return fmt.Errorf("authenticate: %w", err)
@@ -120,7 +120,7 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 		if err != nil {
 			return fmt.Errorf("configure sub-account %q: %w", account.ID, err)
 		}
-		subLive, err := deps.LoadAccountToken(subCachePath, deps.Stdout)
+		subLive, err := deps.LoadAccountToken(authCtx, subCachePath, deps.Stdout)
 		if err != nil {
 			return fmt.Errorf("authenticate sub-account %q: %w", account.ID, err)
 		}
@@ -165,7 +165,7 @@ func (d commandDeps) withDefaults() commandDeps {
 		d.LoadLiveToken = broadcaster.LoadLiveToken
 	}
 	if d.NewLiveTokenSource == nil {
-		d.NewLiveTokenSource = auth.RefreshTokenSourceWriter
+		d.NewLiveTokenSource = broadcaster.NewLiveTokenSource
 	}
 	if d.SaveLiveToken == nil {
 		d.SaveLiveToken = broadcaster.SaveLiveToken
@@ -210,12 +210,12 @@ func defaultCachePath() string {
 	return filepath.Join(dir, "mcxboxbroadcast-go", "live_token.json")
 }
 
-func loadAccountToken(path string, out io.Writer) (oauth2.TokenSource, error) {
+func loadAccountToken(ctx context.Context, path string, out io.Writer) (oauth2.TokenSource, error) {
 	tok, err := broadcaster.LoadLiveToken(path)
 	if err != nil {
 		tok = nil
 	}
-	src := auth.RefreshTokenSourceWriter(tok, out)
+	src := broadcaster.NewLiveTokenSource(ctx, tok, out)
 	tok, err = src.Token()
 	if err != nil {
 		return nil, err

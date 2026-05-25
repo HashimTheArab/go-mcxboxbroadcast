@@ -60,7 +60,7 @@ func TestRunBroadcasterCommandRejectsDuplicateSubAccountCacheBeforeAuth(t *testi
 			}}
 			return cfg, nil
 		},
-		NewLiveTokenSource: func(*oauth2.Token, io.Writer) oauth2.TokenSource {
+		NewLiveTokenSource: func(context.Context, *oauth2.Token, io.Writer) oauth2.TokenSource {
 			authenticated = true
 			return staticOAuthTokenSource{}
 		},
@@ -96,13 +96,13 @@ func TestRunBroadcasterCommandStartsAndClosesBroadcaster(t *testing.T) {
 		LoadLiveToken: func(string) (*oauth2.Token, error) {
 			return nil, errors.ErrUnsupported
 		},
-		NewLiveTokenSource: func(*oauth2.Token, io.Writer) oauth2.TokenSource {
+		NewLiveTokenSource: func(context.Context, *oauth2.Token, io.Writer) oauth2.TokenSource {
 			return staticOAuthTokenSource{}
 		},
 		SaveLiveToken: func(string, *oauth2.Token) error {
 			return nil
 		},
-		LoadAccountToken: func(string, io.Writer) (oauth2.TokenSource, error) {
+		LoadAccountToken: func(context.Context, string, io.Writer) (oauth2.TokenSource, error) {
 			return staticOAuthTokenSource{}, nil
 		},
 		NewXBLTokenSource: func(context.Context, oauth2.TokenSource) xsapi.TokenSource {
@@ -152,7 +152,7 @@ func TestRunBroadcasterCommandAppliesConfiguredHTTPProxy(t *testing.T) {
 		LoadLiveToken: func(string) (*oauth2.Token, error) {
 			return nil, errors.ErrUnsupported
 		},
-		NewLiveTokenSource: func(*oauth2.Token, io.Writer) oauth2.TokenSource {
+		NewLiveTokenSource: func(context.Context, *oauth2.Token, io.Writer) oauth2.TokenSource {
 			return staticOAuthTokenSource{}
 		},
 		SaveLiveToken: func(string, *oauth2.Token) error {
@@ -194,6 +194,170 @@ func TestRunBroadcasterCommandAppliesConfiguredHTTPProxy(t *testing.T) {
 	}
 	if proxyURL.String() != "http://127.0.0.1:8080" {
 		t.Fatalf("unexpected proxy URL %q", proxyURL.String())
+	}
+}
+
+func TestRunBroadcasterCommandAppliesConfiguredHTTPProxyToPrimaryLiveTokenSource(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var gotLiveAuthClient *http.Client
+	var gotRuntimeClient *http.Client
+	err := runBroadcasterCommand(ctx, commandOptions{
+		ConfigPath: "/base/config.yml",
+	}, commandDeps{
+		Stdout: io.Discard,
+		LoadConfig: func(string) (broadcaster.ConfigFile, error) {
+			cfg := broadcaster.DefaultConfigFile()
+			cfg.HTTP.Proxy = "http://127.0.0.1:8080"
+			cfg.Session.RemoteAddress = "127.0.0.1"
+			cfg.Session.RemotePort = "19132"
+			return cfg, nil
+		},
+		LoadLiveToken: func(string) (*oauth2.Token, error) {
+			return nil, errors.ErrUnsupported
+		},
+		NewLiveTokenSource: func(ctx context.Context, _ *oauth2.Token, _ io.Writer) oauth2.TokenSource {
+			gotLiveAuthClient, _ = ctx.Value(oauth2.HTTPClient).(*http.Client)
+			return staticOAuthTokenSource{}
+		},
+		SaveLiveToken: func(string, *oauth2.Token) error {
+			return nil
+		},
+		NewXBLTokenSource: func(context.Context, oauth2.TokenSource) xsapi.TokenSource {
+			return staticXBLTokenSource{}
+		},
+		NewBroadcaster: func(conf broadcaster.Config) (commandBroadcaster, error) {
+			gotRuntimeClient = conf.HTTPClient
+			return fakeCommandBroadcaster{
+				start: func(context.Context) error {
+					cancel()
+					return nil
+				},
+				close: func() error {
+					return nil
+				},
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotRuntimeClient == nil {
+		t.Fatal("expected configured runtime HTTP client")
+	}
+	if gotLiveAuthClient != gotRuntimeClient {
+		t.Fatal("expected primary Live auth source to use configured HTTP client")
+	}
+}
+
+func TestRunBroadcasterCommandAppliesConfiguredHTTPProxyToSubAccountTokenLoad(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var gotSubAccountAuthClient *http.Client
+	var gotRuntimeClient *http.Client
+	err := runBroadcasterCommand(ctx, commandOptions{
+		ConfigPath: "/base/config.yml",
+	}, commandDeps{
+		Stdout: io.Discard,
+		LoadConfig: func(string) (broadcaster.ConfigFile, error) {
+			cfg := broadcaster.DefaultConfigFile()
+			cfg.HTTP.Proxy = "http://127.0.0.1:8080"
+			cfg.Session.RemoteAddress = "127.0.0.1"
+			cfg.Session.RemotePort = "19132"
+			cfg.Accounts.SubAccounts = []broadcaster.SubAccountFile{{
+				ID:      "alt",
+				Enabled: true,
+			}}
+			return cfg, nil
+		},
+		LoadLiveToken: func(string) (*oauth2.Token, error) {
+			return nil, errors.ErrUnsupported
+		},
+		NewLiveTokenSource: func(context.Context, *oauth2.Token, io.Writer) oauth2.TokenSource {
+			return staticOAuthTokenSource{}
+		},
+		SaveLiveToken: func(string, *oauth2.Token) error {
+			return nil
+		},
+		LoadAccountToken: func(ctx context.Context, _ string, _ io.Writer) (oauth2.TokenSource, error) {
+			gotSubAccountAuthClient, _ = ctx.Value(oauth2.HTTPClient).(*http.Client)
+			return staticOAuthTokenSource{}, nil
+		},
+		NewXBLTokenSource: func(context.Context, oauth2.TokenSource) xsapi.TokenSource {
+			return staticXBLTokenSource{}
+		},
+		NewBroadcaster: func(conf broadcaster.Config) (commandBroadcaster, error) {
+			gotRuntimeClient = conf.HTTPClient
+			return fakeCommandBroadcaster{
+				start: func(context.Context) error {
+					cancel()
+					return nil
+				},
+				close: func() error {
+					return nil
+				},
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotRuntimeClient == nil {
+		t.Fatal("expected configured runtime HTTP client")
+	}
+	if gotSubAccountAuthClient != gotRuntimeClient {
+		t.Fatal("expected sub-account token load to use configured HTTP client")
+	}
+}
+
+func TestRunBroadcasterCommandPreservesHTTPClientWithoutConfiguredProxy(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	baseClient := &http.Client{}
+	var gotLiveAuthClient *http.Client
+	var gotRuntimeClient *http.Client
+	err := runBroadcasterCommand(ctx, commandOptions{
+		ConfigPath: "/base/config.yml",
+	}, commandDeps{
+		Stdout:     io.Discard,
+		HTTPClient: baseClient,
+		LoadConfig: func(string) (broadcaster.ConfigFile, error) {
+			cfg := broadcaster.DefaultConfigFile()
+			cfg.Session.RemoteAddress = "127.0.0.1"
+			cfg.Session.RemotePort = "19132"
+			return cfg, nil
+		},
+		LoadLiveToken: func(string) (*oauth2.Token, error) {
+			return nil, errors.ErrUnsupported
+		},
+		NewLiveTokenSource: func(ctx context.Context, _ *oauth2.Token, _ io.Writer) oauth2.TokenSource {
+			gotLiveAuthClient, _ = ctx.Value(oauth2.HTTPClient).(*http.Client)
+			return staticOAuthTokenSource{}
+		},
+		SaveLiveToken: func(string, *oauth2.Token) error {
+			return nil
+		},
+		NewXBLTokenSource: func(context.Context, oauth2.TokenSource) xsapi.TokenSource {
+			return staticXBLTokenSource{}
+		},
+		NewBroadcaster: func(conf broadcaster.Config) (commandBroadcaster, error) {
+			gotRuntimeClient = conf.HTTPClient
+			return fakeCommandBroadcaster{
+				start: func(context.Context) error {
+					cancel()
+					return nil
+				},
+				close: func() error {
+					return nil
+				},
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotRuntimeClient != baseClient {
+		t.Fatal("expected HTTP client to be preserved when no proxy is configured")
+	}
+	if gotLiveAuthClient != nil {
+		t.Fatal("expected Live auth to keep default HTTP behavior when no proxy is configured")
 	}
 }
 

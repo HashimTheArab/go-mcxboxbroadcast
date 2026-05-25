@@ -12,9 +12,13 @@ import (
 	"time"
 
 	"github.com/df-mc/go-nethernet"
+	"github.com/df-mc/go-xsapi"
 	"github.com/df-mc/go-xsapi/mpsd"
+	"github.com/go-gl/mathgl/mgl32"
 	"github.com/google/uuid"
 	"github.com/sandertv/gophertunnel/minecraft"
+	"github.com/sandertv/gophertunnel/minecraft/protocol"
+	"github.com/sandertv/gophertunnel/minecraft/protocol/login"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
 	"github.com/sandertv/gophertunnel/minecraft/room"
 	"github.com/sandertv/gophertunnel/minecraft/service/signaling"
@@ -26,12 +30,13 @@ type Broadcaster struct {
 	conf Config
 	log  *slog.Logger
 
-	announcer        room.Announcer
-	listener         *minecraft.Listener
-	signaling        nethernet.Signaling
-	sessionRef       mpsd.SessionReference
-	subSessions      []*mpsd.Session
-	announcerFactory func(*Broadcaster) room.Announcer
+	announcer           room.Announcer
+	listener            *minecraft.Listener
+	signaling           nethernet.Signaling
+	sessionRef          mpsd.SessionReference
+	subSessions         []*mpsd.Session
+	announcerFactory    func(*Broadcaster) room.Announcer
+	subAccountPublisher func(context.Context, SubAccountConfig, mpsd.SessionReference, mpsd.PublishConfig) (*mpsd.Session, error)
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -39,6 +44,13 @@ type Broadcaster struct {
 
 	mu      sync.Mutex
 	started bool
+}
+
+type transferConn interface {
+	WritePacket(packet.Packet) error
+	Flush() error
+	Close() error
+	IdentityData() login.IdentityData
 }
 
 // New validates conf and returns a Broadcaster.
@@ -230,15 +242,63 @@ func (b *Broadcaster) startSubAccounts(ctx context.Context) error {
 		if !account.Enabled || account.TokenSource == nil {
 			continue
 		}
+		if err := b.ensureSubAccountMutualFollow(ctx, account); err != nil {
+			return fmt.Errorf("prepare sub-account %q mutual follow: %w", account.ID, err)
+		}
 		pub := account.PublishConfig
 		pub.Logger = b.log.With("sub_account", account.ID)
-		s, err := pub.PublishContext(ctx, account.TokenSource, b.sessionRef)
+		s, err := b.publishSubAccount(ctx, account, pub)
 		if err != nil {
 			return fmt.Errorf("start sub-account %q: %w", account.ID, err)
 		}
 		b.subSessions = append(b.subSessions, s)
 	}
 	return nil
+}
+
+func (b *Broadcaster) publishSubAccount(ctx context.Context, account SubAccountConfig, pub mpsd.PublishConfig) (*mpsd.Session, error) {
+	if b.subAccountPublisher != nil {
+		return b.subAccountPublisher(ctx, account, b.sessionRef, pub)
+	}
+	return pub.PublishContext(ctx, account.TokenSource, b.sessionRef)
+}
+
+func (b *Broadcaster) ensureSubAccountMutualFollow(ctx context.Context, account SubAccountConfig) error {
+	primaryXUID, primaryOK, err := tokenSourceXUID(b.conf.TokenSource)
+	if err != nil {
+		return fmt.Errorf("primary xuid: %w", err)
+	}
+	subXUID, subOK, err := tokenSourceXUID(account.TokenSource)
+	if err != nil {
+		return fmt.Errorf("sub-account xuid: %w", err)
+	}
+	if !primaryOK || !subOK || primaryXUID == subXUID {
+		return nil
+	}
+	primary := FriendClient{TokenSource: b.conf.TokenSource, Client: b.conf.HTTPClient}
+	if err := primary.Follow(ctx, subXUID); err != nil {
+		return fmt.Errorf("primary follow sub-account: %w", err)
+	}
+	sub := FriendClient{TokenSource: account.TokenSource, Client: b.conf.HTTPClient}
+	if err := sub.Follow(ctx, primaryXUID); err != nil {
+		return fmt.Errorf("sub-account follow primary: %w", err)
+	}
+	return nil
+}
+
+func tokenSourceXUID(src xsapi.TokenSource) (string, bool, error) {
+	if src == nil {
+		return "", false, nil
+	}
+	tok, err := src.Token()
+	if err != nil {
+		return "", false, err
+	}
+	xuid := tok.DisplayClaims().XUID
+	if xuid == "" {
+		return "", false, nil
+	}
+	return xuid, true, nil
 }
 
 func (b *Broadcaster) uploadGallery(ctx context.Context) {
@@ -340,9 +400,13 @@ func (b *Broadcaster) accept() {
 	}
 }
 
-func (b *Broadcaster) transfer(conn *minecraft.Conn) {
+func (b *Broadcaster) transfer(conn transferConn) {
 	defer conn.Close()
 	id := conn.IdentityData()
+	if err := b.writeStartGameBeforeTransfer(conn); err != nil {
+		b.log.Error("start game before transfer", "xuid", id.XUID, "name", id.DisplayName, "err", err)
+		return
+	}
 	if err := conn.WritePacket(&packet.Transfer{
 		Address: b.conf.Server.Host,
 		Port:    b.conf.Server.Port,
@@ -357,6 +421,59 @@ func (b *Broadcaster) transfer(conn *minecraft.Conn) {
 		}
 	}
 	b.log.Info("transferred client", "xuid", id.XUID, "name", id.DisplayName, "target", b.conf.Server.Address())
+}
+
+func (b *Broadcaster) writeStartGameBeforeTransfer(conn transferConn) error {
+	pk := b.startGameBeforeTransfer()
+	if err := conn.WritePacket(pk); err != nil {
+		return fmt.Errorf("write StartGame: %w", err)
+	}
+	return nil
+}
+
+func (b *Broadcaster) startGameBeforeTransfer() *packet.StartGame {
+	worldName := b.conf.Status.WorldName
+	if worldName == "" {
+		worldName = b.conf.Status.HostName
+	}
+	if worldName == "" {
+		worldName = b.conf.Server.Host
+	}
+	if worldName == "" {
+		worldName = "Redirect"
+	}
+	return &packet.StartGame{
+		EntityUniqueID:               1,
+		EntityRuntimeID:              1,
+		PlayerGameMode:               2,
+		PlayerPosition:               mgl32.Vec3{0, 64, 0},
+		WorldSeed:                    0,
+		SpawnBiomeType:               packet.SpawnBiomeTypeDefault,
+		Dimension:                    0,
+		Generator:                    1,
+		WorldGameMode:                2,
+		Difficulty:                   1,
+		WorldSpawn:                   protocol.BlockPos{0, 64, 0},
+		AchievementsDisabled:         true,
+		MultiPlayerGame:              true,
+		LANBroadcastEnabled:          true,
+		XBLBroadcastMode:             packet.XBLBroadcastModeFriendsOfFriends,
+		PlatformBroadcastMode:        packet.XBLBroadcastModeFriendsOfFriends,
+		CommandsEnabled:              true,
+		PlayerPermissions:            1,
+		ServerChunkTickRadius:        4,
+		WorldTemplateSettingsLocked:  true,
+		BaseGameVersion:              protocol.CurrentVersion,
+		LevelID:                      "broadcaster_redirect",
+		WorldName:                    worldName,
+		MultiPlayerCorrelationID:     uuid.NewString(),
+		ServerAuthoritativeInventory: true,
+		GameVersion:                  protocol.CurrentVersion,
+		PropertyData:                 map[string]any{},
+		PlayerMovementSettings: protocol.PlayerMovementSettings{
+			ServerAuthoritativeBlockBreaking: true,
+		},
+	}
 }
 
 func (b *Broadcaster) updateLoop() {

@@ -346,11 +346,15 @@ func (f FriendFileConfig) runtime() *FriendSyncConfig {
 }
 
 func decodeConfig(path string, data []byte, out *ConfigFile) error {
+	normalized, err := normalizeConfigData(path, data)
+	if err != nil {
+		return err
+	}
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".toml":
-		return toml.Unmarshal(data, out)
+		return toml.Unmarshal(normalized, out)
 	default:
-		return yaml.Unmarshal(data, out)
+		return yaml.Unmarshal(normalized, out)
 	}
 }
 
@@ -361,6 +365,189 @@ func encodeConfig(path string, cfg ConfigFile) ([]byte, error) {
 	default:
 		return yaml.Marshal(cfg)
 	}
+}
+
+var configKeyAliases = map[string]string{
+	"config-version":                  "configVersion",
+	"debug-mode":                      "debugMode",
+	"debug-log":                       "debugMode",
+	"suppress-session-update-message": "suppressSessionUpdateMessage",
+	"suppress-session-update-info":    "suppressSessionUpdateMessage",
+	"friend-sync":                     "friendSync",
+	"remote-address":                  "remoteAddress",
+	"remote-port":                     "remotePort",
+	"update-interval":                 "updateInterval",
+	"query-server":                    "queryServer",
+	"web-query-fallback":              "webQueryFallback",
+	"config-fallback":                 "configFallback",
+	"broadcast-setting":               "broadcastSetting",
+	"world-type":                      "worldType",
+	"session-info":                    "sessionInfo",
+	"host-name":                       "hostName",
+	"world-name":                      "worldName",
+	"max-players":                     "maxPlayers",
+	"auto-follow":                     "autoFollow",
+	"auto-unfollow":                   "autoUnfollow",
+	"initial-invite":                  "initialInvite",
+	"history-path":                    "historyPath",
+	"webhook-url":                     "webhookUrl",
+	"image-path":                      "imagePath",
+	"delete-other-images":             "deleteOtherImages",
+	"primary-cache-path":              "primaryCachePath",
+	"sub-accounts":                    "subAccounts",
+	"cache-path":                      "cachePath",
+}
+
+func normalizeConfigData(path string, data []byte) ([]byte, error) {
+	var root map[string]any
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".toml":
+		if err := toml.Unmarshal(data, &root); err != nil {
+			return nil, err
+		}
+		if root == nil {
+			return data, nil
+		}
+		normalizeConfigMap(root)
+		return toml.Marshal(root)
+	default:
+		if err := yaml.Unmarshal(data, &root); err != nil {
+			return nil, err
+		}
+		if root == nil {
+			return data, nil
+		}
+		normalizeConfigMap(root)
+		return yaml.Marshal(root)
+	}
+}
+
+func normalizeConfigMap(m map[string]any, path ...string) {
+	for from, to := range configKeyAliases {
+		renameConfigKey(m, from, to)
+	}
+	if len(path) == 0 {
+		moveRootSessionKeys(m)
+		migrateLegacySlackWebhook(m)
+	}
+	if len(path) == 1 && path[0] == "friendSync" {
+		moveFriendExpiryKeys(m)
+	}
+	for key, value := range m {
+		normalizeConfigValue(value, append(path, key)...)
+	}
+}
+
+func normalizeConfigValue(value any, path ...string) {
+	switch v := value.(type) {
+	case map[string]any:
+		normalizeConfigMap(v, path...)
+	case []any:
+		for _, item := range v {
+			normalizeConfigValue(item, path...)
+		}
+	case []map[string]any:
+		for _, item := range v {
+			normalizeConfigMap(item, path...)
+		}
+	}
+}
+
+func renameConfigKey(m map[string]any, from, to string) {
+	value, ok := m[from]
+	if !ok {
+		return
+	}
+	if _, exists := m[to]; !exists {
+		m[to] = value
+	}
+	delete(m, from)
+}
+
+func migrateLegacySlackWebhook(root map[string]any) {
+	value, ok := root["slack-webhook"]
+	if !ok {
+		return
+	}
+	delete(root, "slack-webhook")
+	if strings.TrimSpace(fmt.Sprint(value)) == "" {
+		return
+	}
+	notifications, ok := configChildMap(root, "notifications")
+	if !ok {
+		return
+	}
+	if _, exists := notifications["webhookUrl"]; !exists {
+		notifications["webhookUrl"] = value
+	}
+	if _, exists := notifications["enabled"]; !exists {
+		notifications["enabled"] = true
+	}
+}
+
+func moveRootSessionKeys(root map[string]any) {
+	if !hasAnyConfigKey(root, "remoteAddress", "remotePort", "updateInterval") {
+		return
+	}
+	session, ok := configChildMap(root, "session")
+	if !ok {
+		return
+	}
+	moveConfigKey(root, session, "remoteAddress")
+	moveConfigKey(root, session, "remotePort")
+	moveConfigKey(root, session, "updateInterval")
+}
+
+func moveFriendExpiryKeys(friendSync map[string]any) {
+	if !hasAnyConfigKey(friendSync, "should-expire", "shouldExpire", "expire-days", "expireDays", "expire-check", "expireCheck") {
+		return
+	}
+	expiry, ok := configChildMap(friendSync, "expiry")
+	if !ok {
+		return
+	}
+	moveAliasedConfigKey(friendSync, expiry, "should-expire", "enabled")
+	moveAliasedConfigKey(friendSync, expiry, "shouldExpire", "enabled")
+	moveAliasedConfigKey(friendSync, expiry, "expire-days", "days")
+	moveAliasedConfigKey(friendSync, expiry, "expireDays", "days")
+	moveAliasedConfigKey(friendSync, expiry, "expire-check", "check")
+	moveAliasedConfigKey(friendSync, expiry, "expireCheck", "check")
+}
+
+func hasAnyConfigKey(m map[string]any, keys ...string) bool {
+	for _, key := range keys {
+		if _, ok := m[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func configChildMap(parent map[string]any, key string) (map[string]any, bool) {
+	if child, ok := parent[key].(map[string]any); ok {
+		return child, true
+	}
+	if _, exists := parent[key]; exists {
+		return nil, false
+	}
+	child := map[string]any{}
+	parent[key] = child
+	return child, true
+}
+
+func moveConfigKey(from, to map[string]any, key string) {
+	moveAliasedConfigKey(from, to, key, key)
+}
+
+func moveAliasedConfigKey(from, to map[string]any, sourceKey, targetKey string) {
+	value, ok := from[sourceKey]
+	if !ok {
+		return
+	}
+	if _, exists := to[targetKey]; !exists {
+		to[targetKey] = value
+	}
+	delete(from, sourceKey)
 }
 
 func resolvePath(base, path string) string {
