@@ -47,7 +47,6 @@ type friendSyncOptions struct {
 	expire       bool
 	autoFollow   bool
 	autoUnfollow bool
-	skip         bool
 }
 
 type friendSyncRunState struct {
@@ -55,14 +54,17 @@ type friendSyncRunState struct {
 	autoFollowUntil time.Time
 }
 
-func (s *friendSyncRunState) options(now time.Time) friendSyncOptions {
-	mutationsAllowed := !now.Before(s.retryUntil)
+func (s *friendSyncRunState) options(now time.Time, expire bool) friendSyncOptions {
+	mutationsAllowed := !s.backingOff(now)
 	return friendSyncOptions{
-		expire:       true,
+		expire:       expire,
 		autoFollow:   mutationsAllowed && !now.Before(s.autoFollowUntil),
 		autoUnfollow: mutationsAllowed,
-		skip:         !mutationsAllowed,
 	}
+}
+
+func (s *friendSyncRunState) backingOff(now time.Time) bool {
+	return now.Before(s.retryUntil)
 }
 
 func (s *friendSyncRunState) recordError(now time.Time, err error) {
@@ -227,11 +229,11 @@ func (s FriendSyncer) runSync(ctx context.Context, state *friendSyncRunState, ex
 	if state == nil {
 		state = &friendSyncRunState{}
 	}
-	opts := state.options(time.Now())
-	opts.expire = expire
-	if opts.skip {
+	now := time.Now()
+	if state.backingOff(now) {
 		return
 	}
+	opts := state.options(now, expire)
 	err := s.syncWithOptions(ctx, opts)
 	if err == nil {
 		return

@@ -76,12 +76,12 @@ func TestFriendSyncRunStateSuppressesMutationsDuringRetryAfter(t *testing.T) {
 	state := friendSyncRunState{}
 	state.recordError(now, &RetryAfterError{Delay: 2 * time.Minute})
 
-	blocked := state.options(now.Add(time.Minute))
+	blocked := state.options(now.Add(time.Minute), true)
 	if blocked.autoFollow || blocked.autoUnfollow {
 		t.Fatalf("expected mutations suppressed during retry-after, got %#v", blocked)
 	}
 
-	allowed := state.options(now.Add(3 * time.Minute))
+	allowed := state.options(now.Add(3*time.Minute), true)
 	if !allowed.autoFollow || !allowed.autoUnfollow {
 		t.Fatalf("expected mutations after retry-after, got %#v", allowed)
 	}
@@ -92,14 +92,12 @@ func TestFriendSyncRunStateSkipsReadsDuringRetryAfter(t *testing.T) {
 	state := friendSyncRunState{}
 	state.recordError(now, &RetryAfterError{Delay: 2 * time.Minute})
 
-	blocked := state.options(now.Add(time.Minute))
-	if !blocked.skip {
-		t.Fatalf("expected sync skipped during retry-after, got %#v", blocked)
+	if !state.backingOff(now.Add(time.Minute)) {
+		t.Fatal("expected sync skipped during retry-after")
 	}
 
-	allowed := state.options(now.Add(3 * time.Minute))
-	if allowed.skip {
-		t.Fatalf("expected sync after retry-after, got %#v", allowed)
+	if state.backingOff(now.Add(3 * time.Minute)) {
+		t.Fatal("expected sync after retry-after")
 	}
 }
 
@@ -108,7 +106,7 @@ func TestFriendSyncRunStateSuppressesAutoFollowWhenFriendListIsFull(t *testing.T
 	state := friendSyncRunState{}
 	state.recordError(now, classifiedSyncErr{kind: FriendErrorKindFullList})
 
-	opts := state.options(now.Add(time.Minute))
+	opts := state.options(now.Add(time.Minute), true)
 	if opts.autoFollow {
 		t.Fatal("expected auto-follow suppressed after friend-list-full")
 	}
