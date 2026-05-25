@@ -46,6 +46,7 @@ func NewXBLTokenSource(ctx context.Context, live oauth2.TokenSource) xsapi.Token
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx = withDefaultXBLTokenCache(ctx)
 	return &xblTokenSource{ctx: ctx, src: live}
 }
 
@@ -70,6 +71,8 @@ func newMinecraftTokenSource(ctx, tokenCtx context.Context, live oauth2.TokenSou
 		ctx = context.WithValue(ctx, oauth2.HTTPClient, client)
 		tokenCtx = context.WithValue(tokenCtx, oauth2.HTTPClient, client)
 	}
+	ctx = withDefaultXBLTokenCache(ctx)
+	tokenCtx = withDefaultXBLTokenCache(tokenCtx)
 	discovery, err := service.Discover(ctx, service.ApplicationTypeMinecraftPE, protocol.CurrentVersion)
 	if err != nil {
 		return nil, fmt.Errorf("discover minecraft services: %w", err)
@@ -82,6 +85,13 @@ func newMinecraftTokenSource(ctx, tokenCtx context.Context, live oauth2.TokenSou
 		env.HTTPClient = client
 	}
 	return env.TokenSource(tokenCtx, live, service.TokenConfig{}), nil
+}
+
+func withDefaultXBLTokenCache(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return auth.WithXBLTokenCache(ctx, auth.AndroidConfig.NewTokenCache())
 }
 
 type liveTokenSource struct {

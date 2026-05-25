@@ -74,6 +74,46 @@ func TestNewLiveTokenSourceUsesContextHTTPClientForRefresh(t *testing.T) {
 	}
 }
 
+func TestNewXBLTokenSourceCachesDeviceAndXSTSTokens(t *testing.T) {
+	var deviceRequests int
+	var sisuRequests int
+	validUntil := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	client := &http.Client{Transport: tokenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.String() {
+		case "https://device.auth.xboxlive.com/device/authenticate":
+			deviceRequests++
+			return tokenTestResponse(http.StatusOK, `{"IssueInstant":"`+validUntil+`","NotAfter":"`+validUntil+`","Token":"device"}`), nil
+		case "https://sisu.xboxlive.com/authorize":
+			sisuRequests++
+			return tokenTestResponse(http.StatusOK, `{"AuthorizationToken":{"IssueInstant":"`+validUntil+`","NotAfter":"`+validUntil+`","Token":"xsts","DisplayClaims":{"xui":[{"gtg":"Tester","xid":"1","uhs":"user"}]}}}`), nil
+		default:
+			t.Fatalf("unexpected token request %s %s", req.Method, req.URL)
+		}
+		return nil, nil
+	})}
+	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, client)
+	src := NewXBLTokenSource(ctx, oauth2.StaticTokenSource(&oauth2.Token{
+		AccessToken: "live",
+		Expiry:      time.Now().Add(time.Hour),
+	}))
+
+	for i := 0; i < 2; i++ {
+		tok, err := src.Token()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := tok.DisplayClaims().XUID; got != "1" {
+			t.Fatalf("xuid = %q, want 1", got)
+		}
+	}
+	if deviceRequests != 1 {
+		t.Fatalf("device auth requests = %d, want 1", deviceRequests)
+	}
+	if sisuRequests != 1 {
+		t.Fatalf("sisu auth requests = %d, want 1", sisuRequests)
+	}
+}
+
 type tokenRoundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f tokenRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
