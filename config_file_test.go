@@ -1,6 +1,8 @@
 package broadcaster
 
 import (
+	"context"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -116,6 +118,45 @@ func TestConfigFileDisablesFriendSyncWhenNoActionsConfigured(t *testing.T) {
 	}
 	if runtime.FriendSync != nil {
 		t.Fatalf("expected friend sync disabled, got %#v", runtime.FriendSync)
+	}
+}
+
+func TestHTTPConfigClientConfiguresProxyTransport(t *testing.T) {
+	cfg := HTTPFileConfig{Proxy: "http://127.0.0.1:8080"}
+
+	client, err := cfg.Client(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyURL, err := client.Transport.(*http.Transport).Proxy(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proxyURL.String() != "http://127.0.0.1:8080" {
+		t.Fatalf("unexpected proxy URL %q", proxyURL.String())
+	}
+}
+
+func TestHTTPConfigClientRejectsInvalidProxy(t *testing.T) {
+	cfg := HTTPFileConfig{Proxy: "://bad"}
+
+	if _, err := cfg.Client(nil); err == nil {
+		t.Fatal("expected invalid proxy error")
+	}
+}
+
+func TestHTTPConfigClientRejectsCustomTransportWithProxy(t *testing.T) {
+	cfg := HTTPFileConfig{Proxy: "http://127.0.0.1:8080"}
+	base := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, nil
+	})}
+
+	if _, err := cfg.Client(base); err == nil {
+		t.Fatal("expected custom transport error")
 	}
 }
 

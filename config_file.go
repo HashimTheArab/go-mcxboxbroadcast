@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,22 +16,28 @@ import (
 
 	"github.com/df-mc/go-xsapi"
 	"github.com/pelletier/go-toml/v2"
+	"github.com/sandertv/gophertunnel/minecraft"
 	"github.com/sandertv/gophertunnel/minecraft/service"
 	"golang.org/x/oauth2"
 	"gopkg.in/yaml.v3"
 )
 
-const CurrentConfigVersion = 2
+const CurrentConfigVersion = 3
 
 type ConfigFile struct {
 	ConfigVersion                int                `yaml:"configVersion" toml:"configVersion"`
 	DebugMode                    bool               `yaml:"debugMode" toml:"debugMode"`
 	SuppressSessionUpdateMessage bool               `yaml:"suppressSessionUpdateMessage" toml:"suppressSessionUpdateMessage"`
+	HTTP                         HTTPFileConfig     `yaml:"http" toml:"http"`
 	Session                      SessionFileConfig  `yaml:"session" toml:"session"`
 	FriendSync                   FriendFileConfig   `yaml:"friendSync" toml:"friendSync"`
 	Notifications                NotificationConfig `yaml:"notifications" toml:"notifications"`
 	Gallery                      GalleryFileConfig  `yaml:"gallery" toml:"gallery"`
 	Accounts                     AccountsConfig     `yaml:"accounts" toml:"accounts"`
+}
+
+type HTTPFileConfig struct {
+	Proxy string `yaml:"proxy" toml:"proxy"`
 }
 
 type SessionFileConfig struct {
@@ -150,6 +157,46 @@ func DefaultConfigFile() ConfigFile {
 	}
 }
 
+func (h HTTPFileConfig) Client(base *http.Client) (*http.Client, error) {
+	if base == nil {
+		base = http.DefaultClient
+	}
+	proxy := strings.TrimSpace(h.Proxy)
+	if proxy == "" {
+		return base, nil
+	}
+	proxyURL, err := url.Parse(proxy)
+	if err != nil {
+		return nil, fmt.Errorf("parse http proxy: %w", err)
+	}
+	if proxyURL.Scheme == "" || proxyURL.Host == "" {
+		return nil, fmt.Errorf("parse http proxy: proxy URL must include scheme and host")
+	}
+	if proxyURL.Scheme != "http" && proxyURL.Scheme != "https" {
+		return nil, fmt.Errorf("parse http proxy: unsupported scheme %q", proxyURL.Scheme)
+	}
+	transport, err := proxyTransport(base.Transport, proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	client := *base
+	client.Transport = transport
+	return &client, nil
+}
+
+func proxyTransport(base http.RoundTripper, proxyURL *url.URL) (http.RoundTripper, error) {
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	transport, ok := base.(*http.Transport)
+	if !ok {
+		return nil, fmt.Errorf("configure http proxy: custom transport %T is not supported", base)
+	}
+	transport = transport.Clone()
+	transport.Proxy = http.ProxyURL(proxyURL)
+	return transport, nil
+}
+
 func LoadConfigFile(path string) (ConfigFile, error) {
 	cfg := DefaultConfigFile()
 	data, err := os.ReadFile(path)
@@ -226,6 +273,9 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 			WebQueryFallback: c.Session.WebQueryFallback,
 			QueryFallback:    c.Session.ConfigFallback,
 			WebQueryClient:   in.HTTPClient,
+		},
+		ListenConfig: minecraft.ListenConfig{
+			HTTPClient: in.HTTPClient,
 		},
 		UpdateInterval:               time.Duration(c.Session.UpdateInterval) * time.Second,
 		HTTPClient:                   in.HTTPClient,

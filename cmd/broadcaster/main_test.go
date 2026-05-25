@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -130,6 +131,69 @@ func TestRunBroadcasterCommandStartsAndClosesBroadcaster(t *testing.T) {
 	}
 	if gotSubAccounts != 1 {
 		t.Fatalf("expected one sub-account, got %d", gotSubAccounts)
+	}
+}
+
+func TestRunBroadcasterCommandAppliesConfiguredHTTPProxy(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var gotClient *http.Client
+	var gotAuthClient *http.Client
+	err := runBroadcasterCommand(ctx, commandOptions{
+		ConfigPath: "/base/config.yml",
+	}, commandDeps{
+		Stdout: io.Discard,
+		LoadConfig: func(string) (broadcaster.ConfigFile, error) {
+			cfg := broadcaster.DefaultConfigFile()
+			cfg.HTTP.Proxy = "http://127.0.0.1:8080"
+			cfg.Session.RemoteAddress = "127.0.0.1"
+			cfg.Session.RemotePort = "19132"
+			return cfg, nil
+		},
+		LoadLiveToken: func(string) (*oauth2.Token, error) {
+			return nil, errors.ErrUnsupported
+		},
+		NewLiveTokenSource: func(*oauth2.Token, io.Writer) oauth2.TokenSource {
+			return staticOAuthTokenSource{}
+		},
+		SaveLiveToken: func(string, *oauth2.Token) error {
+			return nil
+		},
+		NewXBLTokenSource: func(ctx context.Context, _ oauth2.TokenSource) xsapi.TokenSource {
+			gotAuthClient, _ = ctx.Value(oauth2.HTTPClient).(*http.Client)
+			return staticXBLTokenSource{}
+		},
+		NewBroadcaster: func(conf broadcaster.Config) (commandBroadcaster, error) {
+			gotClient = conf.HTTPClient
+			return fakeCommandBroadcaster{
+				start: func(context.Context) error {
+					cancel()
+					return nil
+				},
+				close: func() error {
+					return nil
+				},
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotClient == nil {
+		t.Fatal("expected configured HTTP client")
+	}
+	if gotAuthClient != gotClient {
+		t.Fatal("expected Xbox auth context to use configured HTTP client")
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyURL, err := gotClient.Transport.(*http.Transport).Proxy(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proxyURL.String() != "http://127.0.0.1:8080" {
+		t.Fatalf("unexpected proxy URL %q", proxyURL.String())
 	}
 }
 
