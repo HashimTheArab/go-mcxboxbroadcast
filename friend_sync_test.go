@@ -62,6 +62,76 @@ func TestFriendSyncerContinuesAutoFollowWhenPendingAcceptFails(t *testing.T) {
 	}
 }
 
+func TestFriendSyncerDebugLogsFriendSyncProgress(t *testing.T) {
+	var log bytes.Buffer
+	client := syncFriendClient{
+		people: []Person{
+			{XUID: "1", Gamertag: "FollowerOne", IsFollowingCaller: true},
+			{XUID: "2", Gamertag: "FollowerTwo", IsFollowingCaller: true},
+			{XUID: "3", Gamertag: "Stale", IsFollowedByCaller: true},
+		},
+	}
+	syncer := FriendSyncer{
+		Client: &client,
+		Config: FriendSyncConfig{
+			AutoFollow:   true,
+			AutoUnfollow: true,
+		},
+		Log: slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelDebug})),
+	}
+	if err := syncer.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	output := log.String()
+	for _, want := range []string{
+		`msg="friend sync scan"`,
+		`followers=2`,
+		`following=1`,
+		`msg="adding friends" count=2`,
+		`msg="added friend" xuid=1`,
+		`msg="added friend" xuid=2`,
+		`msg="added friends" count=2`,
+		`msg="removing friends" count=1`,
+		`msg="removed friend" xuid=3`,
+		`msg="removed friends" count=1`,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("debug log missing %q in:\n%s", want, output)
+		}
+	}
+}
+
+func TestFriendSyncerDebugLogsPendingFriendAccepts(t *testing.T) {
+	var log bytes.Buffer
+	client := syncFriendClient{
+		accept: func(context.Context) ([]Person, error) {
+			return []Person{
+				{XUID: "9", Gamertag: "PendingOne"},
+				{XUID: "10", Gamertag: "PendingTwo"},
+			}, nil
+		},
+	}
+	syncer := FriendSyncer{
+		Client: &client,
+		Config: FriendSyncConfig{
+			AutoFollow: true,
+		},
+		Log: slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelDebug})),
+	}
+	if err := syncer.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	output := log.String()
+	for _, want := range []string{
+		`msg="accepting pending friend requests"`,
+		`msg="added friends" source=pending_requests count=2`,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("debug log missing %q in:\n%s", want, output)
+		}
+	}
+}
+
 func TestFriendSyncerStopsAutoFollowPassWhenFriendListIsFull(t *testing.T) {
 	var log bytes.Buffer
 	fullErr := classifiedSyncErr{kind: "friend_list_full"}
@@ -143,6 +213,7 @@ type syncFriendClient struct {
 	follow      func(context.Context, string) error
 	unfollow    func(context.Context, string) error
 	followCalls int
+	removeCalls int
 }
 
 func (c *syncFriendClient) Friends(context.Context) ([]Person, error) {
@@ -158,6 +229,7 @@ func (c *syncFriendClient) Follow(ctx context.Context, xuid string) error {
 }
 
 func (c *syncFriendClient) Unfollow(ctx context.Context, xuid string) error {
+	c.removeCalls++
 	if c.unfollow != nil {
 		return c.unfollow(ctx, xuid)
 	}

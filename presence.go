@@ -74,6 +74,8 @@ func (c PresenceClient) Run(ctx context.Context, log *slog.Logger) {
 			if log != nil {
 				log.Error("update presence", "err", err)
 			}
+		} else if log != nil {
+			log.Debug("presence updated", "next_update", heartbeat)
 		}
 		timer := time.NewTimer(heartbeat)
 		select {

@@ -33,6 +33,11 @@ If `config.yml` does not exist, the command writes a default one and starts from
 those values. The first run starts Microsoft device-code authentication and
 stores the Live token at `accounts.primaryCachePath`.
 
+Use `-debug` or set `debugMode: true` in the config to show detailed runtime
+events such as session creation, presence heartbeats, friend sync scans, pending
+friend-request accepts, friends being added/removed, and the final add/remove
+counts for each sync pass.
+
 The config exposes the same operator-facing areas as MCXboxBroadcast:
 
 - session target, remote address/port auto behavior, update interval, query

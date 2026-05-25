@@ -89,6 +89,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	b.ctx, b.cancel = context.WithCancel(ctx)
 	b.done = make(chan struct{})
 
+	b.debug("starting broadcaster")
 	sig, err := b.signalingFor(b.ctx)
 	if err != nil {
 		b.cancel()
@@ -102,11 +103,14 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 		return err
 	}
 	b.announcer = b.newAnnouncer()
+	b.debug("creating xbox live session")
 	if err := b.announcer.Announce(b.ctx, status); err != nil {
 		b.cancel()
 		err = errors.Join(fmt.Errorf("announce session: %w", err), b.cleanupStartupFailure(true))
 		return err
 	}
+	b.debug("created xbox live session")
+	b.debug("starting sub-account sessions", "count", len(b.conf.SubAccounts))
 	if err := b.startSubAccounts(b.ctx); err != nil {
 		b.cancel()
 		err = errors.Join(err, b.cleanupStartupFailure(true))
@@ -134,6 +138,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	listenConf.ErrorLog = b.log
 	listenConf.StatusProvider = b.minecraftStatusProvider(status)
 	listenConf.AuthenticationDisabled = true
+	b.debug("starting nethernet listener")
 	l, err := listenConf.Listen("nethernet", "")
 	if err != nil {
 		b.cancel()
@@ -142,6 +147,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	}
 	b.listener = l
 	b.started = true
+	b.debug("started nethernet listener")
 
 	go b.accept()
 	go b.updateLoop()
@@ -150,6 +156,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	}
 	go b.uploadGalleryWithTimeout()
 	if b.conf.FriendSync != nil {
+		b.debug("starting friend sync")
 		go b.friendSyncer().Run(b.ctx)
 	}
 	return nil
@@ -343,9 +350,18 @@ func (b *Broadcaster) uploadGallery(ctx context.Context) {
 	if client.Client == nil {
 		client.Client = b.conf.HTTPClient
 	}
+	b.debug("setting showcase image", "path", cfg.ImagePath, "delete_other", cfg.DeleteOtherImages)
 	if err := client.SetShowcase(ctx, xuid, cfg.ImagePath, cfg.DeleteOtherImages); err != nil {
 		b.log.Error("set showcase image", "err", err)
 		b.notify(ctx, "Showcase image upload failed: "+err.Error())
+		return
+	}
+	b.debug("set showcase image", "path", cfg.ImagePath)
+}
+
+func (b *Broadcaster) debug(msg string, args ...any) {
+	if b.log != nil {
+		b.log.Debug(msg, args...)
 	}
 }
 

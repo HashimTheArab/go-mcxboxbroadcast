@@ -82,6 +82,7 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 		level = slog.LevelDebug
 	}
 	log := slog.New(slog.NewTextHandler(deps.Stdout, &slog.HandlerOptions{Level: level}))
+	log.Debug("debug logging enabled")
 
 	baseDir := filepath.Dir(opts.ConfigPath)
 	cachePath := resolveConfigPath(baseDir, cfg.Accounts.PrimaryCachePath)
