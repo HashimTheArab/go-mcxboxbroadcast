@@ -78,7 +78,7 @@ func (c FriendClient) Friends(ctx context.Context) ([]Person, error) {
 // Follow follows the XUID, which makes the user a friend when they also follow
 // the authenticated account.
 func (c FriendClient) Follow(ctx context.Context, xuid string) error {
-	return c.empty(ctx, http.MethodPut, fmt.Sprintf(followerURL, xuid))
+	return c.empty(ctx, http.MethodPut, fmt.Sprintf(peopleURL, xuid))
 }
 
 // Unfollow removes the authenticated account's follow relationship for xuid.

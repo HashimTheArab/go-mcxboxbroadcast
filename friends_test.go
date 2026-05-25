@@ -2,6 +2,7 @@ package broadcaster
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -55,6 +56,9 @@ func TestFriendClientFollowUsesContextAndAuth(t *testing.T) {
 			}
 			if req.Method != http.MethodPut {
 				t.Fatalf("unexpected method %s", req.Method)
+			}
+			if req.URL.String() != fmt.Sprintf(peopleURL, "123") {
+				t.Fatalf("unexpected URL %s", req.URL)
 			}
 			return response(http.StatusNoContent, ""), nil
 		})},
