@@ -5,7 +5,9 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -62,6 +64,21 @@ func (staticMinecraftTokenSource) ServiceToken(context.Context) (*service.Token,
 	return &service.Token{AuthorizationHeader: "Bearer minecraft", ValidUntil: time.Now().Add(time.Hour)}, nil
 }
 
+type contextCapturingTokenSource struct {
+	ctx context.Context
+}
+
+func (s *contextCapturingTokenSource) XSTSToken(ctx context.Context, _ string) (*xsts.Token, error) {
+	s.ctx = ctx
+	return nil, errors.New("stop before network")
+}
+
+func (*contextCapturingTokenSource) DeviceToken(context.Context) (*xasd.Token, error) {
+	return nil, errors.New("unexpected device token request")
+}
+
+func (*contextCapturingTokenSource) ProofKey() *ecdsa.PrivateKey { return nil }
+
 func TestNewLiveTokenSourceUsesContextHTTPClientForRefresh(t *testing.T) {
 	var called bool
 	var client *http.Client
@@ -94,6 +111,39 @@ func TestNewLiveTokenSourceUsesContextHTTPClientForRefresh(t *testing.T) {
 	}
 	if tok.RefreshToken != "new-refresh" {
 		t.Fatalf("unexpected refresh token %q", tok.RefreshToken)
+	}
+}
+
+func TestUploadGalleryUsesBroadcasterContextForLazyMinecraftTokenSource(t *testing.T) {
+	type contextKey struct{}
+	const want = "broadcaster"
+
+	src := &contextCapturingTokenSource{}
+	broadcasterCtx := context.WithValue(context.Background(), contextKey{}, want)
+	galleryCtx, cancel := context.WithCancel(context.WithValue(context.Background(), contextKey{}, "gallery"))
+	cancel()
+
+	b := &Broadcaster{
+		ctx: broadcasterCtx,
+		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		conf: Config{
+			XBLTokenSource: src,
+			Gallery: &GalleryConfig{
+				Enabled:   true,
+				ImagePath: testGalleryImageFile(t),
+			},
+		},
+	}
+	b.uploadGallery(galleryCtx)
+
+	if src.ctx == nil {
+		t.Fatal("xbox token source was not called")
+	}
+	if src.ctx.Err() != nil {
+		t.Fatalf("lazy token source used expired context: %v", src.ctx.Err())
+	}
+	if got := src.ctx.Value(contextKey{}); got != want {
+		t.Fatalf("lazy token source context value = %v, want %q", got, want)
 	}
 }
 

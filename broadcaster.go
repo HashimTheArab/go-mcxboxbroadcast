@@ -466,7 +466,7 @@ func (b *Broadcaster) uploadGallery(ctx context.Context) {
 	}
 	src := cfg.TokenSource
 	if src == nil {
-		tokens, err := b.minecraftTokenSource(ctx)
+		tokens, err := b.minecraftTokenSource(b.sharedTokenSourceContext(ctx))
 		if err != nil {
 			b.log.Warn("minecraft services token source unavailable", "err", err)
 			b.notify(ctx, "Showcase image upload skipped: Minecraft services token source is unavailable.")
@@ -491,6 +491,16 @@ func (b *Broadcaster) uploadGallery(ctx context.Context) {
 		return
 	}
 	b.debug("set showcase image", "path", cfg.ImagePath)
+}
+
+func (b *Broadcaster) sharedTokenSourceContext(fallback context.Context) context.Context {
+	if b.ctx != nil && b.ctx.Err() == nil {
+		return b.ctx
+	}
+	if fallback != nil {
+		return fallback
+	}
+	return context.Background()
 }
 
 func (b *Broadcaster) debug(msg string, args ...any) {
