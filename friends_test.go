@@ -31,18 +31,32 @@ func unfollowURL(xuid string) string {
 	return addFriendURL(xuid) + "?deleteRelationships=follows"
 }
 
-func TestFriendClientFriendsMapsSocialUsers(t *testing.T) {
+func TestFriendClientFriendsMergesFollowersAndSocial(t *testing.T) {
+	var requests []string
 	client := FriendClient{
 		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			if req.URL.String() != peopleHubURL("friends") {
+			requests = append(requests, req.URL.String())
+			switch req.URL.String() {
+			case peopleHubURL("followers"):
+				if req.Header.Get("X-Xbl-Contract-Version") != "7" {
+					t.Fatalf("contract version = %q, want 7", req.Header.Get("X-Xbl-Contract-Version"))
+				}
+				return response(http.StatusOK, `{"people":[{"xuid":"1","gamertag":"Follower","displayName":"Display","modernGamertag":"Modern","uniqueModernGamertag":"Modern#1234","isFollowingCaller":true}]}`), nil
+			case peopleHubURL("social"):
+				return response(http.StatusOK, `{"people":[{"xuid":"1","isFollowedByCaller":true},{"xuid":"2","gamertag":"Followed","isFollowedByCaller":true}]}`), nil
+			default:
 				t.Fatalf("unexpected URL %s", req.URL)
 			}
-			return response(http.StatusOK, `{"people":[{"xuid":"1","gamertag":"Friend","displayName":"Display","modernGamertag":"Modern","uniqueModernGamertag":"Modern#1234","isFollowingCaller":true,"isFollowedByCaller":true},{"xuid":"2","gamertag":"Followed","isFollowedByCaller":true}]}`), nil
+			return nil, nil
 		})},
 	}
 	people, err := client.Friends(context.Background())
 	if err != nil {
 		t.Fatal(err)
+	}
+	wantRequests := strings.Join([]string{peopleHubURL("followers"), peopleHubURL("social")}, ",")
+	if got := strings.Join(requests, ","); got != wantRequests {
+		t.Fatalf("requests = %s, want %s", got, wantRequests)
 	}
 	if len(people) != 2 {
 		t.Fatalf("expected 2 people, got %d", len(people))
@@ -56,7 +70,7 @@ func TestFriendClientFriendsMapsSocialUsers(t *testing.T) {
 	if !mapped.IsFollowedByCaller || !mapped.IsFollowingCaller {
 		t.Fatalf("expected mapped follow flags, got %#v", mapped)
 	}
-	if mapped.Gamertag != "Friend" || mapped.DisplayName != "Display" || mapped.ModernGamertag != "Modern" || mapped.UniqueModernGamertag != "Modern#1234" {
+	if mapped.Gamertag != "Follower" || mapped.DisplayName != "Display" || mapped.ModernGamertag != "Modern" || mapped.UniqueModernGamertag != "Modern#1234" {
 		t.Fatalf("unexpected mapped profile fields: %#v", mapped)
 	}
 }

@@ -403,6 +403,10 @@ func (b *Broadcaster) startSubAccounts(ctx context.Context) error {
 		if !account.Enabled {
 			continue
 		}
+		if account.XBLClient == nil && account.XBLTokenSource == nil {
+			b.log.Warn("sub-account skipped because xbox live credentials are missing", "sub_account", account.ID)
+			continue
+		}
 		if _, err := b.subAccountXBLClient(ctx, account); err != nil {
 			return fmt.Errorf("prepare sub-account %q xbox live client: %w", account.ID, err)
 		}

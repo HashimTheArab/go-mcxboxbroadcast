@@ -15,6 +15,8 @@ import (
 )
 
 const (
+	peopleHubDecorations      = "bio,detail,multiplayerSummary,preferredColor,presenceDetail"
+	peopleHubGroupURL         = "https://peoplehub.xboxlive.com/users/me/people/%s/decoration/" + peopleHubDecorations
 	FriendErrorKindUnknown    = "unknown"
 	FriendErrorKindFullList   = "friend_list_full"
 	FriendErrorKindRestricted = "restricted"
@@ -34,6 +36,10 @@ type Person struct {
 	IsFollowingCaller    bool   `json:"isFollowingCaller"`
 	IsFollowedByCaller   bool   `json:"isFollowedByCaller"`
 	UniqueModernGamertag string `json:"uniqueModernGamertag"`
+}
+
+type peopleHubResponse struct {
+	People []xblsocial.User `json:"people"`
 }
 
 // AcceptFriendRequestsError reports a successful bulk accept response that
@@ -114,13 +120,18 @@ func IsFriendRestricted(err error) bool {
 	return errors.As(err, &social) && social.FriendErrorKind() == FriendErrorKindRestricted
 }
 
-// Friends returns the authenticated account's Xbox social people.
+// Friends returns a merged view of people following the authenticated account
+// and people the authenticated account follows.
 func (c FriendClient) Friends(ctx context.Context) ([]Person, error) {
-	users, err := c.social().Friends(ctx)
+	followers, err := c.peopleHubGroup(ctx, "followers")
 	if err != nil {
 		return nil, err
 	}
-	return peopleFromSocialUsers(users), nil
+	social, err := c.peopleHubGroup(ctx, "social")
+	if err != nil {
+		return nil, err
+	}
+	return mergePeople(followers, social), nil
 }
 
 // Follow follows the XUID, which makes the user a friend when they also follow
@@ -174,12 +185,81 @@ func (c FriendClient) social() *xblsocial.Client {
 	return xblsocial.New(classifyingFriendHTTPClient(c.client()), nil, xsts.UserInfo{}, nil)
 }
 
+func (c FriendClient) peopleHubGroup(ctx context.Context, group string) ([]Person, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf(peopleHubGroupURL, group), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Xbl-Contract-Version", "7")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Language", "en-US")
+
+	resp, err := c.client().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, friendResponseError(req, resp)
+	}
+	var data peopleHubResponse
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil, err
+	}
+	return peopleFromSocialUsers(data.People), nil
+}
+
 func peopleFromSocialUsers(users []xblsocial.User) []Person {
 	people := make([]Person, 0, len(users))
 	for _, user := range users {
 		people = append(people, personFromSocialUser(user))
 	}
 	return people
+}
+
+func mergePeople(groups ...[]Person) []Person {
+	merged := make(map[string]Person)
+	order := make([]string, 0)
+	for _, group := range groups {
+		for _, person := range group {
+			if person.XUID == "" {
+				continue
+			}
+			existing, ok := merged[person.XUID]
+			if !ok {
+				merged[person.XUID] = person
+				order = append(order, person.XUID)
+				continue
+			}
+			merged[person.XUID] = mergePerson(existing, person)
+		}
+	}
+	out := make([]Person, 0, len(order))
+	for _, xuid := range order {
+		out = append(out, merged[xuid])
+	}
+	return out
+}
+
+func mergePerson(existing, next Person) Person {
+	existing.IsFollowedByCaller = existing.IsFollowedByCaller || next.IsFollowedByCaller
+	existing.IsFollowingCaller = existing.IsFollowingCaller || next.IsFollowingCaller
+	if existing.Gamertag == "" {
+		existing.Gamertag = next.Gamertag
+	}
+	if existing.DisplayName == "" {
+		existing.DisplayName = next.DisplayName
+	}
+	if existing.ModernGamertag == "" {
+		existing.ModernGamertag = next.ModernGamertag
+	}
+	if existing.UniqueModernGamertag == "" {
+		existing.UniqueModernGamertag = next.UniqueModernGamertag
+	}
+	return existing
 }
 
 func personFromSocialUser(user xblsocial.User) Person {

@@ -81,6 +81,36 @@ func TestBroadcasterStartSubAccountsSkipsMutualFollowWithoutXUIDs(t *testing.T) 
 	}
 }
 
+func TestBroadcasterStartSubAccountsSkipsEnabledAccountWithoutCredentials(t *testing.T) {
+	var httpCalls, publishCalls int
+	b := &Broadcaster{log: testBroadcasterLogger(), conf: Config{
+		XBLClient: &xsapi.Client{},
+		XUID:      "100",
+		HTTPClient: &http.Client{Transport: broadcasterRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			httpCalls++
+			return broadcasterResponse(http.StatusNoContent, ""), nil
+		})},
+		SubAccounts: []SubAccountConfig{{
+			ID:      "missing",
+			Enabled: true,
+		}},
+	}}
+	b.subAccountPublisher = func(context.Context, SubAccountConfig, mpsd.SessionReference, mpsd.PublishConfig) (*mpsd.Session, error) {
+		publishCalls++
+		return &mpsd.Session{}, nil
+	}
+
+	if err := b.startSubAccounts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if httpCalls != 0 {
+		t.Fatalf("expected no follow requests for uncredentialed sub-account, got %d", httpCalls)
+	}
+	if publishCalls != 0 {
+		t.Fatalf("expected no publish for uncredentialed sub-account, got %d calls", publishCalls)
+	}
+}
+
 func TestBroadcasterTransferSendsStartGameBeforeTransfer(t *testing.T) {
 	conn := &recordingTransferConn{}
 	b := &Broadcaster{log: testBroadcasterLogger(), conf: Config{
