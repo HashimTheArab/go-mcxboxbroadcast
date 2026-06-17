@@ -111,6 +111,44 @@ func TestBroadcasterStartSubAccountsSkipsEnabledAccountWithoutCredentials(t *tes
 	}
 }
 
+func TestBroadcasterClearCreatedXBLClientReferences(t *testing.T) {
+	primary := &xsapi.Client{}
+	createdSub := &xsapi.Client{}
+	externalSub := &xsapi.Client{}
+	tokens := staticMinecraftTokenSource{}
+	b := &Broadcaster{
+		xblClient:         primary,
+		minecraftTokens:   tokens,
+		createdXBLClients: []*xsapi.Client{primary, createdSub},
+		conf: Config{
+			XBLClient:            primary,
+			MinecraftTokenSource: tokens,
+			SubAccounts: []SubAccountConfig{
+				{ID: "created", XBLClient: createdSub},
+				{ID: "external", XBLClient: externalSub},
+			},
+		},
+	}
+
+	b.clearCreatedXBLClientReferences(createdXBLClientSet(b.createdXBLClients))
+
+	if b.xblClient != nil {
+		t.Fatal("created primary client cache was not cleared")
+	}
+	if b.conf.XBLClient != nil {
+		t.Fatal("created primary config client was not cleared")
+	}
+	if b.minecraftTokens != nil || b.conf.MinecraftTokenSource != nil {
+		t.Fatal("minecraft token source derived from created primary client was not cleared")
+	}
+	if b.conf.SubAccounts[0].XBLClient != nil {
+		t.Fatal("created sub-account client was not cleared")
+	}
+	if b.conf.SubAccounts[1].XBLClient != externalSub {
+		t.Fatal("external sub-account client should not be cleared")
+	}
+}
+
 func TestBroadcasterTransferSendsStartGameBeforeTransfer(t *testing.T) {
 	conn := &recordingTransferConn{}
 	b := &Broadcaster{log: testBroadcasterLogger(), conf: Config{

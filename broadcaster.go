@@ -96,7 +96,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	sig, err := b.signalingFor(b.ctx)
 	if err != nil {
 		b.cancel()
-		return err
+		return errors.Join(err, b.cleanupStartupFailure(false))
 	}
 	b.signaling = sig
 
@@ -695,16 +695,51 @@ func (b *Broadcaster) closeCreatedXBLClients() error {
 	if len(b.createdXBLClients) == 0 {
 		return nil
 	}
+	created := createdXBLClientSet(b.createdXBLClients)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	var err error
-	for _, client := range b.createdXBLClients {
-		if client != nil {
-			err = errors.Join(err, client.CloseContext(ctx))
-		}
+	for client := range created {
+		err = errors.Join(err, client.CloseContext(ctx))
 	}
+	b.clearCreatedXBLClientReferences(created)
 	b.createdXBLClients = nil
 	return err
+}
+
+func createdXBLClientSet(clients []*xsapi.Client) map[*xsapi.Client]struct{} {
+	created := make(map[*xsapi.Client]struct{}, len(clients))
+	for _, client := range clients {
+		if client != nil {
+			created[client] = struct{}{}
+		}
+	}
+	return created
+}
+
+func (b *Broadcaster) clearCreatedXBLClientReferences(created map[*xsapi.Client]struct{}) {
+	primaryCreated := xblClientCreated(b.conf.XBLClient, created) || xblClientCreated(b.xblClient, created)
+	if primaryCreated {
+		b.conf.XBLClient = nil
+		b.xblClient = nil
+		if b.minecraftTokens != nil {
+			b.minecraftTokens = nil
+			b.conf.MinecraftTokenSource = nil
+		}
+	}
+	for i := range b.conf.SubAccounts {
+		if xblClientCreated(b.conf.SubAccounts[i].XBLClient, created) {
+			b.conf.SubAccounts[i].XBLClient = nil
+		}
+	}
+}
+
+func xblClientCreated(client *xsapi.Client, created map[*xsapi.Client]struct{}) bool {
+	if client == nil {
+		return false
+	}
+	_, ok := created[client]
+	return ok
 }
 
 // Close stops the listener and removes the Xbox session.

@@ -40,6 +40,7 @@ type commandDeps struct {
 	LoadAccountToken   func(context.Context, string, io.Writer) (oauth2.TokenSource, error)
 	NewXBLTokenSource  func(context.Context, oauth2.TokenSource) xsapi.TokenSource
 	NewXSAPIClient     func(context.Context, xsapi.TokenSource, *http.Client, *slog.Logger) (*xsapi.Client, error)
+	CloseXSAPIClients  func(*slog.Logger, []*xsapi.Client)
 	NewBroadcaster     func(broadcaster.Config) (commandBroadcaster, error)
 }
 
@@ -86,7 +87,9 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 	log := slog.New(slog.NewTextHandler(deps.Stdout, &slog.HandlerOptions{Level: level}))
 	log.Debug("debug logging enabled")
 	var xblClients []*xsapi.Client
-	defer closeXSAPIClients(log, xblClients)
+	defer func() {
+		deps.CloseXSAPIClients(log, xblClients)
+	}()
 
 	baseDir := filepath.Dir(opts.ConfigPath)
 	cachePath := resolveConfigPath(baseDir, cfg.Accounts.PrimaryCachePath)
@@ -199,6 +202,9 @@ func (d commandDeps) withDefaults() commandDeps {
 	}
 	if d.NewXSAPIClient == nil {
 		d.NewXSAPIClient = broadcaster.NewXSAPIClient
+	}
+	if d.CloseXSAPIClients == nil {
+		d.CloseXSAPIClients = closeXSAPIClients
 	}
 	if d.NewBroadcaster == nil {
 		d.NewBroadcaster = func(conf broadcaster.Config) (commandBroadcaster, error) {

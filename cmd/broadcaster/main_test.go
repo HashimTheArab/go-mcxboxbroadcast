@@ -79,6 +79,7 @@ func TestRunBroadcasterCommandStartsAndClosesBroadcaster(t *testing.T) {
 	started := false
 	closed := false
 	var gotSubAccounts int
+	var closedClients int
 	err := runBroadcasterCommand(ctx, commandOptions{
 		ConfigPath: "/base/config.yml",
 	}, commandDeps{
@@ -110,6 +111,9 @@ func TestRunBroadcasterCommandStartsAndClosesBroadcaster(t *testing.T) {
 			return nil
 		},
 		NewXSAPIClient: testNewXSAPIClient,
+		CloseXSAPIClients: func(_ *slog.Logger, clients []*xsapi.Client) {
+			closedClients = len(clients)
+		},
 		NewBroadcaster: func(conf broadcaster.Config) (commandBroadcaster, error) {
 			gotSubAccounts = len(conf.SubAccounts)
 			return fakeCommandBroadcaster{
@@ -133,6 +137,61 @@ func TestRunBroadcasterCommandStartsAndClosesBroadcaster(t *testing.T) {
 	}
 	if gotSubAccounts != 1 {
 		t.Fatalf("expected one sub-account, got %d", gotSubAccounts)
+	}
+	if closedClients != 2 {
+		t.Fatalf("expected primary and sub-account clients to be closed, got %d", closedClients)
+	}
+}
+
+func TestRunBroadcasterCommandClosesXSAPIClientsWhenStartFails(t *testing.T) {
+	startErr := errors.New("start failed")
+	var closedClients int
+	err := runBroadcasterCommand(context.Background(), commandOptions{
+		ConfigPath: "/base/config.yml",
+	}, commandDeps{
+		Stdout: io.Discard,
+		LoadConfig: func(string) (broadcaster.ConfigFile, error) {
+			cfg := broadcaster.DefaultConfigFile()
+			cfg.Session.RemoteAddress = "127.0.0.1"
+			cfg.Session.RemotePort = "19132"
+			cfg.Accounts.SubAccounts = []broadcaster.SubAccountFile{{
+				ID:      "alt",
+				Enabled: true,
+			}}
+			return cfg, nil
+		},
+		LoadLiveToken: func(string) (*oauth2.Token, error) {
+			return nil, errors.ErrUnsupported
+		},
+		NewLiveTokenSource: func(context.Context, *oauth2.Token, io.Writer) oauth2.TokenSource {
+			return staticOAuthTokenSource{}
+		},
+		SaveLiveToken: func(string, *oauth2.Token) error {
+			return nil
+		},
+		LoadAccountToken: func(context.Context, string, io.Writer) (oauth2.TokenSource, error) {
+			return staticOAuthTokenSource{}, nil
+		},
+		NewXBLTokenSource: func(context.Context, oauth2.TokenSource) xsapi.TokenSource {
+			return nil
+		},
+		NewXSAPIClient: testNewXSAPIClient,
+		CloseXSAPIClients: func(_ *slog.Logger, clients []*xsapi.Client) {
+			closedClients = len(clients)
+		},
+		NewBroadcaster: func(broadcaster.Config) (commandBroadcaster, error) {
+			return fakeCommandBroadcaster{
+				start: func(context.Context) error {
+					return startErr
+				},
+			}, nil
+		},
+	})
+	if !errors.Is(err, startErr) {
+		t.Fatalf("expected start error, got %v", err)
+	}
+	if closedClients != 2 {
+		t.Fatalf("expected primary and sub-account clients to be closed, got %d", closedClients)
 	}
 }
 
