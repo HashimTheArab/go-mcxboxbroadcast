@@ -346,20 +346,16 @@ func (b *Broadcaster) signalingFor(ctx context.Context) (nethernet.Signaling, er
 	if err != nil {
 		return nil, err
 	}
+	src, err := b.minecraftTokenSource(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if mode == SignalingModeJSONRPC {
-		src, err := b.minecraftTokenSource(ctx)
-		if err != nil {
-			return nil, err
-		}
 		d := messaging.Dialer{
 			Log:        b.log,
 			HTTPClient: b.conf.HTTPClient,
 		}
 		return d.DialContext(ctx, src)
-	}
-	src, err := b.minecraftTokenSource(ctx)
-	if err != nil {
-		return nil, err
 	}
 	d := websocketsignaling.Dialer{
 		Log:        b.log,
