@@ -207,7 +207,7 @@ func TestConfigFileToConfigMapsOperatorSettings(t *testing.T) {
 	cfg.Gallery.ImagePath = "images/showcase.jpg"
 
 	runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{
-		TokenSource:     staticTokenSource{},
+		XBLTokenSource:  staticTokenSource{},
 		LiveTokenSource: staticOAuthSource{},
 	})
 	if err != nil {
@@ -241,7 +241,7 @@ func TestConfigFileMapsSuppressSessionUpdateMessage(t *testing.T) {
 	cfg.SuppressSessionUpdateMessage = true
 
 	runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{
-		TokenSource:     staticTokenSource{},
+		XBLTokenSource:  staticTokenSource{},
 		LiveTokenSource: staticOAuthSource{},
 	})
 	if err != nil {
@@ -259,7 +259,7 @@ func TestConfigFileDisablesFriendSyncWhenNoActionsConfigured(t *testing.T) {
 	cfg.FriendSync.Expiry.Enabled = false
 
 	runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{
-		TokenSource:     staticTokenSource{},
+		XBLTokenSource:  staticTokenSource{},
 		LiveTokenSource: staticOAuthSource{},
 	})
 	if err != nil {

@@ -7,15 +7,13 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/df-mc/go-xsapi"
 )
 
 func TestPresenceClientUpdatePostsActiveStateAndReturnsHeartbeat(t *testing.T) {
 	var called bool
 	client := PresenceClient{
-		TokenSource: staticTokenSource{},
-		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		XUID: "1",
+		Client: testAuthenticatedClient("XBL3.0 x=user;token", roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			called = true
 			if req.Method != http.MethodPost {
 				t.Fatalf("unexpected method %s", req.Method)
@@ -42,7 +40,7 @@ func TestPresenceClientUpdatePostsActiveStateAndReturnsHeartbeat(t *testing.T) {
 			resp := response(http.StatusOK, "")
 			resp.Header.Set("X-Heartbeat-After", "42")
 			return resp, nil
-		})},
+		})),
 	}
 
 	heartbeat, err := client.Update(context.Background())
@@ -59,7 +57,7 @@ func TestPresenceClientUpdatePostsActiveStateAndReturnsHeartbeat(t *testing.T) {
 
 func TestPresenceClientUpdateDefaultsHeartbeatWhenHeaderInvalid(t *testing.T) {
 	client := PresenceClient{
-		TokenSource: staticTokenSource{},
+		XUID: "1",
 		Client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			resp := response(http.StatusOK, "")
 			resp.Header.Set("X-Heartbeat-After", "bad")
@@ -77,7 +75,7 @@ func TestPresenceClientUpdateDefaultsHeartbeatWhenHeaderInvalid(t *testing.T) {
 }
 
 func TestPresenceClientUpdateRejectsEmptyXUID(t *testing.T) {
-	client := PresenceClient{TokenSource: emptyXUIDTokenSource{}}
+	client := PresenceClient{}
 
 	_, err := client.Update(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "xuid is empty") {
@@ -88,36 +86,22 @@ func TestPresenceClientUpdateRejectsEmptyXUID(t *testing.T) {
 func TestBroadcasterPresenceClientsIncludeEnabledSubAccounts(t *testing.T) {
 	httpClient := &http.Client{}
 	b := &Broadcaster{conf: Config{
-		TokenSource: staticTokenSource{},
-		HTTPClient:  httpClient,
+		XUID:       "primary",
+		HTTPClient: httpClient,
 		SubAccounts: []SubAccountConfig{
-			{ID: "enabled", Enabled: true, TokenSource: staticTokenSource{}},
-			{ID: "disabled", Enabled: false, TokenSource: staticTokenSource{}},
+			{ID: "enabled", Enabled: true, XUID: "enabled"},
+			{ID: "disabled", Enabled: false, XUID: "disabled"},
 			{ID: "missing-token", Enabled: true},
 		},
 	}}
 
 	clients := b.presenceClients()
 	if len(clients) != 2 {
-		t.Fatalf("expected primary and one enabled sub-account presence client, got %d", len(clients))
+		t.Fatalf("expected primary and enabled sub-account presence clients, got %d", len(clients))
 	}
 	for _, client := range clients {
 		if client.Client != httpClient {
 			t.Fatal("presence client did not use configured HTTP client")
 		}
 	}
-}
-
-type emptyXUIDTokenSource struct{}
-
-func (emptyXUIDTokenSource) Token() (xsapi.Token, error) {
-	return emptyXUIDToken{}, nil
-}
-
-type emptyXUIDToken struct {
-	staticToken
-}
-
-func (emptyXUIDToken) DisplayClaims() xsapi.DisplayClaims {
-	return xsapi.DisplayClaims{}
 }

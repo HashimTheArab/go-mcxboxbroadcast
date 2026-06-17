@@ -10,8 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/df-mc/go-xsapi"
 )
 
 const (
@@ -22,32 +20,23 @@ const (
 // PresenceClient updates Xbox user presence so the broadcaster account remains
 // visible as active while its MPSD session is published.
 type PresenceClient struct {
-	TokenSource xsapi.TokenSource
-	Client      *http.Client
+	XUID   string
+	Client *http.Client
 }
 
 func (c PresenceClient) Update(ctx context.Context) (time.Duration, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if c.TokenSource == nil {
-		return defaultPresenceHeartbeat, errors.New("token source is nil")
-	}
-	tok, err := c.TokenSource.Token()
-	if err != nil {
-		return defaultPresenceHeartbeat, fmt.Errorf("request token: %w", err)
-	}
-	xuid := tok.DisplayClaims().XUID
-	if xuid == "" {
+	if c.XUID == "" {
 		return defaultPresenceHeartbeat, errors.New("xuid is empty")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, presenceURL(xuid), strings.NewReader(presenceStateActive))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, presenceURL(c.XUID), strings.NewReader(presenceStateActive))
 	if err != nil {
 		return defaultPresenceHeartbeat, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Xbl-Contract-Version", "3")
-	tok.SetAuthHeader(req)
 
 	resp, err := c.client().Do(req)
 	if err != nil {

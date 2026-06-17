@@ -155,6 +155,6 @@ func galleryHTTPResponse(code int, body string) *http.Response {
 
 type galleryMinecraftTokenSource struct{}
 
-func (galleryMinecraftTokenSource) Token() (*service.Token, error) {
+func (galleryMinecraftTokenSource) ServiceToken(context.Context) (*service.Token, error) {
 	return &service.Token{AuthorizationHeader: "Bearer minecraft", ValidUntil: time.Now().Add(time.Hour)}, nil
 }

@@ -4,13 +4,14 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	broadcaster "github.com/HashimTheArab/go-mcxboxbroadcast"
-	"github.com/df-mc/go-xsapi"
+	"github.com/df-mc/go-xsapi/v2"
 	"golang.org/x/oauth2"
 )
 
@@ -106,8 +107,9 @@ func TestRunBroadcasterCommandStartsAndClosesBroadcaster(t *testing.T) {
 			return staticOAuthTokenSource{}, nil
 		},
 		NewXBLTokenSource: func(context.Context, oauth2.TokenSource) xsapi.TokenSource {
-			return staticXBLTokenSource{}
+			return nil
 		},
+		NewXSAPIClient: testNewXSAPIClient,
 		NewBroadcaster: func(conf broadcaster.Config) (commandBroadcaster, error) {
 			gotSubAccounts = len(conf.SubAccounts)
 			return fakeCommandBroadcaster{
@@ -160,8 +162,9 @@ func TestRunBroadcasterCommandAppliesConfiguredHTTPProxy(t *testing.T) {
 		},
 		NewXBLTokenSource: func(ctx context.Context, _ oauth2.TokenSource) xsapi.TokenSource {
 			gotAuthClient, _ = ctx.Value(oauth2.HTTPClient).(*http.Client)
-			return staticXBLTokenSource{}
+			return nil
 		},
+		NewXSAPIClient: testNewXSAPIClient,
 		NewBroadcaster: func(conf broadcaster.Config) (commandBroadcaster, error) {
 			gotClient = conf.HTTPClient
 			return fakeCommandBroadcaster{
@@ -223,8 +226,9 @@ func TestRunBroadcasterCommandAppliesConfiguredHTTPProxyToPrimaryLiveTokenSource
 			return nil
 		},
 		NewXBLTokenSource: func(context.Context, oauth2.TokenSource) xsapi.TokenSource {
-			return staticXBLTokenSource{}
+			return nil
 		},
+		NewXSAPIClient: testNewXSAPIClient,
 		NewBroadcaster: func(conf broadcaster.Config) (commandBroadcaster, error) {
 			gotRuntimeClient = conf.HTTPClient
 			return fakeCommandBroadcaster{
@@ -282,8 +286,9 @@ func TestRunBroadcasterCommandAppliesConfiguredHTTPProxyToSubAccountTokenLoad(t 
 			return staticOAuthTokenSource{}, nil
 		},
 		NewXBLTokenSource: func(context.Context, oauth2.TokenSource) xsapi.TokenSource {
-			return staticXBLTokenSource{}
+			return nil
 		},
+		NewXSAPIClient: testNewXSAPIClient,
 		NewBroadcaster: func(conf broadcaster.Config) (commandBroadcaster, error) {
 			gotRuntimeClient = conf.HTTPClient
 			return fakeCommandBroadcaster{
@@ -335,8 +340,9 @@ func TestRunBroadcasterCommandPreservesHTTPClientWithoutConfiguredProxy(t *testi
 			return nil
 		},
 		NewXBLTokenSource: func(context.Context, oauth2.TokenSource) xsapi.TokenSource {
-			return staticXBLTokenSource{}
+			return nil
 		},
+		NewXSAPIClient: testNewXSAPIClient,
 		NewBroadcaster: func(conf broadcaster.Config) (commandBroadcaster, error) {
 			gotRuntimeClient = conf.HTTPClient
 			return fakeCommandBroadcaster{
@@ -367,10 +373,8 @@ func (staticOAuthTokenSource) Token() (*oauth2.Token, error) {
 	return &oauth2.Token{AccessToken: "token"}, nil
 }
 
-type staticXBLTokenSource struct{}
-
-func (staticXBLTokenSource) Token() (xsapi.Token, error) {
-	return nil, nil
+func testNewXSAPIClient(context.Context, xsapi.TokenSource, *http.Client, *slog.Logger) (*xsapi.Client, error) {
+	return &xsapi.Client{}, nil
 }
 
 type fakeCommandBroadcaster struct {

@@ -192,7 +192,7 @@ func (g GalleryClient) request(ctx context.Context, method, url string, body io.
 	if err != nil {
 		return nil, err
 	}
-	tok, err := g.TokenSource.Token()
+	tok, err := g.TokenSource.ServiceToken(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("request minecraft token: %w", err)
 	}

@@ -9,7 +9,7 @@ import (
 
 func TestStatusDefaults(t *testing.T) {
 	b, err := New(Config{
-		TokenSource:     staticTokenSource{},
+		XBLTokenSource:  staticTokenSource{},
 		LiveTokenSource: staticOAuthSource{},
 		Server:          ServerInfo{Host: "127.0.0.1", Port: 19132},
 		Status: Status{

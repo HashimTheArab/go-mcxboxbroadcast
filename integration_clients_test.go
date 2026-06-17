@@ -310,7 +310,7 @@ func TestFileHistoryStoreRecordsAndClearsLastSeen(t *testing.T) {
 
 func TestStatusUsesConfiguredProvider(t *testing.T) {
 	b, err := New(Config{
-		TokenSource:     staticTokenSource{},
+		XBLTokenSource:  staticTokenSource{},
 		LiveTokenSource: staticOAuthSource{},
 		Server:          ServerInfo{Host: "127.0.0.1", Port: 19132},
 		StatusProvider:  staticStatusProvider{host: "Provider Host", world: "Provider World"},
@@ -524,7 +524,7 @@ type fakeInviter struct {
 	invite func(string)
 }
 
-func (f fakeInviter) Invite(xuid string, _ int32) error {
+func (f fakeInviter) Invite(_ context.Context, xuid, _ string) error {
 	f.invite(xuid)
 	return nil
 }
@@ -576,8 +576,10 @@ type fakeSignaling struct {
 }
 
 func (f *fakeSignaling) Signal(context.Context, *nethernet.Signal) error { return nil }
-func (f *fakeSignaling) Notify(chan<- *nethernet.Signal) func()          { return func() {} }
-func (f *fakeSignaling) Context() context.Context                        { return context.Background() }
+func (f *fakeSignaling) Notify() (<-chan *nethernet.Signal, func()) {
+	return make(chan *nethernet.Signal), func() {}
+}
+func (f *fakeSignaling) Context() context.Context { return context.Background() }
 func (f *fakeSignaling) Credentials(context.Context) (*nethernet.Credentials, error) {
 	return nil, nil
 }
@@ -597,7 +599,7 @@ type minecraftTokenSourceWithPMID struct {
 	pmid uuid.UUID
 }
 
-func (s minecraftTokenSourceWithPMID) Token() (*service.Token, error) {
+func (s minecraftTokenSourceWithPMID) ServiceToken(context.Context) (*service.Token, error) {
 	payload, err := json.Marshal(map[string]string{"pmid": s.pmid.String()})
 	if err != nil {
 		return nil, err
@@ -605,5 +607,6 @@ func (s minecraftTokenSourceWithPMID) Token() (*service.Token, error) {
 	return &service.Token{
 		AuthorizationHeader: "Bearer header." + base64.RawURLEncoding.EncodeToString(payload) + ".signature",
 		ValidUntil:          time.Now().Add(time.Hour),
+		Claims:              service.Claims{PlayerMessagingID: s.pmid},
 	}, nil
 }

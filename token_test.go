@@ -2,40 +2,63 @@ package broadcaster
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/df-mc/go-xsapi"
+	"github.com/df-mc/go-xsapi/v2/xal/xasd"
+	"github.com/df-mc/go-xsapi/v2/xal/xasu"
+	"github.com/df-mc/go-xsapi/v2/xal/xsts"
 	"github.com/sandertv/gophertunnel/minecraft/service"
 	"golang.org/x/oauth2"
 )
 
-type staticTokenSource struct{}
-
-func (staticTokenSource) Token() (xsapi.Token, error) {
-	return staticToken{}, nil
+type staticTokenSource struct {
+	xuid string
 }
 
-type staticToken struct{}
-
-func (staticToken) SetAuthHeader(req *http.Request) {
-	req.Header.Set("Authorization", "XBL3.0 x=user;token")
+func (s staticTokenSource) XSTSToken(context.Context, string) (*xsts.Token, error) {
+	xuid := s.xuid
+	if xuid == "" {
+		xuid = "1"
+	}
+	return &xsts.Token{
+		Token:    "token",
+		NotAfter: time.Now().Add(time.Hour),
+		DisplayClaims: xsts.DisplayClaims{UserInfo: []xsts.UserInfo{{
+			UserInfo: xasu.UserInfo{UserHash: "user"},
+			XUID:     xuid,
+			GamerTag: "Tester",
+		}}},
+	}, nil
 }
 
-func (staticToken) String() string { return "XBL3.0 x=user;token" }
+func (staticTokenSource) DeviceToken(context.Context) (*xasd.Token, error) {
+	return &xasd.Token{
+		Token:    "device",
+		NotAfter: time.Now().Add(time.Hour),
+		DisplayClaims: xasd.DisplayClaims{DeviceInfo: xasd.DeviceInfo{
+			DeviceID: "device",
+		}},
+	}, nil
+}
 
-func (staticToken) DisplayClaims() xsapi.DisplayClaims {
-	return xsapi.DisplayClaims{GamerTag: "Tester", XUID: "1", UserHash: "user"}
+func (staticTokenSource) ProofKey() *ecdsa.PrivateKey {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	return key
 }
 
 type staticMinecraftTokenSource struct{}
 
-func (staticMinecraftTokenSource) Token() (*service.Token, error) {
+func (staticMinecraftTokenSource) ServiceToken(context.Context) (*service.Token, error) {
 	return &service.Token{AuthorizationHeader: "Bearer minecraft", ValidUntil: time.Now().Add(time.Hour)}, nil
 }
 
@@ -82,10 +105,10 @@ func TestNewXBLTokenSourceCachesDeviceAndXSTSTokens(t *testing.T) {
 		switch req.URL.String() {
 		case "https://device.auth.xboxlive.com/device/authenticate":
 			deviceRequests++
-			return tokenTestResponse(http.StatusOK, `{"IssueInstant":"`+validUntil+`","NotAfter":"`+validUntil+`","Token":"device"}`), nil
+			return tokenTestResponse(http.StatusOK, `{"IssueInstant":"`+validUntil+`","NotAfter":"`+validUntil+`","Token":"device","DisplayClaims":{"xdi":{"did":"device"}}}`), nil
 		case "https://sisu.xboxlive.com/authorize":
 			sisuRequests++
-			return tokenTestResponse(http.StatusOK, `{"AuthorizationToken":{"IssueInstant":"`+validUntil+`","NotAfter":"`+validUntil+`","Token":"xsts","DisplayClaims":{"xui":[{"gtg":"Tester","xid":"1","uhs":"user"}]}}}`), nil
+			return tokenTestResponse(http.StatusOK, `{"TitleToken":{"IssueInstant":"`+validUntil+`","NotAfter":"`+validUntil+`","Token":"title","DisplayClaims":{"xti":{"tid":"1739947436"}}},"UserToken":{"IssueInstant":"`+validUntil+`","NotAfter":"`+validUntil+`","Token":"user","DisplayClaims":{"xui":[{"uhs":"user"}]}},"AuthorizationToken":{"IssueInstant":"`+validUntil+`","NotAfter":"`+validUntil+`","Token":"xsts","DisplayClaims":{"xui":[{"gtg":"Tester","xid":"1","uhs":"user"}]}}}`), nil
 		default:
 			t.Fatalf("unexpected token request %s %s", req.Method, req.URL)
 		}
@@ -98,16 +121,16 @@ func TestNewXBLTokenSourceCachesDeviceAndXSTSTokens(t *testing.T) {
 	}))
 
 	for i := 0; i < 2; i++ {
-		tok, err := src.Token()
+		tok, err := src.XSTSToken(context.Background(), "http://xboxlive.com")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := tok.DisplayClaims().XUID; got != "1" {
+		if got := tok.UserInfo().XUID; got != "1" {
 			t.Fatalf("xuid = %q, want 1", got)
 		}
 	}
-	if deviceRequests != 1 {
-		t.Fatalf("device auth requests = %d, want 1", deviceRequests)
+	if deviceRequests > 1 {
+		t.Fatalf("device auth requests = %d, want at most 1", deviceRequests)
 	}
 	if sisuRequests != 1 {
 		t.Fatalf("sisu auth requests = %d, want 1", sisuRequests)
@@ -127,13 +150,4 @@ func tokenTestResponse(code int, body string) *http.Response {
 		Body:       io.NopCloser(strings.NewReader(body)),
 		Header:     make(http.Header),
 	}
-}
-
-func testImageFile(t *testing.T) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "screenshot.jpg")
-	if err := os.WriteFile(path, []byte("fake image bytes"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return path
 }

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/df-mc/go-xsapi"
-	"github.com/df-mc/go-xsapi/mpsd"
+	"github.com/df-mc/go-xsapi/v2"
+	"github.com/df-mc/go-xsapi/v2/mpsd"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/login"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
 )
@@ -22,12 +22,14 @@ func TestBroadcasterStartSubAccountsMutuallyFollowsBeforePublish(t *testing.T) {
 		return broadcasterResponse(http.StatusNoContent, ""), nil
 	})}
 	b := &Broadcaster{log: testBroadcasterLogger(), conf: Config{
-		TokenSource: xuidTokenSource("100"),
-		HTTPClient:  client,
+		XBLClient:  &xsapi.Client{},
+		XUID:       "100",
+		HTTPClient: client,
 		SubAccounts: []SubAccountConfig{{
-			ID:          "sub",
-			Enabled:     true,
-			TokenSource: xuidTokenSource("200"),
+			ID:        "sub",
+			Enabled:   true,
+			XBLClient: &xsapi.Client{},
+			XUID:      "200",
 		}},
 	}}
 	b.subAccountPublisher = func(context.Context, SubAccountConfig, mpsd.SessionReference, mpsd.PublishConfig) (*mpsd.Session, error) {
@@ -39,8 +41,8 @@ func TestBroadcasterStartSubAccountsMutuallyFollowsBeforePublish(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"PUT https://social.xboxlive.com/users/me/people/xuid(200) auth=XBL3.0 x=100;token",
-		"PUT https://social.xboxlive.com/users/me/people/xuid(100) auth=XBL3.0 x=200;token",
+		"PUT https://social.xboxlive.com/users/me/people/xuid(200) auth=",
+		"PUT https://social.xboxlive.com/users/me/people/xuid(100) auth=",
 		"publish",
 	}
 	if fmt.Sprint(calls) != fmt.Sprint(want) {
@@ -51,15 +53,16 @@ func TestBroadcasterStartSubAccountsMutuallyFollowsBeforePublish(t *testing.T) {
 func TestBroadcasterStartSubAccountsSkipsMutualFollowWithoutXUIDs(t *testing.T) {
 	var httpCalls, publishCalls int
 	b := &Broadcaster{log: testBroadcasterLogger(), conf: Config{
-		TokenSource: noXUIDTokenSource{},
+		XBLClient: &xsapi.Client{},
 		HTTPClient: &http.Client{Transport: broadcasterRoundTripFunc(func(*http.Request) (*http.Response, error) {
 			httpCalls++
 			return broadcasterResponse(http.StatusNoContent, ""), nil
 		})},
 		SubAccounts: []SubAccountConfig{{
-			ID:          "sub",
-			Enabled:     true,
-			TokenSource: xuidTokenSource("200"),
+			ID:        "sub",
+			Enabled:   true,
+			XBLClient: &xsapi.Client{},
+			XUID:      "200",
 		}},
 	}}
 	b.subAccountPublisher = func(context.Context, SubAccountConfig, mpsd.SessionReference, mpsd.PublishConfig) (*mpsd.Session, error) {
@@ -117,32 +120,6 @@ func TestBroadcasterTransferSendsStartGameBeforeTransfer(t *testing.T) {
 	if !conn.closed {
 		t.Fatal("connection was not closed")
 	}
-}
-
-type xuidTokenSource string
-
-func (s xuidTokenSource) Token() (xsapi.Token, error) {
-	return xuidToken{XUID: string(s)}, nil
-}
-
-type xuidToken struct {
-	XUID string
-}
-
-func (t xuidToken) SetAuthHeader(req *http.Request) {
-	req.Header.Set("Authorization", "XBL3.0 x="+t.XUID+";token")
-}
-
-func (t xuidToken) String() string { return "XBL3.0 x=" + t.XUID + ";token" }
-
-func (t xuidToken) DisplayClaims() xsapi.DisplayClaims {
-	return xsapi.DisplayClaims{XUID: t.XUID, UserHash: t.XUID}
-}
-
-type noXUIDTokenSource struct{}
-
-func (noXUIDTokenSource) Token() (xsapi.Token, error) {
-	return xuidToken{}, nil
 }
 
 type broadcasterRoundTripFunc func(*http.Request) (*http.Response, error)

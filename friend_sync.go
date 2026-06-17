@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/df-mc/go-xsapi/mpsd"
+	"github.com/df-mc/go-xsapi/v2/mpsd"
 )
 
 type FriendAPI interface {
@@ -21,7 +21,7 @@ type pendingFriendRequestAccepter interface {
 }
 
 type Inviter interface {
-	Invite(xuid string, titleID int32) error
+	Invite(ctx context.Context, xuid, titleID string) error
 }
 
 type HistoryStore interface {
@@ -203,7 +203,7 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 
 func (s FriendSyncer) sendInitialInvite(ctx context.Context, p Person, source string) {
 	s.debug(ctx, "sending initial invite", "xuid", p.XUID, "gamertag", p.Gamertag, "source", source)
-	if err := s.Inviter.Invite(p.XUID, int32(TitleID)); err != nil {
+	if err := s.Inviter.Invite(ctx, p.XUID, strconv.FormatInt(TitleID, 10)); err != nil {
 		if s.Log != nil {
 			s.Log.Warn("send initial invite", "xuid", p.XUID, "gamertag", p.Gamertag, "source", source, "err", err)
 		}
@@ -357,7 +357,7 @@ type sessionInviter struct {
 	session *mpsd.Session
 }
 
-func (i sessionInviter) Invite(xuid string, titleID int32) error {
-	_, err := i.session.Invite(xuid, titleID)
+func (i sessionInviter) Invite(ctx context.Context, xuid, titleID string) error {
+	_, err := i.session.Invite(ctx, xuid, titleID)
 	return err
 }

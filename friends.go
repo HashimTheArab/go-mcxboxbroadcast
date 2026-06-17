@@ -10,8 +10,6 @@ import (
 	"net/http"
 	"strconv"
 	"time"
-
-	"github.com/df-mc/go-xsapi"
 )
 
 const (
@@ -29,8 +27,7 @@ const (
 // FriendClient wraps the Xbox social endpoints used by MCXboxBroadcast for
 // follower/friend synchronization.
 type FriendClient struct {
-	TokenSource xsapi.TokenSource
-	Client      *http.Client
+	Client *http.Client
 }
 
 type Person struct {
@@ -307,18 +304,10 @@ func (c FriendClient) requestWithBody(ctx context.Context, method, url string, b
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if c.TokenSource == nil {
-		return nil, fmt.Errorf("token source is nil")
-	}
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
 		return nil, err
 	}
-	tok, err := c.TokenSource.Token()
-	if err != nil {
-		return nil, fmt.Errorf("request token: %w", err)
-	}
-	tok.SetAuthHeader(req)
 	return req, nil
 }
 

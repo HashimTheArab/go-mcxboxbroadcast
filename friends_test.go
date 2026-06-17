@@ -15,7 +15,6 @@ import (
 
 func TestFriendClientFriendsMergesFollowersAndSocial(t *testing.T) {
 	client := FriendClient{
-		TokenSource: staticTokenSource{},
 		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			body := `{"people":[]}`
 			switch req.URL.String() {
@@ -50,8 +49,7 @@ func TestFriendClientFriendsMergesFollowersAndSocial(t *testing.T) {
 func TestFriendClientFollowUsesContextAndAuth(t *testing.T) {
 	called := false
 	client := FriendClient{
-		TokenSource: staticTokenSource{},
-		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		Client: testAuthenticatedClient("XBL3.0 x=user;token", roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			called = true
 			if req.Header.Get("Authorization") == "" {
 				t.Fatal("missing authorization header")
@@ -63,7 +61,7 @@ func TestFriendClientFollowUsesContextAndAuth(t *testing.T) {
 				t.Fatalf("unexpected URL %s", req.URL)
 			}
 			return response(http.StatusNoContent, ""), nil
-		})},
+		})),
 	}
 	if err := client.Follow(context.Background(), "123"); err != nil {
 		t.Fatal(err)
@@ -75,7 +73,6 @@ func TestFriendClientFollowUsesContextAndAuth(t *testing.T) {
 
 func TestFriendClientFollowReturnsRetryAfterError(t *testing.T) {
 	client := FriendClient{
-		TokenSource: staticTokenSource{},
 		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			resp := response(http.StatusTooManyRequests, "")
 			resp.Header.Set("Retry-After", "7")
@@ -99,7 +96,6 @@ func TestFriendClientFollowReturnsRetryAfterError(t *testing.T) {
 
 func TestFriendClientUnfollowReturnsRetryAfterError(t *testing.T) {
 	client := FriendClient{
-		TokenSource: staticTokenSource{},
 		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			resp := response(http.StatusTooManyRequests, "")
 			resp.Header.Set("Retry-After", "3")
@@ -150,7 +146,6 @@ func TestFriendClientFollowClassifiesSocialModifyErrors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			client := FriendClient{
-				TokenSource: staticTokenSource{},
 				Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 					return response(http.StatusBadRequest, tt.body), nil
 				})},
@@ -179,8 +174,7 @@ func TestFriendClientFollowClassifiesSocialModifyErrors(t *testing.T) {
 func TestFriendClientAcceptPendingFriendRequests(t *testing.T) {
 	var requests []string
 	client := FriendClient{
-		TokenSource: staticTokenSource{},
-		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		Client: testAuthenticatedClient("XBL3.0 x=user;token", roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			requests = append(requests, req.Method+" "+req.URL.String())
 			if req.Header.Get("Authorization") == "" {
 				t.Fatal("missing authorization header")
@@ -204,7 +198,7 @@ func TestFriendClientAcceptPendingFriendRequests(t *testing.T) {
 				t.Fatalf("unexpected request %s %s", req.Method, req.URL)
 			}
 			return nil, nil
-		})},
+		})),
 	}
 	accepter, ok := any(client).(interface {
 		AcceptPendingFriendRequests(context.Context) ([]Person, error)
@@ -226,7 +220,6 @@ func TestFriendClientAcceptPendingFriendRequests(t *testing.T) {
 
 func TestFriendClientAcceptPendingFriendRequestsAllowsNoContentSuccess(t *testing.T) {
 	client := FriendClient{
-		TokenSource: staticTokenSource{},
 		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			switch req.Method {
 			case http.MethodGet:
@@ -251,7 +244,6 @@ func TestFriendClientAcceptPendingFriendRequestsAllowsNoContentSuccess(t *testin
 
 func TestFriendClientAcceptPendingFriendRequestsReturnsRetryAfterError(t *testing.T) {
 	client := FriendClient{
-		TokenSource: staticTokenSource{},
 		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			switch req.Method {
 			case http.MethodGet:
@@ -289,7 +281,6 @@ func TestFriendClientAcceptPendingFriendRequestsReturnsRetryAfterError(t *testin
 
 func TestFriendClientAcceptPendingFriendRequestsReportsFailedUpdates(t *testing.T) {
 	client := FriendClient{
-		TokenSource: staticTokenSource{},
 		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			switch req.Method {
 			case http.MethodGet:
@@ -325,6 +316,21 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+func testAuthenticatedClient(auth string, next http.RoundTripper) *http.Client {
+	return &http.Client{Transport: authenticatedTestTransport{auth: auth, next: next}}
+}
+
+type authenticatedTestTransport struct {
+	auth string
+	next http.RoundTripper
+}
+
+func (t authenticatedTestTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	req.Header.Set("Authorization", t.auth)
+	return t.next.RoundTrip(req)
 }
 
 func response(code int, body string) *http.Response {
