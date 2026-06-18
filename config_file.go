@@ -260,6 +260,10 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	signalingMode, err := configSignalingMode(c.Session.SignalingMode)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
 		XBLClient:            in.XBLClient,
 		XBLTokenSource:       in.XBLTokenSource,
@@ -280,7 +284,7 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 			QueryFallback:    c.Session.ConfigFallback,
 			WebQueryClient:   in.HTTPClient,
 		},
-		SignalingMode: SignalingMode(c.Session.SignalingMode),
+		SignalingMode: signalingMode,
 		ListenConfig: minecraft.ListenConfig{
 			HTTPClient: in.HTTPClient,
 		},
@@ -309,6 +313,17 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 		}
 	}
 	return cfg, nil
+}
+
+func configSignalingMode(mode string) (SignalingMode, error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "jsonrpc", "json-rpc", "messaging":
+		return SignalingModeJSONRPC, nil
+	case "websocket", "websockets", "ws":
+		return "", errors.New("session.signalingMode websocket is not supported for Minecraft friend-list publishing; set session.signalingMode: jsonrpc")
+	default:
+		return "", fmt.Errorf("unknown session.signalingMode %q", mode)
+	}
 }
 
 func (c ConfigFile) serverInfo(ctx context.Context, in RuntimeConfigInput) (ServerInfo, error) {

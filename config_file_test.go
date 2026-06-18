@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -21,6 +22,9 @@ func TestLoadConfigFileCreatesDefaults(t *testing.T) {
 	}
 	if cfg.Session.UpdateInterval != 30 {
 		t.Fatalf("unexpected update interval %d", cfg.Session.UpdateInterval)
+	}
+	if cfg.Session.SignalingMode != string(SignalingModeJSONRPC) {
+		t.Fatalf("unexpected signaling mode %q", cfg.Session.SignalingMode)
 	}
 	if cfg.Gallery.ImagePath != "screenshot.jpg" {
 		t.Fatalf("unexpected image path %q", cfg.Gallery.ImagePath)
@@ -249,6 +253,21 @@ func TestConfigFileMapsSuppressSessionUpdateMessage(t *testing.T) {
 	}
 	if !runtime.SuppressSessionUpdateMessage {
 		t.Fatal("suppress session update message was not mapped")
+	}
+}
+
+func TestConfigFileRejectsWebSocketSignalingMode(t *testing.T) {
+	cfg := DefaultConfigFile()
+	cfg.Session.SignalingMode = "websocket"
+	_, err := cfg.RuntimeConfig(RuntimeConfigInput{
+		XBLTokenSource:  staticTokenSource{},
+		LiveTokenSource: staticOAuthSource{},
+	})
+	if err == nil {
+		t.Fatal("expected websocket signaling mode error")
+	}
+	if !strings.Contains(err.Error(), "session.signalingMode websocket is not supported") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

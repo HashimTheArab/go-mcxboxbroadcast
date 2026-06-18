@@ -1,6 +1,7 @@
 package broadcaster
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -164,6 +165,24 @@ func TestXBLAnnouncerUnwrapsDiagnosticsWrappers(t *testing.T) {
 	}
 	if got != inner {
 		t.Fatal("unexpected xbl announcer")
+	}
+}
+
+func TestBroadcasterWarnsForWebSocketSignaling(t *testing.T) {
+	var log bytes.Buffer
+	b := &Broadcaster{log: slog.New(slog.NewTextHandler(&log, nil))}
+	b.warnWebSocketSignalingMode(SignalingModeWebSocket)
+	got := log.String()
+	if !strings.Contains(got, "websocket signaling may not appear in Minecraft friends list") {
+		t.Fatalf("warning missing from log: %q", got)
+	}
+	if !strings.Contains(got, "recommended_signaling_mode=jsonrpc") {
+		t.Fatalf("recommended mode missing from log: %q", got)
+	}
+	log.Reset()
+	b.warnWebSocketSignalingMode(SignalingModeJSONRPC)
+	if log.Len() != 0 {
+		t.Fatalf("unexpected warning for jsonrpc mode: %q", log.String())
 	}
 }
 

@@ -104,6 +104,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 		"friend_sync", b.conf.FriendSync != nil,
 		"gallery", b.conf.Gallery != nil && b.conf.Gallery.Enabled,
 	)
+	b.warnWebSocketSignalingMode(mode)
 	sig, err := b.signalingFor(b.ctx)
 	if err != nil {
 		b.cancel()
@@ -580,6 +581,23 @@ func (b *Broadcaster) debug(msg string, args ...any) {
 	if b.log != nil {
 		b.log.Debug(msg, args...)
 	}
+}
+
+func (b *Broadcaster) warn(msg string, args ...any) {
+	if b.log != nil {
+		b.log.Warn(msg, args...)
+	}
+}
+
+func (b *Broadcaster) warnWebSocketSignalingMode(mode SignalingMode) {
+	if mode != SignalingModeWebSocket {
+		return
+	}
+	b.warn(
+		"websocket signaling may not appear in Minecraft friends list; use jsonrpc signaling for current Minecraft clients",
+		"signaling_mode", mode,
+		"recommended_signaling_mode", SignalingModeJSONRPC,
+	)
 }
 
 func (b *Broadcaster) debugRoomStatus(msg string, status room.Status) {
