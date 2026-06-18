@@ -246,9 +246,10 @@ func (b *Broadcaster) roomStatusProvider(status room.Status) room.StatusProvider
 
 func (b *Broadcaster) roomListenConfig(status room.Status) room.ListenConfig {
 	return room.ListenConfig{
-		Announcer:      b.announcer,
-		StatusProvider: b.roomStatusProvider(status),
-		Log:            b.log,
+		Announcer:                   b.announcer,
+		StatusProvider:              b.roomStatusProvider(status),
+		DisableServerStatusOverride: true,
+		Log:                         b.log,
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/df-mc/go-nethernet"
 	"github.com/google/uuid"
+	"github.com/sandertv/gophertunnel/minecraft"
 	"github.com/sandertv/gophertunnel/minecraft/room"
 	"github.com/sandertv/gophertunnel/minecraft/service"
 )
@@ -372,8 +374,57 @@ func TestMinecraftStatusProviderMirrorsConfiguredProvider(t *testing.T) {
 	if status.PlayerCount != 1 || status.MaxPlayers != 2 {
 		t.Fatalf("minecraft status provider did not mirror counts: %#v", status)
 	}
-	if b.roomListenConfig(room.Status{}).DisableServerStatusOverride {
-		t.Fatal("room server status override must stay enabled so connection metadata is merged")
+	if !b.roomListenConfig(room.Status{}).DisableServerStatusOverride {
+		t.Fatal("room server status override must stay disabled so listener pong status does not rewrite MPSD")
+	}
+}
+
+func TestRoomListenerDoesNotOverridePublishedStatusWithMinecraftPong(t *testing.T) {
+	pmsgID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
+	inner := &fakeAnnouncer{}
+	b := &Broadcaster{
+		announcer: signalingConnectionAnnouncer{
+			Announcer: inner,
+			connection: room.Connection{
+				ConnectionType: room.ConnectionTypeJSONRPCSignaling,
+				NetherNetID:    room.NetherNetID("123456789"),
+				PmsgID:         pmsgID,
+			},
+		},
+	}
+	listener := b.roomListenConfig(room.Status{
+		HostName:       "CoveredJLA",
+		WorldName:      "Minecraft World",
+		WorldType:      WorldTypeSurvival,
+		MemberCount:    1,
+		MaxMemberCount: 20,
+		TransportLayer: room.TransportLayerNetherNet,
+	}).Wrap(fakeNetworkListener{
+		addr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 19132},
+	})
+
+	listener.ServerStatus(minecraft.ServerStatus{
+		ServerName:    "Lunar Proxy",
+		ServerSubName: "\u00a7bLunar Proxy",
+		PlayerCount:   0,
+		MaxPlayers:    1,
+	})
+
+	status := inner.Status()
+	if status.HostName != "CoveredJLA" || status.WorldName != "Minecraft World" {
+		t.Fatalf("listener pong rewrote published names: %#v", status)
+	}
+	if status.MemberCount != 1 || status.MaxMemberCount != 20 {
+		t.Fatalf("listener pong rewrote published counts: %#v", status)
+	}
+	if len(status.SupportedConnections) != 1 {
+		t.Fatalf("unexpected supported connections: %#v", status.SupportedConnections)
+	}
+	connection := status.SupportedConnections[0]
+	if connection.ConnectionType != room.ConnectionTypeJSONRPCSignaling ||
+		connection.NetherNetID != room.NetherNetID("123456789") ||
+		connection.PmsgID != pmsgID {
+		t.Fatalf("json-rpc connection was not preserved: %#v", connection)
 	}
 }
 
@@ -618,6 +669,16 @@ func (f *fakeAnnouncer) Closed() bool {
 	defer f.mu.Unlock()
 	return f.closed
 }
+
+type fakeNetworkListener struct {
+	addr net.Addr
+}
+
+func (f fakeNetworkListener) Accept() (net.Conn, error) { return nil, net.ErrClosed }
+func (f fakeNetworkListener) Close() error              { return nil }
+func (f fakeNetworkListener) Addr() net.Addr            { return f.addr }
+func (f fakeNetworkListener) ID() int64                 { return 1 }
+func (f fakeNetworkListener) PongData([]byte)           {}
 
 type fakeSignaling struct {
 	closed    bool
