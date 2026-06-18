@@ -217,7 +217,7 @@ func (b *Broadcaster) friendSyncer() FriendSyncer {
 
 func (b *Broadcaster) roomStatusProvider(status room.Status) room.StatusProvider {
 	if b.conf.StatusProvider != nil {
-		return normalizedStatusProvider{Provider: b.conf.StatusProvider}
+		return normalizedStatusProvider{Provider: b.conf.StatusProvider, OwnerID: b.primaryXUID()}
 	}
 	return room.NewStatusProvider(status)
 }
@@ -232,7 +232,7 @@ func (b *Broadcaster) roomListenConfig(status room.Status) room.ListenConfig {
 
 func (b *Broadcaster) minecraftStatusProvider(status room.Status) minecraft.ServerStatusProvider {
 	if b.conf.StatusProvider != nil {
-		return roomMinecraftStatusProvider{Provider: normalizedStatusProvider{Provider: b.conf.StatusProvider}}
+		return roomMinecraftStatusProvider{Provider: b.conf.StatusProvider}
 	}
 	return minecraft.NewStatusProvider(status.WorldName, status.HostName)
 }
@@ -297,7 +297,10 @@ func (b *Broadcaster) primaryXUID() string {
 	if b.conf.XUID != "" {
 		return b.conf.XUID
 	}
-	return clientXUID(b.conf.XBLClient)
+	if xuid := clientXUID(b.conf.XBLClient); xuid != "" {
+		return xuid
+	}
+	return clientXUID(b.xblClient)
 }
 
 func accountXUID(account SubAccountConfig) string {

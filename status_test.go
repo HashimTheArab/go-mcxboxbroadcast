@@ -11,6 +11,7 @@ func TestStatusDefaults(t *testing.T) {
 	b, err := New(Config{
 		XBLTokenSource:  staticTokenSource{},
 		LiveTokenSource: staticOAuthSource{},
+		XUID:            "123",
 		Server:          ServerInfo{Host: "127.0.0.1", Port: 19132},
 		Status: Status{
 			HostName:   "§aHost",
@@ -37,6 +38,15 @@ func TestStatusDefaults(t *testing.T) {
 	}
 	if status.MaxMemberCount != 2 {
 		t.Fatalf("unexpected max member count %d", status.MaxMemberCount)
+	}
+	if status.OwnerID != "123" {
+		t.Fatalf("unexpected owner id %q", status.OwnerID)
+	}
+	if status.TransportLayer != room.TransportLayerNetherNet {
+		t.Fatalf("unexpected transport layer %d", status.TransportLayer)
+	}
+	if status.TitleID != 0 {
+		t.Fatalf("unexpected title id %d", status.TitleID)
 	}
 }
 

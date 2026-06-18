@@ -20,8 +20,12 @@ import (
 var defaultRoomStatus = room.DefaultStatus()
 
 func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
+	ownerID, err := b.primaryXUIDForStatus(ctx)
+	if err != nil {
+		return room.Status{}, err
+	}
 	if b.conf.StatusProvider != nil {
-		return normalizeStatus(b.conf.StatusProvider.RoomStatus()), nil
+		return normalizeStatusWithOwner(b.conf.StatusProvider.RoomStatus(), ownerID), nil
 	}
 	st := b.conf.Status
 	if st.QueryTarget {
@@ -43,6 +47,7 @@ func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 	return normalizeStatus(room.Status{
 		HostName:                stripColour(defaultString(st.HostName, "MCXboxBroadcast")),
 		WorldName:               stripColour(defaultString(st.WorldName, defaultString(st.HostName, "MCXboxBroadcast"))),
+		OwnerID:                 ownerID,
 		WorldType:               defaultString(st.WorldType, room.WorldTypeCreative),
 		MemberCount:             max(st.Players, 1),
 		MaxMemberCount:          max(st.MaxPlayers, max(st.Players, 1)+1),
@@ -50,12 +55,42 @@ func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 		Joinability:             defaultString(st.Joinability, room.JoinabilityJoinableByFriends),
 		Protocol:                protocol.CurrentProtocol,
 		Version:                 protocol.CurrentVersion,
-		TitleID:                 TitleID,
+		TransportLayer:          room.TransportLayerNetherNet,
 		LanGame:                 false,
 		OnlineCrossPlatformGame: true,
 		CrossPlayDisabled:       false,
 		LevelID:                 levelID(st.LevelID),
 	}), nil
+}
+
+func (b *Broadcaster) primaryXUIDForStatus(ctx context.Context) (string, error) {
+	if xuid := b.primaryXUID(); xuid != "" {
+		return xuid, nil
+	}
+	if b.conf.XBLTokenSource == nil {
+		return "", nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	token, err := b.conf.XBLTokenSource.XSTSToken(ctx, xboxLiveRelyingParty)
+	if err != nil {
+		return "", fmt.Errorf("resolve xbox live xuid: %w", err)
+	}
+	if token == nil {
+		return "", fmt.Errorf("resolve xbox live xuid: token source returned nil XSTS token")
+	}
+	xuid := token.UserInfo().XUID
+	b.conf.XUID = xuid
+	return xuid, nil
+}
+
+func normalizeStatusWithOwner(status room.Status, ownerID string) room.Status {
+	status = normalizeStatus(status)
+	if status.OwnerID == "" {
+		status.OwnerID = ownerID
+	}
+	return status
 }
 
 func normalizeStatus(status room.Status) room.Status {
@@ -89,9 +124,10 @@ func normalizeStatus(status room.Status) room.Status {
 	if status.Version == "" {
 		status.Version = protocol.CurrentVersion
 	}
-	if status.TitleID == 0 {
-		status.TitleID = TitleID
-	}
+	// Minecraft friend-list sessions use TitleId=0 in MPSD custom properties.
+	// The package TitleID constant is still used for Xbox invite handles.
+	status.TitleID = 0
+	status.TransportLayer = room.TransportLayerNetherNet
 	status.OnlineCrossPlatformGame = true
 	if status.LevelID == "" {
 		status.LevelID = defaults.LevelID
@@ -101,13 +137,14 @@ func normalizeStatus(status room.Status) room.Status {
 
 type normalizedStatusProvider struct {
 	Provider room.StatusProvider
+	OwnerID  string
 }
 
 func (p normalizedStatusProvider) RoomStatus() room.Status {
 	if p.Provider == nil {
-		return normalizeStatus(room.Status{})
+		return normalizeStatusWithOwner(room.Status{}, p.OwnerID)
 	}
-	return normalizeStatus(p.Provider.RoomStatus())
+	return normalizeStatusWithOwner(p.Provider.RoomStatus(), p.OwnerID)
 }
 
 type roomMinecraftStatusProvider struct {
