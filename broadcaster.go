@@ -27,6 +27,12 @@ import (
 	"github.com/sandertv/gophertunnel/minecraft/service/signaling/messaging"
 )
 
+const (
+	// go-nethernet starts this context before the first remote ICE candidate is
+	// received, then reuses it for ICE, DTLS, SCTP, and channel readiness.
+	defaultNetherNetConnTimeout = 30 * time.Second
+)
+
 // Broadcaster owns the Xbox Live session, NetherNet listener, and redirect
 // loop for a published Bedrock server.
 type Broadcaster struct {
@@ -149,16 +155,17 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	}
 
 	minecraft.RegisterNetwork("nethernet", func(l *slog.Logger) minecraft.Network {
+		netherNetListenConfig := b.netherNetListenConfig()
 		return room.Network{
 			Network: minecraft.NetherNet{
 				Signaling: sig,
 				ListenConfig: nethernet.ListenConfig{
 					Log:                b.log,
-					ConnContext:        b.conf.NetherNetListenConfig.ConnContext,
-					NegotiationContext: b.conf.NetherNetListenConfig.NegotiationContext,
-					ICEGatherPolicy:    b.conf.NetherNetListenConfig.ICEGatherPolicy,
-					DisableTrickleICE:  b.conf.NetherNetListenConfig.DisableTrickleICE,
-					API:                b.conf.NetherNetListenConfig.API,
+					ConnContext:        netherNetListenConfig.ConnContext,
+					NegotiationContext: netherNetListenConfig.NegotiationContext,
+					ICEGatherPolicy:    netherNetListenConfig.ICEGatherPolicy,
+					DisableTrickleICE:  netherNetListenConfig.DisableTrickleICE,
+					API:                netherNetListenConfig.API,
 				},
 			},
 			ListenConfig: b.roomListenConfig(status),
@@ -169,7 +176,13 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	listenConf.ErrorLog = b.log
 	listenConf.StatusProvider = b.minecraftStatusProvider(status)
 	listenConf.AuthenticationDisabled = true
-	b.debug("starting nethernet listener", "listen_network", "nethernet", "auth_disabled", listenConf.AuthenticationDisabled, "server_status_override", !b.roomListenConfig(status).DisableServerStatusOverride)
+	b.debug("starting nethernet listener",
+		"listen_network", "nethernet",
+		"auth_disabled", listenConf.AuthenticationDisabled,
+		"server_status_override", !b.roomListenConfig(status).DisableServerStatusOverride,
+		"default_transport_timeout", b.usesDefaultNetherNetConnContext(),
+		"transport_timeout", b.netherNetTransportTimeoutLogValue(),
+	)
 	l, err := listenConf.Listen("nethernet", "")
 	if err != nil {
 		b.cancel()
@@ -251,6 +264,31 @@ func (b *Broadcaster) roomListenConfig(status room.Status) room.ListenConfig {
 		DisableServerStatusOverride: true,
 		Log:                         b.log,
 	}
+}
+
+func (b *Broadcaster) netherNetListenConfig() nethernet.ListenConfig {
+	conf := b.conf.NetherNetListenConfig
+	if conf.ConnContext == nil {
+		conf.ConnContext = defaultNetherNetConnContext
+	}
+	return conf
+}
+
+func (b *Broadcaster) usesDefaultNetherNetConnContext() bool {
+	return b.conf.NetherNetListenConfig.ConnContext == nil
+}
+
+func (b *Broadcaster) netherNetTransportTimeoutLogValue() string {
+	if b.usesDefaultNetherNetConnContext() {
+		return defaultNetherNetConnTimeout.String()
+	}
+	return "custom"
+}
+
+func defaultNetherNetConnContext(parent context.Context, _ *nethernet.Conn) context.Context {
+	ctx, cancel := context.WithTimeout(parent, defaultNetherNetConnTimeout)
+	context.AfterFunc(ctx, cancel)
+	return ctx
 }
 
 func (b *Broadcaster) minecraftStatusProvider(status room.Status) minecraft.ServerStatusProvider {

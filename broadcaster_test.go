@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/df-mc/go-nethernet"
 	"github.com/df-mc/go-xsapi/v2"
 	"github.com/df-mc/go-xsapi/v2/mpsd"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/login"
@@ -183,6 +185,56 @@ func TestBroadcasterWarnsForWebSocketSignaling(t *testing.T) {
 	b.warnWebSocketSignalingMode(SignalingModeJSONRPC)
 	if log.Len() != 0 {
 		t.Fatalf("unexpected warning for jsonrpc mode: %q", log.String())
+	}
+}
+
+func TestBroadcasterUsesLongerDefaultNetherNetTransportTimeout(t *testing.T) {
+	b := &Broadcaster{}
+	conf := b.netherNetListenConfig()
+	if conf.ConnContext == nil {
+		t.Fatal("default nethernet ConnContext missing")
+	}
+	ctx := conf.ConnContext(context.Background(), nil)
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("default nethernet ConnContext has no deadline")
+	}
+	remaining := time.Until(deadline)
+	if remaining < defaultNetherNetConnTimeout-time.Second || remaining > defaultNetherNetConnTimeout {
+		t.Fatalf("default nethernet ConnContext timeout = %s, want about %s", remaining, defaultNetherNetConnTimeout)
+	}
+	if !b.usesDefaultNetherNetConnContext() {
+		t.Fatal("default nethernet ConnContext should be reported as default")
+	}
+	if got := b.netherNetTransportTimeoutLogValue(); got != defaultNetherNetConnTimeout.String() {
+		t.Fatalf("transport timeout log value = %q, want %q", got, defaultNetherNetConnTimeout.String())
+	}
+}
+
+func TestBroadcasterPreservesCustomNetherNetTransportContext(t *testing.T) {
+	type contextKey struct{}
+	want := context.WithValue(context.Background(), contextKey{}, "custom")
+	called := false
+	b := &Broadcaster{conf: Config{NetherNetListenConfig: nethernet.ListenConfig{
+		ConnContext: func(context.Context, *nethernet.Conn) context.Context {
+			called = true
+			return want
+		},
+	}}}
+
+	conf := b.netherNetListenConfig()
+	got := conf.ConnContext(context.Background(), nil)
+	if !called {
+		t.Fatal("custom nethernet ConnContext was not called")
+	}
+	if got != want {
+		t.Fatal("custom nethernet ConnContext was not preserved")
+	}
+	if b.usesDefaultNetherNetConnContext() {
+		t.Fatal("custom nethernet ConnContext should not be reported as default")
+	}
+	if got := b.netherNetTransportTimeoutLogValue(); got != "custom" {
+		t.Fatalf("transport timeout log value = %q, want custom", got)
 	}
 }
 
