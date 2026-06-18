@@ -370,6 +370,8 @@ func xblAnnouncer(announcer room.Announcer) (*room.XBLAnnouncer, bool) {
 	switch a := announcer.(type) {
 	case *room.XBLAnnouncer:
 		return a, true
+	case *sessionNonceAnnouncer:
+		return a.XBLAnnouncer, true
 	case loggingAnnouncer:
 		return xblAnnouncer(a.Announcer)
 	case signalingConnectionAnnouncer:
@@ -446,11 +448,11 @@ func (b *Broadcaster) newAnnouncer(ctx context.Context) (room.Announcer, error) 
 		"read_restriction", defaultString(pub.ReadRestriction, mpsd.SessionRestrictionFollowed),
 		"xuid", b.primaryXUID(),
 	)
-	return &room.XBLAnnouncer{
+	return newSessionNonceAnnouncer(&room.XBLAnnouncer{
 		Client:           mpsdClient,
 		SessionReference: ref,
 		PublishConfig:    pub,
-	}, nil
+	}, b.primaryXUID(), b.log), nil
 }
 
 func (b *Broadcaster) startSubAccounts(ctx context.Context) error {

@@ -398,10 +398,11 @@ func TestSignalingConnectionAnnouncerPublishesJSONRPCConnection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(inner.status.SupportedConnections) != 1 {
-		t.Fatalf("unexpected connections: %#v", inner.status.SupportedConnections)
+	status := inner.Status()
+	if len(status.SupportedConnections) != 1 {
+		t.Fatalf("unexpected connections: %#v", status.SupportedConnections)
 	}
-	got := inner.status.SupportedConnections[0]
+	got := status.SupportedConnections[0]
 	if got.ConnectionType != room.ConnectionTypeJSONRPCSignaling {
 		t.Fatalf("connection type = %d, want %d", got.ConnectionType, room.ConnectionTypeJSONRPCSignaling)
 	}
@@ -437,10 +438,11 @@ func TestStartAdvertisesJSONRPCConnectionWhenConfigured(t *testing.T) {
 	}
 	defer b.Close()
 
-	if len(announcer.status.SupportedConnections) != 1 {
-		t.Fatalf("unexpected connections: %#v", announcer.status.SupportedConnections)
+	status := announcer.Status()
+	if len(status.SupportedConnections) != 1 {
+		t.Fatalf("unexpected connections: %#v", status.SupportedConnections)
 	}
-	got := announcer.status.SupportedConnections[0]
+	got := status.SupportedConnections[0]
 	if got.ConnectionType != room.ConnectionTypeJSONRPCSignaling {
 		t.Fatalf("connection type = %d, want %d", got.ConnectionType, room.ConnectionTypeJSONRPCSignaling)
 	}
@@ -450,14 +452,14 @@ func TestStartAdvertisesJSONRPCConnectionWhenConfigured(t *testing.T) {
 	if got.PmsgID != pmsgID {
 		t.Fatalf("pmsg id = %s", got.PmsgID)
 	}
-	if announcer.status.OwnerID != "123" {
-		t.Fatalf("owner id = %q", announcer.status.OwnerID)
+	if status.OwnerID != "123" {
+		t.Fatalf("owner id = %q", status.OwnerID)
 	}
-	if announcer.status.TransportLayer != room.TransportLayerNetherNet {
-		t.Fatalf("transport layer = %d", announcer.status.TransportLayer)
+	if status.TransportLayer != room.TransportLayerNetherNet {
+		t.Fatalf("transport layer = %d", status.TransportLayer)
 	}
-	if announcer.status.TitleID != 0 {
-		t.Fatalf("title id = %d", announcer.status.TitleID)
+	if status.TitleID != 0 {
+		t.Fatalf("title id = %d", status.TitleID)
 	}
 }
 
@@ -490,7 +492,7 @@ func TestStartCleansUpWhenPrimaryAnnounceFails(t *testing.T) {
 	if !errors.Is(err, announceErr) {
 		t.Fatalf("Start() error = %v, want announce error", err)
 	}
-	if !announcer.closed {
+	if !announcer.Closed() {
 		t.Fatal("announcer was not closed")
 	}
 	if !sig.closed {
@@ -585,19 +587,36 @@ func (f fakeNotifier) Notify(ctx context.Context, message string) error {
 }
 
 type fakeAnnouncer struct {
+	mu          sync.Mutex
 	announceErr error
 	closed      bool
 	status      room.Status
 }
 
 func (f *fakeAnnouncer) Announce(_ context.Context, status room.Status) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.status = status
 	return f.announceErr
 }
 
 func (f *fakeAnnouncer) Close() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.closed = true
 	return nil
+}
+
+func (f *fakeAnnouncer) Status() room.Status {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.status
+}
+
+func (f *fakeAnnouncer) Closed() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.closed
 }
 
 type fakeSignaling struct {
