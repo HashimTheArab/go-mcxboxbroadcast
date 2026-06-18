@@ -31,6 +31,7 @@ const (
 	// go-nethernet starts this context before the first remote ICE candidate is
 	// received, then reuses it for ICE, DTLS, SCTP, and channel readiness.
 	defaultNetherNetConnTimeout = 30 * time.Second
+	defaultTransferCloseDelay   = 2 * time.Second
 )
 
 // Broadcaster owns the Xbox Live session, NetherNet listener, and redirect
@@ -56,6 +57,8 @@ type Broadcaster struct {
 
 	mu      sync.Mutex
 	started bool
+
+	transferCloseDelay time.Duration
 }
 
 type transferConn interface {
@@ -786,13 +789,46 @@ func (b *Broadcaster) transfer(conn transferConn) {
 		b.log.Error("transfer client", "xuid", id.XUID, "name", id.DisplayName, "err", err)
 		return
 	}
-	_ = conn.Flush()
+	if err := conn.Flush(); err != nil {
+		b.log.Error("flush transfer", "xuid", id.XUID, "name", id.DisplayName, "err", err)
+		return
+	}
 	if recorder, ok := b.conf.FriendHistory.(HistoryRecorder); ok && id.XUID != "" {
 		if err := recorder.Seen(b.ctx, id.XUID, time.Now()); err != nil {
 			b.log.Error("record player history", "xuid", id.XUID, "err", err)
 		}
 	}
 	b.log.Info("transferred client", "xuid", id.XUID, "name", id.DisplayName, "target", b.conf.Server.Address())
+	if delay := b.effectiveTransferCloseDelay(); delay > 0 {
+		b.debug("waiting before closing transferred client", "xuid", id.XUID, "name", id.DisplayName, "delay", delay)
+		b.waitBeforeTransferClose(delay)
+	}
+}
+
+func (b *Broadcaster) effectiveTransferCloseDelay() time.Duration {
+	if b.transferCloseDelay == 0 {
+		return defaultTransferCloseDelay
+	}
+	if b.transferCloseDelay < 0 {
+		return 0
+	}
+	return b.transferCloseDelay
+}
+
+func (b *Broadcaster) waitBeforeTransferClose(delay time.Duration) {
+	if delay <= 0 {
+		return
+	}
+	ctx := b.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+	}
 }
 
 func (b *Broadcaster) writeStartGameBeforeTransfer(conn transferConn) error {

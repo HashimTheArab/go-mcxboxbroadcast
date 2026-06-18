@@ -243,7 +243,7 @@ func TestBroadcasterTransferSendsStartGameBeforeTransfer(t *testing.T) {
 	b := &Broadcaster{log: testBroadcasterLogger(), conf: Config{
 		Server: ServerInfo{Host: "play.example.net", Port: 19133},
 		Status: Status{WorldName: "Redirect Lobby"},
-	}}
+	}, transferCloseDelay: -1}
 
 	b.transfer(conn)
 
@@ -279,6 +279,48 @@ func TestBroadcasterTransferSendsStartGameBeforeTransfer(t *testing.T) {
 	}
 }
 
+func TestBroadcasterTransferWaitsBeforeClosingAfterFlush(t *testing.T) {
+	delay := 40 * time.Millisecond
+	conn := &recordingTransferConn{closedCh: make(chan struct{})}
+	b := &Broadcaster{log: testBroadcasterLogger(), conf: Config{
+		Server: ServerInfo{Host: "play.example.net", Port: 19133},
+	}, transferCloseDelay: delay}
+
+	go b.transfer(conn)
+
+	tooSoon := time.NewTimer(delay / 2)
+	defer tooSoon.Stop()
+	select {
+	case <-conn.closedCh:
+		t.Fatal("connection closed before transfer close delay elapsed")
+	case <-tooSoon.C:
+	}
+	select {
+	case <-conn.closedCh:
+	case <-time.After(delay * 5):
+		t.Fatal("connection was not closed after transfer close delay")
+	}
+}
+
+func TestBroadcasterTransferDoesNotWaitWhenFlushFails(t *testing.T) {
+	delay := time.Second
+	conn := &recordingTransferConn{
+		flushErr: fmt.Errorf("flush failed"),
+		closedCh: make(chan struct{}),
+	}
+	b := &Broadcaster{log: testBroadcasterLogger(), conf: Config{
+		Server: ServerInfo{Host: "play.example.net", Port: 19133},
+	}, transferCloseDelay: delay}
+
+	go b.transfer(conn)
+
+	select {
+	case <-conn.closedCh:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("connection waited for transfer close delay after flush failed")
+	}
+}
+
 type broadcasterRoundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f broadcasterRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -299,9 +341,11 @@ func testBroadcasterLogger() *slog.Logger {
 }
 
 type recordingTransferConn struct {
-	packets []packet.Packet
-	flushes int
-	closed  bool
+	packets  []packet.Packet
+	flushErr error
+	flushes  int
+	closed   bool
+	closedCh chan struct{}
 }
 
 func (c *recordingTransferConn) WritePacket(pk packet.Packet) error {
@@ -311,10 +355,13 @@ func (c *recordingTransferConn) WritePacket(pk packet.Packet) error {
 
 func (c *recordingTransferConn) Flush() error {
 	c.flushes++
-	return nil
+	return c.flushErr
 }
 
 func (c *recordingTransferConn) Close() error {
+	if !c.closed && c.closedCh != nil {
+		close(c.closedCh)
+	}
 	c.closed = true
 	return nil
 }
