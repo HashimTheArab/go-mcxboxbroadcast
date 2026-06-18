@@ -13,6 +13,7 @@ import (
 	"github.com/df-mc/go-xsapi/v2/mpsd"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/login"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
+	"github.com/sandertv/gophertunnel/minecraft/room"
 )
 
 func TestBroadcasterStartSubAccountsMutuallyFollowsBeforePublish(t *testing.T) {
@@ -146,6 +147,23 @@ func TestBroadcasterClearCreatedXBLClientReferences(t *testing.T) {
 	}
 	if b.conf.SubAccounts[1].XBLClient != externalSub {
 		t.Fatal("external sub-account client should not be cleared")
+	}
+}
+
+func TestXBLAnnouncerUnwrapsDiagnosticsWrappers(t *testing.T) {
+	inner := &room.XBLAnnouncer{}
+	wrapped := signalingConnectionAnnouncer{
+		Announcer: loggingAnnouncer{Announcer: inner},
+		connection: room.Connection{
+			ConnectionType: room.ConnectionTypeJSONRPCSignaling,
+		},
+	}
+	got, ok := xblAnnouncer(wrapped)
+	if !ok {
+		t.Fatal("xbl announcer was not found")
+	}
+	if got != inner {
+		t.Fatal("unexpected xbl announcer")
 	}
 }
 

@@ -29,18 +29,27 @@ func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 	}
 	st := b.conf.Status
 	if st.QueryTarget {
+		b.debug("querying target server status", "target", b.conf.Server.Address(), "web_fallback", st.WebQueryFallback, "query_fallback", st.QueryFallback)
 		if queried, err := queryStatusWithFallback(ctx, QueryOptions{
 			Address:            b.conf.Server.Address(),
 			Timeout:            st.QueryTimeout,
 			WebFallbackEnabled: st.WebQueryFallback,
 			Client:             st.WebQueryClient,
 		}); err == nil {
+			b.debug("queried target server status",
+				"server_name", queried.ServerName,
+				"server_sub_name", queried.ServerSubName,
+				"players", queried.PlayerCount,
+				"max_players", queried.MaxPlayers,
+			)
 			st.WorldName = queried.ServerName
 			st.HostName = queried.ServerSubName
 			st.Players = queried.PlayerCount
 			st.MaxPlayers = queried.MaxPlayers
 		} else if !st.QueryFallback {
 			return room.Status{}, err
+		} else {
+			b.debug("target server status query failed; using configured status fallback", "err", err)
 		}
 	}
 

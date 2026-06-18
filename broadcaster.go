@@ -92,24 +92,38 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	b.ctx, b.cancel = context.WithCancel(ctx)
 	b.done = make(chan struct{})
 
-	b.debug("starting broadcaster")
+	mode, err := b.signalingMode()
+	if err != nil {
+		b.cancel()
+		return errors.Join(err, b.cleanupStartupFailure(false))
+	}
+	b.debug("starting broadcaster",
+		"signaling_mode", mode,
+		"status_provider", b.conf.StatusProvider != nil,
+		"sub_accounts", len(b.conf.SubAccounts),
+		"friend_sync", b.conf.FriendSync != nil,
+		"gallery", b.conf.Gallery != nil && b.conf.Gallery.Enabled,
+	)
 	sig, err := b.signalingFor(b.ctx)
 	if err != nil {
 		b.cancel()
 		return errors.Join(err, b.cleanupStartupFailure(false))
 	}
 	b.signaling = sig
+	b.debug("nethernet signaling ready", "signaling_mode", mode, "signaling_type", fmt.Sprintf("%T", sig), "network_id", signalingNetworkID(sig))
 
 	status, err := b.status(b.ctx)
 	if err != nil {
 		b.cancel()
 		return errors.Join(err, b.cleanupStartupFailure(false))
 	}
+	b.debugRoomStatus("resolved room status", status)
 	b.announcer, err = b.newAnnouncer(b.ctx)
 	if err != nil {
 		b.cancel()
 		return errors.Join(err, b.cleanupStartupFailure(false))
 	}
+	b.announcer = loggingAnnouncer{Announcer: b.announcer, log: b.log}
 	connection, err := b.signalingConnection(b.ctx, sig)
 	if err != nil {
 		b.cancel()
@@ -154,7 +168,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	listenConf.ErrorLog = b.log
 	listenConf.StatusProvider = b.minecraftStatusProvider(status)
 	listenConf.AuthenticationDisabled = true
-	b.debug("starting nethernet listener")
+	b.debug("starting nethernet listener", "listen_network", "nethernet", "auth_disabled", listenConf.AuthenticationDisabled, "server_status_override", !b.roomListenConfig(status).DisableServerStatusOverride)
 	l, err := listenConf.Listen("nethernet", "")
 	if err != nil {
 		b.cancel()
@@ -167,12 +181,19 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 
 	go b.accept()
 	go b.updateLoop()
-	for _, client := range b.presenceClients() {
+	presenceClients := b.presenceClients()
+	b.debug("starting presence updates", "count", len(presenceClients), "xuids", presenceClientXUIDs(presenceClients))
+	for _, client := range presenceClients {
 		go client.Run(b.ctx, b.log)
 	}
 	go b.uploadGalleryWithTimeout()
 	if b.conf.FriendSync != nil {
-		b.debug("starting friend sync")
+		b.debug("starting friend sync",
+			"auto_follow", b.conf.FriendSync.AutoFollow,
+			"auto_unfollow", b.conf.FriendSync.AutoUnfollow,
+			"initial_invite", b.conf.FriendSync.InitialInvite,
+			"expiry_enabled", b.conf.FriendSync.ExpiryEnabled,
+		)
 		go b.friendSyncer().Run(b.ctx)
 	}
 	return nil
@@ -334,10 +355,22 @@ func authenticatedHTTPClient(client *xsapi.Client, fallback *http.Client) *http.
 	return fallback
 }
 
+type loggingAnnouncer struct {
+	room.Announcer
+	log *slog.Logger
+}
+
+func (a loggingAnnouncer) Announce(ctx context.Context, status room.Status) error {
+	debugRoomStatus(a.log, "publishing xbox live session status", status)
+	return a.Announcer.Announce(ctx, status)
+}
+
 func xblAnnouncer(announcer room.Announcer) (*room.XBLAnnouncer, bool) {
 	switch a := announcer.(type) {
 	case *room.XBLAnnouncer:
 		return a, true
+	case loggingAnnouncer:
+		return xblAnnouncer(a.Announcer)
 	case signalingConnectionAnnouncer:
 		return xblAnnouncer(a.Announcer)
 	default:
@@ -347,15 +380,22 @@ func xblAnnouncer(announcer room.Announcer) (*room.XBLAnnouncer, bool) {
 
 func (b *Broadcaster) signalingFor(ctx context.Context) (nethernet.Signaling, error) {
 	if b.conf.Signaling != nil {
+		b.debug("using configured nethernet signaling", "signaling_type", fmt.Sprintf("%T", b.conf.Signaling))
 		return b.conf.Signaling, nil
 	}
 	if b.conf.SignalingFactory != nil {
-		return b.conf.SignalingFactory(ctx, b.conf)
+		b.debug("creating nethernet signaling from factory")
+		sig, err := b.conf.SignalingFactory(ctx, b.conf)
+		if err == nil {
+			b.debug("created nethernet signaling from factory", "signaling_type", fmt.Sprintf("%T", sig), "network_id", signalingNetworkID(sig))
+		}
+		return sig, err
 	}
 	mode, err := b.signalingMode()
 	if err != nil {
 		return nil, err
 	}
+	b.debug("dialing nethernet signaling", "signaling_mode", mode)
 	src, err := b.minecraftTokenSource(ctx)
 	if err != nil {
 		return nil, err
@@ -376,6 +416,7 @@ func (b *Broadcaster) signalingFor(ctx context.Context) (nethernet.Signaling, er
 
 func (b *Broadcaster) newAnnouncer(ctx context.Context) (room.Announcer, error) {
 	if b.announcerFactory != nil {
+		b.debug("using configured xbox live announcer factory")
 		return b.announcerFactory(b), nil
 	}
 	client, err := b.primaryXBLClient(ctx)
@@ -396,6 +437,14 @@ func (b *Broadcaster) newAnnouncer(ctx context.Context) (room.Announcer, error) 
 	}
 	b.sessionRef = ref
 	pub := b.conf.PublishConfig
+	b.debug("configured xbox live session",
+		"service_config_id", ref.ServiceConfigID.String(),
+		"template", ref.TemplateName,
+		"session_name", ref.Name,
+		"join_restriction", defaultString(pub.JoinRestriction, mpsd.SessionRestrictionFollowed),
+		"read_restriction", defaultString(pub.ReadRestriction, mpsd.SessionRestrictionFollowed),
+		"xuid", b.primaryXUID(),
+	)
 	return &room.XBLAnnouncer{
 		Client:           mpsdClient,
 		SessionReference: ref,
@@ -406,6 +455,12 @@ func (b *Broadcaster) newAnnouncer(ctx context.Context) (room.Announcer, error) 
 func (b *Broadcaster) startSubAccounts(ctx context.Context) error {
 	for i := range b.conf.SubAccounts {
 		account := &b.conf.SubAccounts[i]
+		b.debug("checking sub-account",
+			"sub_account", account.ID,
+			"enabled", account.Enabled,
+			"has_xbox_credentials", subAccountHasXBLCredentials(*account),
+			"xuid", accountXUID(*account),
+		)
 		if !account.Enabled {
 			continue
 		}
@@ -426,11 +481,19 @@ func (b *Broadcaster) startSubAccounts(ctx context.Context) error {
 			return fmt.Errorf("prepare sub-account %q mutual follow: %w", account.ID, err)
 		}
 		pub := account.PublishConfig
+		b.debug("publishing sub-account session",
+			"sub_account", account.ID,
+			"xuid", account.XUID,
+			"session_name", b.sessionRef.Name,
+			"join_restriction", defaultString(pub.JoinRestriction, mpsd.SessionRestrictionFollowed),
+			"read_restriction", defaultString(pub.ReadRestriction, mpsd.SessionRestrictionFollowed),
+		)
 		s, err := b.publishSubAccount(ctx, *account, pub)
 		if err != nil {
 			return fmt.Errorf("start sub-account %q: %w", account.ID, err)
 		}
 		b.subSessions = append(b.subSessions, s)
+		b.debug("published sub-account session", "sub_account", account.ID, "xuid", account.XUID)
 	}
 	return nil
 }
@@ -517,6 +580,86 @@ func (b *Broadcaster) debug(msg string, args ...any) {
 	if b.log != nil {
 		b.log.Debug(msg, args...)
 	}
+}
+
+func (b *Broadcaster) debugRoomStatus(msg string, status room.Status) {
+	debugRoomStatus(b.log, msg, status)
+}
+
+func debugRoomStatus(log *slog.Logger, msg string, status room.Status) {
+	if log == nil || !log.Enabled(context.Background(), slog.LevelDebug) {
+		return
+	}
+	log.Debug(msg, roomStatusLogArgs(status)...)
+}
+
+func roomStatusLogArgs(status room.Status) []any {
+	return []any{
+		"host_name", status.HostName,
+		"world_name", status.WorldName,
+		"world_type", status.WorldType,
+		"owner_id", status.OwnerID,
+		"owner_id_set", status.OwnerID != "",
+		"member_count", status.MemberCount,
+		"max_member_count", status.MaxMemberCount,
+		"broadcast_setting", status.BroadcastSetting,
+		"joinability", status.Joinability,
+		"protocol", status.Protocol,
+		"version", status.Version,
+		"title_id", status.TitleID,
+		"transport_layer", status.TransportLayer,
+		"lan_game", status.LanGame,
+		"online_cross_platform_game", status.OnlineCrossPlatformGame,
+		"cross_play_disabled", status.CrossPlayDisabled,
+		"level_id_set", status.LevelID != "",
+		"level_id_len", len(status.LevelID),
+		"supported_connection_count", len(status.SupportedConnections),
+		"supported_connections", roomConnectionLogValues(status.SupportedConnections),
+	}
+}
+
+type roomConnectionLogValue struct {
+	ConnectionType uint32
+	HostIPAddress  string
+	HostPort       uint16
+	NetherNetID    string
+	NetherNetIDSet bool
+	RakNetGUIDSet  bool
+	PmsgID         string
+	PmsgIDSet      bool
+}
+
+func roomConnectionLogValues(connections []room.Connection) []roomConnectionLogValue {
+	values := make([]roomConnectionLogValue, 0, len(connections))
+	for _, connection := range connections {
+		netherNetID := string(connection.NetherNetID)
+		values = append(values, roomConnectionLogValue{
+			ConnectionType: connection.ConnectionType,
+			HostIPAddress:  connection.HostIPAddress,
+			HostPort:       connection.HostPort,
+			NetherNetID:    netherNetID,
+			NetherNetIDSet: netherNetID != "" && netherNetID != "0",
+			RakNetGUIDSet:  connection.RakNetGUID != "",
+			PmsgID:         connection.PmsgID.String(),
+			PmsgIDSet:      connection.PmsgID != uuid.Nil,
+		})
+	}
+	return values
+}
+
+func signalingNetworkID(sig nethernet.Signaling) string {
+	if sig == nil {
+		return ""
+	}
+	return sig.NetworkID()
+}
+
+func presenceClientXUIDs(clients []PresenceClient) []string {
+	xuids := make([]string, 0, len(clients))
+	for _, client := range clients {
+		xuids = append(xuids, client.XUID)
+	}
+	return xuids
 }
 
 func (b *Broadcaster) uploadGalleryWithTimeout() {
@@ -675,6 +818,7 @@ func (b *Broadcaster) Update(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	b.debugRoomStatus("resolved room status update", status)
 	return b.announcer.Announce(ctx, status)
 }
 
