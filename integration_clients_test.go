@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -577,7 +578,11 @@ type fakeSignaling struct {
 
 func (f *fakeSignaling) Signal(context.Context, *nethernet.Signal) error { return nil }
 func (f *fakeSignaling) Notify() (<-chan *nethernet.Signal, func()) {
-	return make(chan *nethernet.Signal), func() {}
+	ch := make(chan *nethernet.Signal)
+	var once sync.Once
+	return ch, func() {
+		once.Do(func() { close(ch) })
+	}
 }
 func (f *fakeSignaling) Context() context.Context { return context.Background() }
 func (f *fakeSignaling) Credentials(context.Context) (*nethernet.Credentials, error) {

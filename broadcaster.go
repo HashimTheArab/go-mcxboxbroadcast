@@ -187,6 +187,9 @@ func (b *Broadcaster) presenceClients() []PresenceClient {
 		if !account.Enabled {
 			continue
 		}
+		if !subAccountHasXBLCredentials(account) {
+			continue
+		}
 		xuid := accountXUID(account)
 		if xuid == "" {
 			continue
@@ -304,6 +307,10 @@ func accountXUID(account SubAccountConfig) string {
 	return clientXUID(account.XBLClient)
 }
 
+func subAccountHasXBLCredentials(account SubAccountConfig) bool {
+	return account.XBLClient != nil || account.XBLTokenSource != nil
+}
+
 func clientXUID(client *xsapi.Client) string {
 	if client == nil {
 		return ""
@@ -399,7 +406,7 @@ func (b *Broadcaster) startSubAccounts(ctx context.Context) error {
 		if !account.Enabled {
 			continue
 		}
-		if account.XBLClient == nil && account.XBLTokenSource == nil {
+		if !subAccountHasXBLCredentials(*account) {
 			b.log.Warn("sub-account skipped because xbox live credentials are missing", "sub_account", account.ID)
 			continue
 		}

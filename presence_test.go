@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/df-mc/go-xsapi/v2"
 )
 
 func TestPresenceClientUpdatePostsActiveStateAndReturnsHeartbeat(t *testing.T) {
@@ -89,7 +91,8 @@ func TestBroadcasterPresenceClientsIncludeEnabledSubAccounts(t *testing.T) {
 		XUID:       "primary",
 		HTTPClient: httpClient,
 		SubAccounts: []SubAccountConfig{
-			{ID: "enabled", Enabled: true, XUID: "enabled"},
+			{ID: "enabled", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "enabled"},
+			{ID: "xuid-only", Enabled: true, XUID: "xuid-only"},
 			{ID: "disabled", Enabled: false, XUID: "disabled"},
 			{ID: "missing-token", Enabled: true},
 		},
@@ -98,6 +101,9 @@ func TestBroadcasterPresenceClientsIncludeEnabledSubAccounts(t *testing.T) {
 	clients := b.presenceClients()
 	if len(clients) != 2 {
 		t.Fatalf("expected primary and enabled sub-account presence clients, got %d", len(clients))
+	}
+	if clients[1].XUID != "enabled" {
+		t.Fatalf("expected credentialed sub-account presence, got xuid %q", clients[1].XUID)
 	}
 	for _, client := range clients {
 		if client.Client != httpClient {
