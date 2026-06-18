@@ -13,9 +13,10 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/HashimTheArab/go-mcxboxbroadcast"
-	"github.com/df-mc/go-xsapi"
+	"github.com/df-mc/go-xsapi/v2"
 	"golang.org/x/oauth2"
 )
 
@@ -38,6 +39,8 @@ type commandDeps struct {
 	SaveLiveToken      func(string, *oauth2.Token) error
 	LoadAccountToken   func(context.Context, string, io.Writer) (oauth2.TokenSource, error)
 	NewXBLTokenSource  func(context.Context, oauth2.TokenSource) xsapi.TokenSource
+	NewXSAPIClient     func(context.Context, xsapi.TokenSource, *http.Client, *slog.Logger) (*xsapi.Client, error)
+	CloseXSAPIClients  func(*slog.Logger, []*xsapi.Client)
 	NewBroadcaster     func(broadcaster.Config) (commandBroadcaster, error)
 }
 
@@ -83,6 +86,10 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 	}
 	log := slog.New(slog.NewTextHandler(deps.Stdout, &slog.HandlerOptions{Level: level}))
 	log.Debug("debug logging enabled")
+	var xblClients []*xsapi.Client
+	defer func() {
+		deps.CloseXSAPIClients(log, xblClients)
+	}()
 
 	baseDir := filepath.Dir(opts.ConfigPath)
 	cachePath := resolveConfigPath(baseDir, cfg.Accounts.PrimaryCachePath)
@@ -102,9 +109,17 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 	if err := deps.SaveLiveToken(cachePath, tok); err != nil {
 		log.Warn("could not save token cache", "err", err)
 	}
+	xblSource := deps.NewXBLTokenSource(authCtx, live)
+	xblClient, err := deps.NewXSAPIClient(authCtx, xblSource, httpClient, log)
+	if err != nil {
+		return fmt.Errorf("authenticate xbox live: %w", err)
+	}
+	xblClients = append(xblClients, xblClient)
 
 	runtime, err := cfg.RuntimeConfig(broadcaster.RuntimeConfigInput{
-		TokenSource:     deps.NewXBLTokenSource(authCtx, live),
+		XBLClient:       xblClient,
+		XBLTokenSource:  xblSource,
+		XUID:            xblClient.UserInfo().XUID,
 		LiveTokenSource: live,
 		HTTPClient:      httpClient,
 		Log:             log,
@@ -125,10 +140,18 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 		if err != nil {
 			return fmt.Errorf("authenticate sub-account %q: %w", account.ID, err)
 		}
+		subXBLSource := deps.NewXBLTokenSource(authCtx, subLive)
+		subXBLClient, err := deps.NewXSAPIClient(authCtx, subXBLSource, httpClient, log.With("sub_account", account.ID))
+		if err != nil {
+			return fmt.Errorf("authenticate sub-account %q xbox live: %w", account.ID, err)
+		}
+		xblClients = append(xblClients, subXBLClient)
 		runtime.SubAccounts = append(runtime.SubAccounts, broadcaster.SubAccountConfig{
-			ID:          account.ID,
-			Enabled:     true,
-			TokenSource: deps.NewXBLTokenSource(authCtx, subLive),
+			ID:             account.ID,
+			Enabled:        true,
+			XBLClient:      subXBLClient,
+			XBLTokenSource: subXBLSource,
+			XUID:           subXBLClient.UserInfo().XUID,
 		})
 	}
 
@@ -177,12 +200,34 @@ func (d commandDeps) withDefaults() commandDeps {
 	if d.NewXBLTokenSource == nil {
 		d.NewXBLTokenSource = broadcaster.NewXBLTokenSource
 	}
+	if d.NewXSAPIClient == nil {
+		d.NewXSAPIClient = broadcaster.NewXSAPIClient
+	}
+	if d.CloseXSAPIClients == nil {
+		d.CloseXSAPIClients = closeXSAPIClients
+	}
 	if d.NewBroadcaster == nil {
 		d.NewBroadcaster = func(conf broadcaster.Config) (commandBroadcaster, error) {
 			return broadcaster.New(conf)
 		}
 	}
 	return d
+}
+
+func closeXSAPIClients(log *slog.Logger, clients []*xsapi.Client) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	for _, client := range clients {
+		if client == nil {
+			continue
+		}
+		if client.HTTPClient() == nil && client.MPSD() == nil && client.TokenSource() == nil {
+			continue
+		}
+		if err := client.CloseContext(ctx); err != nil && log != nil {
+			log.Warn("close xbox live client", "err", err)
+		}
+	}
 }
 
 func validateSubAccountCachePaths(base, primaryCachePath string, accounts []broadcaster.SubAccountFile) error {

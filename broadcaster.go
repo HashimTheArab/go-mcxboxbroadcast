@@ -6,14 +6,15 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/df-mc/go-nethernet"
-	"github.com/df-mc/go-xsapi"
-	"github.com/df-mc/go-xsapi/mpsd"
+	"github.com/df-mc/go-xsapi/v2"
+	"github.com/df-mc/go-xsapi/v2/mpsd"
 	"github.com/go-gl/mathgl/mgl32"
 	"github.com/google/uuid"
 	"github.com/sandertv/gophertunnel/minecraft"
@@ -21,8 +22,9 @@ import (
 	"github.com/sandertv/gophertunnel/minecraft/protocol/login"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
 	"github.com/sandertv/gophertunnel/minecraft/room"
-	"github.com/sandertv/gophertunnel/minecraft/service/messaging"
+	"github.com/sandertv/gophertunnel/minecraft/service"
 	websocketsignaling "github.com/sandertv/gophertunnel/minecraft/service/signaling"
+	"github.com/sandertv/gophertunnel/minecraft/service/signaling/messaging"
 )
 
 // Broadcaster owns the Xbox Live session, NetherNet listener, and redirect
@@ -38,6 +40,9 @@ type Broadcaster struct {
 	subSessions         []*mpsd.Session
 	announcerFactory    func(*Broadcaster) room.Announcer
 	subAccountPublisher func(context.Context, SubAccountConfig, mpsd.SessionReference, mpsd.PublishConfig) (*mpsd.Session, error)
+	xblClient           *xsapi.Client
+	minecraftTokens     service.TokenSource
+	createdXBLClients   []*xsapi.Client
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -59,11 +64,8 @@ func New(conf Config) (*Broadcaster, error) {
 	if err := conf.Server.validate(); err != nil {
 		return nil, err
 	}
-	if conf.TokenSource == nil {
-		return nil, errors.New("token source is required")
-	}
-	if conf.LiveTokenSource == nil && conf.Signaling == nil && conf.SignalingFactory == nil {
-		return nil, errors.New("live token source, signaling, or signaling factory is required")
+	if conf.XBLClient == nil && conf.XBLTokenSource == nil {
+		return nil, errors.New("xbox live client or token source is required")
 	}
 	if conf.Log == nil {
 		conf.Log = slog.Default()
@@ -94,7 +96,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	sig, err := b.signalingFor(b.ctx)
 	if err != nil {
 		b.cancel()
-		return err
+		return errors.Join(err, b.cleanupStartupFailure(false))
 	}
 	b.signaling = sig
 
@@ -103,7 +105,11 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 		b.cancel()
 		return errors.Join(err, b.cleanupStartupFailure(false))
 	}
-	b.announcer = b.newAnnouncer()
+	b.announcer, err = b.newAnnouncer(b.ctx)
+	if err != nil {
+		b.cancel()
+		return errors.Join(err, b.cleanupStartupFailure(false))
+	}
 	connection, err := b.signalingConnection(b.ctx, sig)
 	if err != nil {
 		b.cancel()
@@ -173,24 +179,37 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 }
 
 func (b *Broadcaster) presenceClients() []PresenceClient {
-	clients := []PresenceClient{{TokenSource: b.conf.TokenSource, Client: b.conf.HTTPClient}}
+	clients := []PresenceClient{{
+		XUID:   b.primaryXUID(),
+		Client: authenticatedHTTPClient(b.conf.XBLClient, b.conf.HTTPClient),
+	}}
 	for _, account := range b.conf.SubAccounts {
-		if !account.Enabled || account.TokenSource == nil {
+		if !account.Enabled {
 			continue
 		}
-		clients = append(clients, PresenceClient{TokenSource: account.TokenSource, Client: b.conf.HTTPClient})
+		if !subAccountHasXBLCredentials(account) {
+			continue
+		}
+		xuid := accountXUID(account)
+		if xuid == "" {
+			continue
+		}
+		clients = append(clients, PresenceClient{
+			XUID:   xuid,
+			Client: authenticatedHTTPClient(account.XBLClient, b.conf.HTTPClient),
+		})
 	}
 	return clients
 }
 
 func (b *Broadcaster) friendSyncer() FriendSyncer {
 	syncer := FriendSyncer{
-		Client:  FriendClient{TokenSource: b.conf.TokenSource, Client: b.conf.HTTPClient},
+		Client:  b.friendClientFor(b.conf.XBLClient),
 		Config:  *b.conf.FriendSync,
 		History: b.conf.FriendHistory,
 		Log:     b.log,
 	}
-	if announcer, ok := b.announcer.(*room.XBLAnnouncer); ok && announcer.Session != nil {
+	if announcer, ok := xblAnnouncer(b.announcer); ok && announcer.Session != nil {
 		syncer.Inviter = sessionInviter{session: announcer.Session}
 	}
 	return syncer
@@ -218,6 +237,111 @@ func (b *Broadcaster) minecraftStatusProvider(status room.Status) minecraft.Serv
 	return minecraft.NewStatusProvider(status.WorldName, status.HostName)
 }
 
+func (b *Broadcaster) primaryXBLClient(ctx context.Context) (*xsapi.Client, error) {
+	if b.conf.XBLClient != nil {
+		return b.conf.XBLClient, nil
+	}
+	if b.xblClient != nil {
+		return b.xblClient, nil
+	}
+	if b.conf.XBLTokenSource == nil {
+		return nil, errors.New("xbox live token source is required")
+	}
+	client, err := NewXSAPIClient(ctx, b.conf.XBLTokenSource, b.conf.HTTPClient, b.log)
+	if err != nil {
+		return nil, fmt.Errorf("create xbox live client: %w", err)
+	}
+	b.xblClient = client
+	b.conf.XBLClient = client
+	b.createdXBLClients = append(b.createdXBLClients, client)
+	return client, nil
+}
+
+func (b *Broadcaster) subAccountXBLClient(ctx context.Context, account *SubAccountConfig) (*xsapi.Client, error) {
+	if account.XBLClient != nil {
+		return account.XBLClient, nil
+	}
+	if account.XBLTokenSource == nil {
+		return nil, errors.New("sub-account xbox live token source is required")
+	}
+	client, err := NewXSAPIClient(ctx, account.XBLTokenSource, b.conf.HTTPClient, b.log.With("sub_account", account.ID))
+	if err != nil {
+		return nil, fmt.Errorf("create sub-account xbox live client: %w", err)
+	}
+	account.XBLClient = client
+	b.createdXBLClients = append(b.createdXBLClients, client)
+	return client, nil
+}
+
+func (b *Broadcaster) minecraftTokenSource(ctx context.Context) (service.TokenSource, error) {
+	if b.conf.MinecraftTokenSource != nil {
+		return b.conf.MinecraftTokenSource, nil
+	}
+	if b.minecraftTokens != nil {
+		return b.minecraftTokens, nil
+	}
+	client, err := b.primaryXBLClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	tokens, err := NewMinecraftTokenSource(ctx, client, b.conf.HTTPClient)
+	if err != nil {
+		return nil, err
+	}
+	b.minecraftTokens = tokens
+	b.conf.MinecraftTokenSource = tokens
+	return tokens, nil
+}
+
+func (b *Broadcaster) primaryXUID() string {
+	if b.conf.XUID != "" {
+		return b.conf.XUID
+	}
+	return clientXUID(b.conf.XBLClient)
+}
+
+func accountXUID(account SubAccountConfig) string {
+	if account.XUID != "" {
+		return account.XUID
+	}
+	return clientXUID(account.XBLClient)
+}
+
+func subAccountHasXBLCredentials(account SubAccountConfig) bool {
+	return account.XBLClient != nil || account.XBLTokenSource != nil
+}
+
+func clientXUID(client *xsapi.Client) string {
+	if client == nil {
+		return ""
+	}
+	return client.UserInfo().XUID
+}
+
+func (b *Broadcaster) friendClientFor(client *xsapi.Client) FriendClient {
+	return FriendClient{Client: authenticatedHTTPClient(client, b.conf.HTTPClient)}
+}
+
+func authenticatedHTTPClient(client *xsapi.Client, fallback *http.Client) *http.Client {
+	if client != nil {
+		if httpClient := client.HTTPClient(); httpClient != nil {
+			return httpClient
+		}
+	}
+	return fallback
+}
+
+func xblAnnouncer(announcer room.Announcer) (*room.XBLAnnouncer, bool) {
+	switch a := announcer.(type) {
+	case *room.XBLAnnouncer:
+		return a, true
+	case signalingConnectionAnnouncer:
+		return xblAnnouncer(a.Announcer)
+	default:
+		return nil, false
+	}
+}
+
 func (b *Broadcaster) signalingFor(ctx context.Context) (nethernet.Signaling, error) {
 	if b.conf.Signaling != nil {
 		return b.conf.Signaling, nil
@@ -229,23 +353,35 @@ func (b *Broadcaster) signalingFor(ctx context.Context) (nethernet.Signaling, er
 	if err != nil {
 		return nil, err
 	}
+	src, err := b.minecraftTokenSource(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if mode == SignalingModeJSONRPC {
 		d := messaging.Dialer{
 			Log:        b.log,
 			HTTPClient: b.conf.HTTPClient,
 		}
-		return d.DialContext(ctx, b.conf.LiveTokenSource)
+		return d.DialContext(ctx, src)
 	}
 	d := websocketsignaling.Dialer{
 		Log:        b.log,
 		HTTPClient: b.conf.HTTPClient,
 	}
-	return d.DialContext(ctx, b.conf.LiveTokenSource)
+	return d.DialContext(ctx, src)
 }
 
-func (b *Broadcaster) newAnnouncer() room.Announcer {
+func (b *Broadcaster) newAnnouncer(ctx context.Context) (room.Announcer, error) {
 	if b.announcerFactory != nil {
-		return b.announcerFactory(b)
+		return b.announcerFactory(b), nil
+	}
+	client, err := b.primaryXBLClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	mpsdClient := client.MPSD()
+	if mpsdClient == nil {
+		return nil, errors.New("xbox live MPSD client is nil")
 	}
 	ref := mpsd.SessionReference{
 		ServiceConfigID: serviceConfigUUID,
@@ -257,25 +393,37 @@ func (b *Broadcaster) newAnnouncer() room.Announcer {
 	}
 	b.sessionRef = ref
 	pub := b.conf.PublishConfig
-	pub.Logger = b.log
 	return &room.XBLAnnouncer{
-		TokenSource:      b.conf.TokenSource,
+		Client:           mpsdClient,
 		SessionReference: ref,
 		PublishConfig:    pub,
-	}
+	}, nil
 }
 
 func (b *Broadcaster) startSubAccounts(ctx context.Context) error {
-	for _, account := range b.conf.SubAccounts {
-		if !account.Enabled || account.TokenSource == nil {
+	for i := range b.conf.SubAccounts {
+		account := &b.conf.SubAccounts[i]
+		if !account.Enabled {
 			continue
 		}
-		if err := b.ensureSubAccountMutualFollow(ctx, account); err != nil {
+		if !subAccountHasXBLCredentials(*account) {
+			b.log.Warn("sub-account skipped because xbox live credentials are missing", "sub_account", account.ID)
+			continue
+		}
+		if _, err := b.subAccountXBLClient(ctx, account); err != nil {
+			return fmt.Errorf("prepare sub-account %q xbox live client: %w", account.ID, err)
+		}
+		if account.XUID == "" {
+			account.XUID = accountXUID(*account)
+		}
+		if account.XUID == "" {
+			b.log.Warn("sub-account xuid unavailable", "sub_account", account.ID)
+		}
+		if err := b.ensureSubAccountMutualFollow(ctx, *account); err != nil {
 			return fmt.Errorf("prepare sub-account %q mutual follow: %w", account.ID, err)
 		}
 		pub := account.PublishConfig
-		pub.Logger = b.log.With("sub_account", account.ID)
-		s, err := b.publishSubAccount(ctx, account, pub)
+		s, err := b.publishSubAccount(ctx, *account, pub)
 		if err != nil {
 			return fmt.Errorf("start sub-account %q: %w", account.ID, err)
 		}
@@ -288,45 +436,31 @@ func (b *Broadcaster) publishSubAccount(ctx context.Context, account SubAccountC
 	if b.subAccountPublisher != nil {
 		return b.subAccountPublisher(ctx, account, b.sessionRef, pub)
 	}
-	return pub.PublishContext(ctx, account.TokenSource, b.sessionRef)
+	if account.XBLClient == nil {
+		return nil, errors.New("sub-account xbox live client is nil")
+	}
+	client := account.XBLClient.MPSD()
+	if client == nil {
+		return nil, errors.New("sub-account MPSD client is nil")
+	}
+	return client.Publish(ctx, b.sessionRef, pub)
 }
 
 func (b *Broadcaster) ensureSubAccountMutualFollow(ctx context.Context, account SubAccountConfig) error {
-	primaryXUID, primaryOK, err := tokenSourceXUID(b.conf.TokenSource)
-	if err != nil {
-		return fmt.Errorf("primary xuid: %w", err)
-	}
-	subXUID, subOK, err := tokenSourceXUID(account.TokenSource)
-	if err != nil {
-		return fmt.Errorf("sub-account xuid: %w", err)
-	}
-	if !primaryOK || !subOK || primaryXUID == subXUID {
+	primaryXUID := b.primaryXUID()
+	subXUID := accountXUID(account)
+	if primaryXUID == "" || subXUID == "" || primaryXUID == subXUID {
 		return nil
 	}
-	primary := FriendClient{TokenSource: b.conf.TokenSource, Client: b.conf.HTTPClient}
+	primary := b.friendClientFor(b.conf.XBLClient)
 	if err := primary.Follow(ctx, subXUID); err != nil {
 		return fmt.Errorf("primary follow sub-account: %w", err)
 	}
-	sub := FriendClient{TokenSource: account.TokenSource, Client: b.conf.HTTPClient}
+	sub := b.friendClientFor(account.XBLClient)
 	if err := sub.Follow(ctx, primaryXUID); err != nil {
 		return fmt.Errorf("sub-account follow primary: %w", err)
 	}
 	return nil
-}
-
-func tokenSourceXUID(src xsapi.TokenSource) (string, bool, error) {
-	if src == nil {
-		return "", false, nil
-	}
-	tok, err := src.Token()
-	if err != nil {
-		return "", false, err
-	}
-	xuid := tok.DisplayClaims().XUID
-	if xuid == "" {
-		return "", false, nil
-	}
-	return xuid, true, nil
 }
 
 func (b *Broadcaster) uploadGallery(ctx context.Context) {
@@ -339,10 +473,7 @@ func (b *Broadcaster) uploadGallery(ctx context.Context) {
 	}
 	src := cfg.TokenSource
 	if src == nil {
-		src = b.conf.MinecraftTokenSource
-	}
-	if src == nil && b.conf.LiveTokenSource != nil {
-		tokens, err := newMinecraftTokenSource(ctx, ctx, b.conf.LiveTokenSource, b.conf.HTTPClient)
+		tokens, err := b.minecraftTokenSource(b.sharedTokenSourceContext(ctx))
 		if err != nil {
 			b.log.Warn("minecraft services token source unavailable", "err", err)
 			b.notify(ctx, "Showcase image upload skipped: Minecraft services token source is unavailable.")
@@ -350,18 +481,7 @@ func (b *Broadcaster) uploadGallery(ctx context.Context) {
 		}
 		src = tokens
 	}
-	if src == nil {
-		b.log.Warn("gallery enabled without minecraft token source")
-		b.notify(ctx, "Showcase image upload skipped: Minecraft token source is not configured.")
-		return
-	}
-	tok, err := b.conf.TokenSource.Token()
-	if err != nil {
-		b.log.Error("gallery xuid token", "err", err)
-		b.notify(ctx, "Showcase image upload failed while reading the Xbox profile: "+err.Error())
-		return
-	}
-	xuid := tok.DisplayClaims().XUID
+	xuid := b.primaryXUID()
 	if xuid == "" {
 		b.log.Warn("gallery skipped because token XUID is empty")
 		b.notify(ctx, "Showcase image upload skipped: Xbox profile XUID is empty.")
@@ -378,6 +498,16 @@ func (b *Broadcaster) uploadGallery(ctx context.Context) {
 		return
 	}
 	b.debug("set showcase image", "path", cfg.ImagePath)
+}
+
+func (b *Broadcaster) sharedTokenSourceContext(fallback context.Context) context.Context {
+	if b.ctx != nil && b.ctx.Err() == nil {
+		return b.ctx
+	}
+	if fallback != nil {
+		return fallback
+	}
+	return context.Background()
 }
 
 func (b *Broadcaster) debug(msg string, args ...any) {
@@ -564,7 +694,59 @@ func (b *Broadcaster) cleanupStartupFailure(closeAnnouncer bool) error {
 			err = errors.Join(err, c.Close())
 		}
 	}
+	err = errors.Join(err, b.closeCreatedXBLClients())
 	return err
+}
+
+func (b *Broadcaster) closeCreatedXBLClients() error {
+	if len(b.createdXBLClients) == 0 {
+		return nil
+	}
+	created := createdXBLClientSet(b.createdXBLClients)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	var err error
+	for client := range created {
+		err = errors.Join(err, client.CloseContext(ctx))
+	}
+	b.clearCreatedXBLClientReferences(created)
+	b.createdXBLClients = nil
+	return err
+}
+
+func createdXBLClientSet(clients []*xsapi.Client) map[*xsapi.Client]struct{} {
+	created := make(map[*xsapi.Client]struct{}, len(clients))
+	for _, client := range clients {
+		if client != nil {
+			created[client] = struct{}{}
+		}
+	}
+	return created
+}
+
+func (b *Broadcaster) clearCreatedXBLClientReferences(created map[*xsapi.Client]struct{}) {
+	primaryCreated := xblClientCreated(b.conf.XBLClient, created) || xblClientCreated(b.xblClient, created)
+	if primaryCreated {
+		b.conf.XBLClient = nil
+		b.xblClient = nil
+		if b.minecraftTokens != nil {
+			b.minecraftTokens = nil
+			b.conf.MinecraftTokenSource = nil
+		}
+	}
+	for i := range b.conf.SubAccounts {
+		if xblClientCreated(b.conf.SubAccounts[i].XBLClient, created) {
+			b.conf.SubAccounts[i].XBLClient = nil
+		}
+	}
+}
+
+func xblClientCreated(client *xsapi.Client, created map[*xsapi.Client]struct{}) bool {
+	if client == nil {
+		return false
+	}
+	_, ok := created[client]
+	return ok
 }
 
 // Close stops the listener and removes the Xbox session.
@@ -582,6 +764,7 @@ func (b *Broadcaster) Close() error {
 			err = errors.Join(err, c.Close())
 		}
 	}
+	err = errors.Join(err, b.closeCreatedXBLClients())
 	<-b.done
 	b.started = false
 	return err

@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/df-mc/go-xsapi"
+	"github.com/df-mc/go-xsapi/v2"
 	"github.com/pelletier/go-toml/v2"
 	"github.com/sandertv/gophertunnel/minecraft"
 	"github.com/sandertv/gophertunnel/minecraft/service"
@@ -101,7 +101,9 @@ type SubAccountFile struct {
 }
 
 type RuntimeConfigInput struct {
-	TokenSource          xsapi.TokenSource
+	XBLClient            *xsapi.Client
+	XBLTokenSource       xsapi.TokenSource
+	XUID                 string
 	LiveTokenSource      oauth2.TokenSource
 	MinecraftTokenSource service.TokenSource
 	HTTPClient           *http.Client
@@ -259,7 +261,9 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 		return Config{}, err
 	}
 	cfg := Config{
-		TokenSource:          in.TokenSource,
+		XBLClient:            in.XBLClient,
+		XBLTokenSource:       in.XBLTokenSource,
+		XUID:                 in.XUID,
 		LiveTokenSource:      in.LiveTokenSource,
 		MinecraftTokenSource: in.MinecraftTokenSource,
 		Server:               server,

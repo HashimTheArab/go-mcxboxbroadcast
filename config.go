@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/df-mc/go-nethernet"
-	"github.com/df-mc/go-xsapi"
-	"github.com/df-mc/go-xsapi/mpsd"
+	"github.com/df-mc/go-xsapi/v2"
+	"github.com/df-mc/go-xsapi/v2/mpsd"
 	"github.com/sandertv/gophertunnel/minecraft"
 	"github.com/sandertv/gophertunnel/minecraft/room"
 	"github.com/sandertv/gophertunnel/minecraft/service"
@@ -20,13 +20,19 @@ import (
 
 // Config holds the dependencies and settings for a Broadcaster.
 type Config struct {
-	// TokenSource supplies Xbox Live tokens for MPSD/RTA.
-	TokenSource xsapi.TokenSource
-	// LiveTokenSource supplies Microsoft Live tokens for Minecraft service
-	// signaling. It is used by the gophertunnel lunar signaling implementation.
+	// XBLClient supplies authenticated Xbox Live clients for MPSD, social, and
+	// presence calls.
+	XBLClient *xsapi.Client
+	// XBLTokenSource supplies Xbox Live tokens when XBLClient is created lazily.
+	XBLTokenSource xsapi.TokenSource
+	// XUID is the primary account's Xbox user ID. If empty, it is read from
+	// XBLClient when available.
+	XUID string
+	// LiveTokenSource supplies Microsoft Live tokens for compatibility with
+	// callers that still need to manage the underlying Microsoft auth cache.
 	LiveTokenSource oauth2.TokenSource
 	// MinecraftTokenSource supplies Minecraft franchise service tokens for
-	// gallery/profile image requests.
+	// signaling and gallery/profile image requests.
 	MinecraftTokenSource service.TokenSource
 
 	// Server is the target Bedrock server clients are transferred to.
@@ -168,7 +174,9 @@ type FriendSyncConfig struct {
 type SubAccountConfig struct {
 	ID              string
 	Enabled         bool
-	TokenSource     xsapi.TokenSource
+	XBLClient       *xsapi.Client
+	XBLTokenSource  xsapi.TokenSource
+	XUID            string
 	LiveTokenSource oauth2.TokenSource
 	PublishConfig   mpsd.PublishConfig
 	FriendSync      *FriendSyncConfig

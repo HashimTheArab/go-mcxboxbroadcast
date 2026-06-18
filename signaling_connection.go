@@ -71,20 +71,16 @@ func (b *Broadcaster) signalingConnection(ctx context.Context, sig nethernet.Sig
 }
 
 func (b *Broadcaster) playerMessagingID(ctx context.Context) (uuid.UUID, error) {
-	src := b.conf.MinecraftTokenSource
-	if src == nil {
-		if b.conf.LiveTokenSource == nil {
-			return uuid.Nil, errors.New("jsonrpc signaling requires a minecraft token source or live token source")
-		}
-		tokens, err := NewMinecraftTokenSource(ctx, b.conf.LiveTokenSource, b.conf.HTTPClient)
-		if err != nil {
-			return uuid.Nil, fmt.Errorf("create minecraft token source for jsonrpc signaling: %w", err)
-		}
-		src = tokens
+	src, err := b.minecraftTokenSource(ctx)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("create minecraft token source for jsonrpc signaling: %w", err)
 	}
-	tok, err := src.Token()
+	tok, err := src.ServiceToken(ctx)
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("request minecraft token for jsonrpc signaling: %w", err)
+	}
+	if tok.Claims.PlayerMessagingID != uuid.Nil {
+		return tok.Claims.PlayerMessagingID, nil
 	}
 	pmsgID, err := playerMessagingIDFromAuthorizationHeader(tok.AuthorizationHeader)
 	if err != nil {

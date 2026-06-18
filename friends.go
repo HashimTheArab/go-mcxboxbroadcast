@@ -1,7 +1,6 @@
 package broadcaster
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,26 +10,22 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/df-mc/go-xsapi"
+	xblsocial "github.com/df-mc/go-xsapi/v2/social"
+	"github.com/df-mc/go-xsapi/v2/xal/xsts"
 )
 
 const (
-	followersURL              = "https://peoplehub.xboxlive.com/users/me/people/followers"
-	socialURL                 = "https://peoplehub.xboxlive.com/users/me/people/social"
-	pendingFriendRequestsURL  = "https://peoplehub.xboxlive.com/users/me/people/friendrequests(received)"
-	acceptFriendRequestsURL   = "https://social.xboxlive.com/bulk/users/me/people/friends/v2?method=add"
-	peopleURL                 = "https://social.xboxlive.com/users/me/people/xuid(%s)"
-	followerURL               = "https://social.xboxlive.com/users/me/people/follower/xuid(%s)"
+	peopleHubDecorations      = "bio,detail,multiplayerSummary,preferredColor,presenceDetail"
+	peopleHubGroupURL         = "https://peoplehub.xboxlive.com/users/me/people/%s/decoration/" + peopleHubDecorations
 	FriendErrorKindUnknown    = "unknown"
 	FriendErrorKindFullList   = "friend_list_full"
 	FriendErrorKindRestricted = "restricted"
 )
 
-// FriendClient wraps the Xbox social endpoints used by MCXboxBroadcast for
-// follower/friend synchronization.
+// FriendClient adapts go-xsapi/v2's Xbox social client to the FriendSyncer API.
 type FriendClient struct {
-	TokenSource xsapi.TokenSource
-	Client      *http.Client
+	Client *http.Client
+	Social *xblsocial.Client
 }
 
 type Person struct {
@@ -43,13 +38,8 @@ type Person struct {
 	UniqueModernGamertag string `json:"uniqueModernGamertag"`
 }
 
-type peopleResponse struct {
-	People []Person `json:"people"`
-}
-
-type acceptFriendRequestsResponse struct {
-	FailedToUpdate []string `json:"failedToUpdate"`
-	UpdatedPeople  []string `json:"updatedPeople"`
+type peopleHubResponse struct {
+	People []xblsocial.User `json:"people"`
 }
 
 // AcceptFriendRequestsError reports a successful bulk accept response that
@@ -130,199 +120,197 @@ func IsFriendRestricted(err error) bool {
 	return errors.As(err, &social) && social.FriendErrorKind() == FriendErrorKindRestricted
 }
 
-// Followers returns people following the authenticated account.
-func (c FriendClient) Followers(ctx context.Context) ([]Person, error) {
-	return c.people(ctx, followersURL)
-}
-
-// Social returns people the authenticated account follows.
-func (c FriendClient) Social(ctx context.Context) ([]Person, error) {
-	return c.people(ctx, socialURL)
-}
-
-// Friends returns a merged view of followers and followed people.
+// Friends returns a merged view of people following the authenticated account
+// and people the authenticated account follows.
 func (c FriendClient) Friends(ctx context.Context) ([]Person, error) {
-	followers, err := c.Followers(ctx)
+	followers, err := c.peopleHubGroup(ctx, "followers")
 	if err != nil {
 		return nil, err
 	}
-	social, err := c.Social(ctx)
+	social, err := c.peopleHubGroup(ctx, "social")
 	if err != nil {
 		return nil, err
 	}
-	merged := make(map[string]Person, len(followers)+len(social))
-	for _, p := range append(followers, social...) {
-		if existing, ok := merged[p.XUID]; ok {
-			p.IsFollowedByCaller = p.IsFollowedByCaller || existing.IsFollowedByCaller
-			p.IsFollowingCaller = p.IsFollowingCaller || existing.IsFollowingCaller
-			if p.Gamertag == "" {
-				p.Gamertag = existing.Gamertag
-			}
-		}
-		merged[p.XUID] = p
-	}
-	out := make([]Person, 0, len(merged))
-	for _, p := range merged {
-		out = append(out, p)
-	}
-	return out, nil
+	return mergePeople(followers, social), nil
 }
 
 // Follow follows the XUID, which makes the user a friend when they also follow
 // the authenticated account.
 func (c FriendClient) Follow(ctx context.Context, xuid string) error {
-	return c.empty(ctx, http.MethodPut, fmt.Sprintf(peopleURL, xuid))
+	return c.social().Follow(ctx, xuid)
 }
 
 // Unfollow removes the authenticated account's follow relationship for xuid.
 func (c FriendClient) Unfollow(ctx context.Context, xuid string) error {
-	return c.empty(ctx, http.MethodDelete, fmt.Sprintf(peopleURL, xuid))
+	return c.social().Unfollow(ctx, xuid)
 }
 
 // AcceptPendingFriendRequests accepts incoming Xbox friend requests and returns
 // the people that Xbox reported as updated.
 func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]Person, error) {
-	req, err := c.request(ctx, http.MethodGet, pendingFriendRequestsURL)
+	socialClient := c.social()
+	pending, err := socialClient.IncomingFriendRequests(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(pending) == 0 {
+		return nil, nil
+	}
+
+	accepted := make([]Person, 0, len(pending))
+	var failed []string
+	for _, user := range pending {
+		if user.XUID == "" {
+			continue
+		}
+		if err := socialClient.AddFriend(ctx, user.XUID); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || retryDelay(err) > 0 {
+				return accepted, err
+			}
+			failed = append(failed, user.XUID)
+			continue
+		}
+		accepted = append(accepted, personFromSocialUser(user))
+	}
+	if len(failed) > 0 {
+		return accepted, &AcceptFriendRequestsError{Failed: failed}
+	}
+	return accepted, nil
+}
+
+func (c FriendClient) social() *xblsocial.Client {
+	if c.Social != nil {
+		return c.Social
+	}
+	return xblsocial.New(classifyingFriendHTTPClient(c.client()), nil, xsts.UserInfo{}, nil)
+}
+
+func (c FriendClient) peopleHubGroup(ctx context.Context, group string) ([]Person, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf(peopleHubGroupURL, group), nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("X-Xbl-Contract-Version", "7")
+	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Accept-Language", "en-US")
+
 	resp, err := c.client().Do(req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, c.responseError(req, resp)
-	}
-	var pending peopleResponse
-	if err := json.NewDecoder(resp.Body).Decode(&pending); err != nil {
-		return nil, err
-	}
-	if len(pending.People) == 0 {
-		return nil, nil
-	}
-
-	xuids := make([]string, 0, len(pending.People))
-	byXUID := make(map[string]Person, len(pending.People))
-	for _, p := range pending.People {
-		if p.XUID == "" {
-			continue
-		}
-		xuids = append(xuids, p.XUID)
-		byXUID[p.XUID] = p
-	}
-	if len(xuids) == 0 {
-		return nil, nil
-	}
-
-	body, err := json.Marshal(struct {
-		XUIDs []string `json:"xuids"`
-	}{XUIDs: xuids})
-	if err != nil {
-		return nil, err
-	}
-	req, err = c.requestWithBody(ctx, http.MethodPost, acceptFriendRequestsURL, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err = c.client().Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, c.responseError(req, resp)
+		return nil, friendResponseError(req, resp)
 	}
-	responseBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if len(bytes.TrimSpace(responseBody)) == 0 {
-		return pending.People, nil
-	}
-	var accepted acceptFriendRequestsResponse
-	if err := json.Unmarshal(responseBody, &accepted); err != nil {
-		return nil, err
-	}
-	out := make([]Person, 0, len(accepted.UpdatedPeople))
-	for _, xuid := range accepted.UpdatedPeople {
-		p, ok := byXUID[xuid]
-		if !ok {
-			p = Person{XUID: xuid}
-		}
-		out = append(out, p)
-	}
-	if len(accepted.FailedToUpdate) > 0 {
-		return out, &AcceptFriendRequestsError{Failed: append([]string(nil), accepted.FailedToUpdate...)}
-	}
-	return out, nil
-}
-
-func (c FriendClient) people(ctx context.Context, url string) ([]Person, error) {
-	req, err := c.request(ctx, http.MethodGet, url)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("X-Xbl-Contract-Version", "5")
-	req.Header.Set("Accept-Language", "en-US")
-	resp, err := c.client().Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, c.responseError(req, resp)
-	}
-	var data peopleResponse
+	var data peopleHubResponse
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return nil, err
 	}
-	return data.People, nil
+	return peopleFromSocialUsers(data.People), nil
 }
 
-func (c FriendClient) empty(ctx context.Context, method, url string) error {
-	req, err := c.request(ctx, method, url)
-	if err != nil {
-		return err
+func peopleFromSocialUsers(users []xblsocial.User) []Person {
+	people := make([]Person, 0, len(users))
+	for _, user := range users {
+		people = append(people, personFromSocialUser(user))
 	}
-	resp, err := c.client().Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return c.responseError(req, resp)
-	}
-	return nil
+	return people
 }
 
-func (c FriendClient) request(ctx context.Context, method, url string) (*http.Request, error) {
-	return c.requestWithBody(ctx, method, url, nil)
+func mergePeople(groups ...[]Person) []Person {
+	merged := make(map[string]Person)
+	order := make([]string, 0)
+	for _, group := range groups {
+		for _, person := range group {
+			if person.XUID == "" {
+				continue
+			}
+			existing, ok := merged[person.XUID]
+			if !ok {
+				merged[person.XUID] = person
+				order = append(order, person.XUID)
+				continue
+			}
+			merged[person.XUID] = mergePerson(existing, person)
+		}
+	}
+	out := make([]Person, 0, len(order))
+	for _, xuid := range order {
+		out = append(out, merged[xuid])
+	}
+	return out
 }
 
-func (c FriendClient) requestWithBody(ctx context.Context, method, url string, body io.Reader) (*http.Request, error) {
-	if ctx == nil {
-		ctx = context.Background()
+func mergePerson(existing, next Person) Person {
+	existing.IsFollowedByCaller = existing.IsFollowedByCaller || next.IsFollowedByCaller
+	existing.IsFollowingCaller = existing.IsFollowingCaller || next.IsFollowingCaller
+	if existing.Gamertag == "" {
+		existing.Gamertag = next.Gamertag
 	}
-	if c.TokenSource == nil {
-		return nil, fmt.Errorf("token source is nil")
+	if existing.DisplayName == "" {
+		existing.DisplayName = next.DisplayName
 	}
-	req, err := http.NewRequestWithContext(ctx, method, url, body)
+	if existing.ModernGamertag == "" {
+		existing.ModernGamertag = next.ModernGamertag
+	}
+	if existing.UniqueModernGamertag == "" {
+		existing.UniqueModernGamertag = next.UniqueModernGamertag
+	}
+	return existing
+}
+
+func personFromSocialUser(user xblsocial.User) Person {
+	return Person{
+		XUID:                 user.XUID,
+		Gamertag:             user.GamerTag,
+		DisplayName:          user.DisplayName,
+		ModernGamertag:       user.ModernGamerTag,
+		IsFollowingCaller:    user.Followed,
+		IsFollowedByCaller:   user.Following,
+		UniqueModernGamertag: user.UniqueModernGamerTag,
+	}
+}
+
+func classifyingFriendHTTPClient(client *http.Client) *http.Client {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	clone := *client
+	base := clone.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	clone.Transport = friendErrorTransport{base: base}
+	return &clone
+}
+
+type friendErrorTransport struct {
+	base http.RoundTripper
+}
+
+func (t friendErrorTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	resp, err := base.RoundTrip(req)
 	if err != nil {
 		return nil, err
 	}
-	tok, err := c.TokenSource.Token()
-	if err != nil {
-		return nil, fmt.Errorf("request token: %w", err)
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return resp, nil
 	}
-	tok.SetAuthHeader(req)
-	return req, nil
+	err = friendResponseError(req, resp)
+	_ = resp.Body.Close()
+	return nil, err
 }
 
-func (c FriendClient) responseError(req *http.Request, resp *http.Response) error {
+func friendResponseError(req *http.Request, resp *http.Response) error {
 	if resp.StatusCode == http.StatusTooManyRequests {
 		return &RetryAfterError{
 			Method:     req.Method,

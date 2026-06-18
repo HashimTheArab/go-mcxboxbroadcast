@@ -8,7 +8,7 @@ The library is modelled after
 [MCXboxBroadcast](https://github.com/rtm516/MCXboxBroadcast) while using
 Go-first building blocks:
 
-- `github.com/df-mc/go-xsapi` for Xbox Live MPSD/RTA session publishing.
+- `github.com/df-mc/go-xsapi/v2` for Xbox Live MPSD/RTA session publishing.
 - `github.com/df-mc/go-nethernet` for NetherNet/WebRTC listener support.
 - `hashimthearab/gophertunnel` `lunar` branch for NetherNet, signaling, room
   announcements, and auth helpers. This should be updated to the official
@@ -69,14 +69,21 @@ image.
 
 ```go
 live := auth.RefreshTokenSourceWriter(cachedLiveToken, os.Stdout)
-minecraftTokens, err := broadcaster.NewMinecraftTokenSource(ctx, live, http.DefaultClient)
+xblSource := broadcaster.NewXBLTokenSource(ctx, live)
+xblClient, err := broadcaster.NewXSAPIClient(ctx, xblSource, http.DefaultClient, nil)
+if err != nil {
+    return err
+}
+minecraftTokens, err := broadcaster.NewMinecraftTokenSource(ctx, xblClient, http.DefaultClient)
 if err != nil {
     return err
 }
 
 b, err := broadcaster.New(broadcaster.Config{
-    TokenSource:          broadcaster.NewXBLTokenSource(context.Background(), live),
-    LiveTokenSource:      live,
+    XBLClient:           xblClient,
+    XBLTokenSource:      xblSource,
+    XUID:                xblClient.UserInfo().XUID,
+    LiveTokenSource:     live,
     MinecraftTokenSource: minecraftTokens,
     Server: broadcaster.ServerInfo{
         Host: "play.example.net",

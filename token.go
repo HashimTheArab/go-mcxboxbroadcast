@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
-	"github.com/df-mc/go-xsapi"
+	"github.com/df-mc/go-playfab/v2"
+	"github.com/df-mc/go-xsapi/v2"
 	"github.com/sandertv/gophertunnel/minecraft/auth"
 	"github.com/sandertv/gophertunnel/minecraft/auth/authclient"
 	"github.com/sandertv/gophertunnel/minecraft/protocol"
@@ -47,32 +49,34 @@ func NewXBLTokenSource(ctx context.Context, live oauth2.TokenSource) xsapi.Token
 		ctx = context.Background()
 	}
 	ctx = withDefaultXBLTokenCache(ctx)
-	return &xblTokenSource{ctx: ctx, src: live}
+	return auth.ContextSession(ctx, live)
 }
 
-func NewMinecraftTokenSource(ctx context.Context, live oauth2.TokenSource, client *http.Client) (service.TokenSource, error) {
-	tokenCtx := context.Background()
-	if ctx == nil {
-		ctx = context.Background()
-	} else {
-		tokenCtx = context.WithoutCancel(ctx)
-	}
-	return newMinecraftTokenSource(ctx, tokenCtx, live, client)
-}
-
-func newMinecraftTokenSource(ctx, tokenCtx context.Context, live oauth2.TokenSource, client *http.Client) (service.TokenSource, error) {
+// NewXSAPIClient creates the Xbox Live API client set used for MPSD, social,
+// presence, and PlayFab-backed Minecraft service authentication.
+func NewXSAPIClient(ctx context.Context, src xsapi.TokenSource, client *http.Client, log *slog.Logger) (*xsapi.Client, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if tokenCtx == nil {
-		tokenCtx = context.Background()
+	if src == nil {
+		return nil, fmt.Errorf("xbox live token source is nil")
 	}
 	if client != nil {
 		ctx = context.WithValue(ctx, oauth2.HTTPClient, client)
-		tokenCtx = context.WithValue(tokenCtx, oauth2.HTTPClient, client)
 	}
-	ctx = withDefaultXBLTokenCache(ctx)
-	tokenCtx = withDefaultXBLTokenCache(tokenCtx)
+	return xsapi.ClientConfig{HTTPClient: client, Logger: log}.New(ctx, src)
+}
+
+func NewMinecraftTokenSource(ctx context.Context, xbl *xsapi.Client, client *http.Client) (service.TokenSource, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if xbl == nil {
+		return nil, fmt.Errorf("xbox live client is nil")
+	}
+	if client != nil {
+		ctx = context.WithValue(ctx, oauth2.HTTPClient, client)
+	}
 	discovery, err := service.Discover(ctx, service.ApplicationTypeMinecraftPE, protocol.CurrentVersion)
 	if err != nil {
 		return nil, fmt.Errorf("discover minecraft services: %w", err)
@@ -84,7 +88,14 @@ func newMinecraftTokenSource(ctx, tokenCtx context.Context, live oauth2.TokenSou
 	if client != nil {
 		env.HTTPClient = client
 	}
-	return env.TokenSource(tokenCtx, live, service.TokenConfig{}), nil
+	playfabClient, err := playfab.LoginWithXbox(ctx, env.PlayFabTitleID, xbl, playfab.ClientConfig{
+		HTTPClient:    client,
+		CreateAccount: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("login to playfab with xbox: %w", err)
+	}
+	return env.TokenSource(playfabClient, service.TokenConfig{}), nil
 }
 
 func withDefaultXBLTokenCache(ctx context.Context) context.Context {
@@ -128,34 +139,7 @@ func requestLiveTokenWriter(ctx context.Context, conf auth.Config, out io.Writer
 	if out == nil {
 		out = io.Discard
 	}
-	d, err := conf.StartDeviceAuth(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	_, _ = fmt.Fprintf(out, "Authenticate at %v using the code %v.\n", d.VerificationURI, d.UserCode)
-	interval := d.Interval
-	if interval <= 0 {
-		interval = 1
-	}
-	ticker := time.NewTicker(time.Second * time.Duration(interval))
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-ticker.C:
-			tok, err := conf.PollDeviceAuth(ctx, d.DeviceCode)
-			if err != nil {
-				return nil, fmt.Errorf("error polling for device auth: %w", err)
-			}
-			if tok != nil {
-				_, _ = out.Write([]byte("Authentication successful.\n"))
-				return tok, nil
-			}
-		}
-	}
+	return conf.RequestLiveTokenContext(ctx, out)
 }
 
 func refreshLiveToken(ctx context.Context, clientID, refreshToken string) (*oauth2.Token, error) {
@@ -244,46 +228,4 @@ func newDefaultLiveAuthHTTPClient() *http.Client {
 		Transport: transport,
 		Timeout:   30 * time.Second,
 	}
-}
-
-type xblTokenSource struct {
-	ctx context.Context
-	src oauth2.TokenSource
-}
-
-func (x *xblTokenSource) Token() (xsapi.Token, error) {
-	tok, err := x.src.Token()
-	if err != nil {
-		return nil, fmt.Errorf("request live token: %w", err)
-	}
-	xbl, err := auth.RequestXBLToken(x.ctx, tok, "http://xboxlive.com")
-	if err != nil {
-		return nil, fmt.Errorf("request xbl token: %w", err)
-	}
-	return xblToken{xbl}, nil
-}
-
-type xblToken struct {
-	*auth.XBLToken
-}
-
-func (t xblToken) SetAuthHeader(req *http.Request) {
-	req.Header.Set("Authorization", t.String())
-}
-
-func (t xblToken) DisplayClaims() xsapi.DisplayClaims {
-	if len(t.AuthorizationToken.DisplayClaims.UserInfo) == 0 {
-		return xsapi.DisplayClaims{}
-	}
-	claim := t.AuthorizationToken.DisplayClaims.UserInfo[0]
-	return xsapi.DisplayClaims{
-		GamerTag: claim.GamerTag,
-		XUID:     claim.XUID,
-		UserHash: claim.UserHash,
-	}
-}
-
-func (t xblToken) String() string {
-	claim := t.DisplayClaims()
-	return fmt.Sprintf("XBL3.0 x=%s;%s", claim.UserHash, t.AuthorizationToken.Token)
 }
