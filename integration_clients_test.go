@@ -313,8 +313,9 @@ func TestStatusUsesConfiguredProvider(t *testing.T) {
 	b, err := New(Config{
 		XBLTokenSource:  staticTokenSource{},
 		LiveTokenSource: staticOAuthSource{},
+		XUID:            "123",
 		Server:          ServerInfo{Host: "127.0.0.1", Port: 19132},
-		StatusProvider:  staticStatusProvider{host: "Provider Host", world: "Provider World"},
+		StatusProvider:  staticStatusProvider{host: "Provider Host", world: "Provider World", titleID: TitleID},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -326,15 +327,31 @@ func TestStatusUsesConfiguredProvider(t *testing.T) {
 	if status.HostName != "Provider Host" || status.WorldName != "Provider World" {
 		t.Fatalf("provider not used: %#v", status)
 	}
+	if status.OwnerID != "123" {
+		t.Fatalf("provider owner id = %q", status.OwnerID)
+	}
+	if status.TitleID != 0 {
+		t.Fatalf("provider title id = %d", status.TitleID)
+	}
 }
 
 func TestRoomStatusProviderNormalizesConfiguredProvider(t *testing.T) {
 	b := &Broadcaster{conf: Config{
-		StatusProvider: staticStatusProvider{host: "Provider Host", world: "Provider World"},
+		XUID:           "123",
+		StatusProvider: staticStatusProvider{host: "Provider Host", world: "Provider World", titleID: TitleID},
 	}}
 	status := b.roomStatusProvider(room.Status{}).RoomStatus()
-	if status.Protocol == 0 || status.Version == "" || status.TitleID == 0 {
+	if status.Protocol == 0 || status.Version == "" {
 		t.Fatalf("provider status was not normalized: %#v", status)
+	}
+	if status.OwnerID != "123" {
+		t.Fatalf("provider owner id = %q", status.OwnerID)
+	}
+	if status.TransportLayer != room.TransportLayerNetherNet {
+		t.Fatalf("provider transport layer = %d", status.TransportLayer)
+	}
+	if status.TitleID != 0 {
+		t.Fatalf("provider title id = %d", status.TitleID)
 	}
 	if status.BroadcastSetting == 0 || status.Joinability == "" {
 		t.Fatalf("provider session controls were not normalized: %#v", status)
@@ -403,6 +420,7 @@ func TestStartAdvertisesJSONRPCConnectionWhenConfigured(t *testing.T) {
 	b := &Broadcaster{
 		conf: Config{
 			Server:               ServerInfo{Host: "127.0.0.1", Port: 19132},
+			XBLTokenSource:       staticTokenSource{xuid: "123"},
 			Signaling:            sig,
 			SignalingMode:        SignalingModeJSONRPC,
 			MinecraftTokenSource: minecraftTokenSourceWithPMID{pmid: pmsgID},
@@ -431,6 +449,15 @@ func TestStartAdvertisesJSONRPCConnectionWhenConfigured(t *testing.T) {
 	}
 	if got.PmsgID != pmsgID {
 		t.Fatalf("pmsg id = %s", got.PmsgID)
+	}
+	if announcer.status.OwnerID != "123" {
+		t.Fatalf("owner id = %q", announcer.status.OwnerID)
+	}
+	if announcer.status.TransportLayer != room.TransportLayerNetherNet {
+		t.Fatalf("transport layer = %d", announcer.status.TransportLayer)
+	}
+	if announcer.status.TitleID != 0 {
+		t.Fatalf("title id = %d", announcer.status.TitleID)
 	}
 }
 
@@ -490,6 +517,7 @@ func TestQueryStatusFallsBackToWeb(t *testing.T) {
 
 type staticStatusProvider struct {
 	host, world string
+	titleID     int64
 }
 
 func (s staticStatusProvider) RoomStatus() room.Status {
@@ -498,6 +526,7 @@ func (s staticStatusProvider) RoomStatus() room.Status {
 		WorldName:      s.world,
 		MemberCount:    1,
 		MaxMemberCount: 2,
+		TitleID:        s.titleID,
 	}
 }
 
