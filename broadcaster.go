@@ -31,7 +31,7 @@ const (
 	// go-nethernet starts this context before the first remote ICE candidate is
 	// received, then reuses it for ICE, DTLS, SCTP, and channel readiness.
 	defaultNetherNetConnTimeout = 30 * time.Second
-	defaultTransferCloseDelay   = 2 * time.Second
+	defaultTransferCloseTimeout = 15 * time.Second
 )
 
 // Broadcaster owns the Xbox Live session, NetherNet listener, and redirect
@@ -58,13 +58,15 @@ type Broadcaster struct {
 	mu      sync.Mutex
 	started bool
 
-	transferCloseDelay time.Duration
+	transferCloseTimeout time.Duration
 }
 
 type transferConn interface {
 	WritePacket(packet.Packet) error
+	ReadPacket() (packet.Packet, error)
 	Flush() error
 	Close() error
+	SetReadDeadline(time.Time) error
 	IdentityData() login.IdentityData
 }
 
@@ -799,35 +801,61 @@ func (b *Broadcaster) transfer(conn transferConn) {
 		}
 	}
 	b.log.Info("transferred client", "xuid", id.XUID, "name", id.DisplayName, "target", b.conf.Server.Address())
-	if delay := b.effectiveTransferCloseDelay(); delay > 0 {
-		b.debug("waiting before closing transferred client", "xuid", id.XUID, "name", id.DisplayName, "delay", delay)
-		b.waitBeforeTransferClose(delay)
-	}
+	b.waitForTransferredClientDisconnect(conn, id)
 }
 
-func (b *Broadcaster) effectiveTransferCloseDelay() time.Duration {
-	if b.transferCloseDelay == 0 {
-		return defaultTransferCloseDelay
+func (b *Broadcaster) effectiveTransferCloseTimeout() time.Duration {
+	if b.transferCloseTimeout == 0 {
+		return defaultTransferCloseTimeout
 	}
-	if b.transferCloseDelay < 0 {
+	if b.transferCloseTimeout < 0 {
 		return 0
 	}
-	return b.transferCloseDelay
+	return b.transferCloseTimeout
 }
 
-func (b *Broadcaster) waitBeforeTransferClose(delay time.Duration) {
-	if delay <= 0 {
+func (b *Broadcaster) waitForTransferredClientDisconnect(conn transferConn, id login.IdentityData) {
+	timeout := b.effectiveTransferCloseTimeout()
+	if timeout <= 0 {
 		return
 	}
-	ctx := b.ctx
-	if ctx == nil {
-		ctx = context.Background()
+	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		b.debug("set transfer disconnect deadline", "xuid", id.XUID, "name", id.DisplayName, "err", err)
+		return
 	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-	case <-ctx.Done():
+	cancelWait := b.closeTransferredClientOnStop(conn)
+	defer cancelWait()
+
+	b.debug("waiting for transferred client to disconnect", "xuid", id.XUID, "name", id.DisplayName, "timeout", timeout)
+	for {
+		if _, err := conn.ReadPacket(); err != nil {
+			switch {
+			case errors.Is(err, context.DeadlineExceeded):
+				b.debug("closing transferred client after disconnect timeout", "xuid", id.XUID, "name", id.DisplayName, "timeout", timeout)
+			case b.ctx != nil && b.ctx.Err() != nil:
+				b.debug("stopped waiting for transferred client disconnect", "xuid", id.XUID, "name", id.DisplayName, "err", err)
+			default:
+				b.debug("transferred client disconnected", "xuid", id.XUID, "name", id.DisplayName, "err", err)
+			}
+			return
+		}
+	}
+}
+
+func (b *Broadcaster) closeTransferredClientOnStop(conn transferConn) func() {
+	if b.ctx == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-b.ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
+	return func() {
+		close(done)
 	}
 }
 

@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -243,7 +245,7 @@ func TestBroadcasterTransferSendsStartGameBeforeTransfer(t *testing.T) {
 	b := &Broadcaster{log: testBroadcasterLogger(), conf: Config{
 		Server: ServerInfo{Host: "play.example.net", Port: 19133},
 		Status: Status{WorldName: "Redirect Lobby"},
-	}, transferCloseDelay: -1}
+	}, transferCloseTimeout: -1}
 
 	b.transfer(conn)
 
@@ -279,45 +281,73 @@ func TestBroadcasterTransferSendsStartGameBeforeTransfer(t *testing.T) {
 	}
 }
 
-func TestBroadcasterTransferWaitsBeforeClosingAfterFlush(t *testing.T) {
-	delay := 40 * time.Millisecond
-	conn := &recordingTransferConn{closedCh: make(chan struct{})}
+func TestBroadcasterTransferWaitsForClientDisconnectAfterFlush(t *testing.T) {
+	conn := &recordingTransferConn{
+		readErrCh:     make(chan error, 1),
+		readStartedCh: make(chan struct{}),
+		closedCh:      make(chan struct{}),
+	}
 	b := &Broadcaster{log: testBroadcasterLogger(), conf: Config{
 		Server: ServerInfo{Host: "play.example.net", Port: 19133},
-	}, transferCloseDelay: delay}
+	}}
 
 	go b.transfer(conn)
 
-	tooSoon := time.NewTimer(delay / 2)
-	defer tooSoon.Stop()
 	select {
-	case <-conn.closedCh:
-		t.Fatal("connection closed before transfer close delay elapsed")
-	case <-tooSoon.C:
+	case <-conn.readStartedCh:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("transfer did not wait for client disconnect")
 	}
 	select {
 	case <-conn.closedCh:
-	case <-time.After(delay * 5):
-		t.Fatal("connection was not closed after transfer close delay")
+		t.Fatal("connection closed before client disconnect")
+	default:
+	}
+
+	conn.readErrCh <- net.ErrClosed
+	select {
+	case <-conn.closedCh:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("connection was not closed after client disconnect")
+	}
+}
+
+func TestBroadcasterTransferClosesAfterDisconnectTimeout(t *testing.T) {
+	timeout := 20 * time.Millisecond
+	conn := &recordingTransferConn{
+		readErrCh:        make(chan error, 1),
+		deadlineTriggers: true,
+		closedCh:         make(chan struct{}),
+	}
+	b := &Broadcaster{log: testBroadcasterLogger(), conf: Config{
+		Server: ServerInfo{Host: "play.example.net", Port: 19133},
+	}, transferCloseTimeout: timeout}
+
+	go b.transfer(conn)
+
+	select {
+	case <-conn.closedCh:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("connection was not closed after transfer disconnect timeout")
 	}
 }
 
 func TestBroadcasterTransferDoesNotWaitWhenFlushFails(t *testing.T) {
-	delay := time.Second
 	conn := &recordingTransferConn{
 		flushErr: fmt.Errorf("flush failed"),
 		closedCh: make(chan struct{}),
 	}
 	b := &Broadcaster{log: testBroadcasterLogger(), conf: Config{
 		Server: ServerInfo{Host: "play.example.net", Port: 19133},
-	}, transferCloseDelay: delay}
+	}, transferCloseTimeout: time.Second}
 
-	go b.transfer(conn)
+	b.transfer(conn)
 
-	select {
-	case <-conn.closedCh:
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("connection waited for transfer close delay after flush failed")
+	if !conn.closed {
+		t.Fatal("connection was not closed after flush failed")
+	}
+	if conn.readStarted() {
+		t.Fatal("transfer waited for client disconnect after flush failed")
 	}
 }
 
@@ -341,16 +371,34 @@ func testBroadcasterLogger() *slog.Logger {
 }
 
 type recordingTransferConn struct {
-	packets  []packet.Packet
-	flushErr error
-	flushes  int
-	closed   bool
-	closedCh chan struct{}
+	packets          []packet.Packet
+	flushErr         error
+	flushes          int
+	closed           bool
+	closedCh         chan struct{}
+	readErrCh        chan error
+	readStartedCh    chan struct{}
+	readStartedOnce  sync.Once
+	readStartedValue bool
+	deadlineTriggers bool
 }
 
 func (c *recordingTransferConn) WritePacket(pk packet.Packet) error {
 	c.packets = append(c.packets, pk)
 	return nil
+}
+
+func (c *recordingTransferConn) ReadPacket() (packet.Packet, error) {
+	c.readStartedOnce.Do(func() {
+		c.readStartedValue = true
+		if c.readStartedCh != nil {
+			close(c.readStartedCh)
+		}
+	})
+	if c.readErrCh == nil {
+		return nil, net.ErrClosed
+	}
+	return nil, <-c.readErrCh
 }
 
 func (c *recordingTransferConn) Flush() error {
@@ -366,6 +414,26 @@ func (c *recordingTransferConn) Close() error {
 	return nil
 }
 
+func (c *recordingTransferConn) SetReadDeadline(t time.Time) error {
+	if c.deadlineTriggers && c.readErrCh != nil && !t.IsZero() {
+		delay := time.Until(t)
+		if delay < 0 {
+			delay = 0
+		}
+		time.AfterFunc(delay, func() {
+			select {
+			case c.readErrCh <- context.DeadlineExceeded:
+			default:
+			}
+		})
+	}
+	return nil
+}
+
 func (c *recordingTransferConn) IdentityData() login.IdentityData {
 	return login.IdentityData{XUID: "visitor", DisplayName: "Visitor"}
+}
+
+func (c *recordingTransferConn) readStarted() bool {
+	return c.readStartedValue
 }
