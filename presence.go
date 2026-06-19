@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/df-mc/go-xsapi/v2/presence"
@@ -30,12 +29,15 @@ func (c PresenceClient) Update(ctx context.Context) (time.Duration, error) {
 	if c.XUID == "" {
 		return defaultPresenceHeartbeat, errors.New("xuid is empty")
 	}
-	heartbeat := defaultPresenceHeartbeat
-	presenceClient := presence.New(c.clientWithHeartbeat(&heartbeat), xsts.UserInfo{XUID: c.XUID})
-	if err := presenceClient.Update(ctx, presence.TitleRequest{State: presence.StateActive}); err != nil {
+	presenceClient := presence.New(c.client(), xsts.UserInfo{XUID: c.XUID})
+	result, err := presenceClient.Update(ctx, presence.TitleRequest{State: presence.StateActive})
+	if err != nil {
 		return defaultPresenceHeartbeat, err
 	}
-	return heartbeat, nil
+	if result.HeartbeatAfter <= 0 {
+		return defaultPresenceHeartbeat, nil
+	}
+	return result.HeartbeatAfter, nil
 }
 
 func (c PresenceClient) Run(ctx context.Context, log *slog.Logger) {
@@ -69,37 +71,4 @@ func (c PresenceClient) client() *http.Client {
 		return c.Client
 	}
 	return http.DefaultClient
-}
-
-func (c PresenceClient) clientWithHeartbeat(heartbeat *time.Duration) *http.Client {
-	base := c.client()
-	client := new(http.Client)
-	*client = *base
-	client.Transport = heartbeatTransport{base: base.Transport, heartbeat: heartbeat}
-	return client
-}
-
-type heartbeatTransport struct {
-	base      http.RoundTripper
-	heartbeat *time.Duration
-}
-
-func (t heartbeatTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	base := t.base
-	if base == nil {
-		base = http.DefaultTransport
-	}
-	resp, err := base.RoundTrip(req)
-	if err == nil && resp != nil && t.heartbeat != nil {
-		*t.heartbeat = heartbeatAfter(resp.Header.Get("X-Heartbeat-After"))
-	}
-	return resp, err
-}
-
-func heartbeatAfter(header string) time.Duration {
-	seconds, err := strconv.Atoi(header)
-	if err != nil || seconds <= 0 {
-		return defaultPresenceHeartbeat
-	}
-	return time.Duration(seconds) * time.Second
 }
