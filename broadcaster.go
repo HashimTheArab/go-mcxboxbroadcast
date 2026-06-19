@@ -32,6 +32,7 @@ const (
 	// received, then reuses it for ICE, DTLS, SCTP, and channel readiness.
 	defaultNetherNetConnTimeout = 30 * time.Second
 	defaultTransferCloseTimeout = 15 * time.Second
+	defaultSignalingDialTimeout = 15 * time.Second
 )
 
 // Broadcaster owns the Xbox Live session, NetherNet listener, and redirect
@@ -442,8 +443,11 @@ func (b *Broadcaster) signalingFor(ctx context.Context) (nethernet.Signaling, er
 	if err != nil {
 		return nil, err
 	}
-	b.debug("dialing nethernet signaling", "signaling_mode", mode)
-	src, err := b.minecraftTokenSource(ctx)
+	timeout := b.signalingDialTimeout()
+	dialCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	b.debug("dialing nethernet signaling", "signaling_mode", mode, "timeout", timeout)
+	src, err := b.minecraftTokenSource(dialCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -452,13 +456,20 @@ func (b *Broadcaster) signalingFor(ctx context.Context) (nethernet.Signaling, er
 			Log:        b.log,
 			HTTPClient: b.conf.HTTPClient,
 		}
-		return d.DialContext(ctx, src)
+		return d.DialContext(dialCtx, src)
 	}
 	d := websocketsignaling.Dialer{
 		Log:        b.log,
 		HTTPClient: b.conf.HTTPClient,
 	}
-	return d.DialContext(ctx, src)
+	return d.DialContext(dialCtx, src)
+}
+
+func (b *Broadcaster) signalingDialTimeout() time.Duration {
+	if b.conf.SignalingDialTimeout > 0 {
+		return b.conf.SignalingDialTimeout
+	}
+	return defaultSignalingDialTimeout
 }
 
 func (b *Broadcaster) newAnnouncer(ctx context.Context) (room.Announcer, error) {

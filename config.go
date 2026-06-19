@@ -82,6 +82,10 @@ type Config struct {
 	UpdateInterval time.Duration
 	// HTTPClient is used by auth/signaling/session requests where supported.
 	HTTPClient *http.Client
+	// SignalingDialTimeout bounds default signaling startup. If zero, a
+	// 15-second timeout is used. Injected Signaling and SignalingFactory values
+	// receive the caller's context unchanged.
+	SignalingDialTimeout time.Duration
 	// Log receives diagnostic events. If nil, slog.Default() is used.
 	Log *slog.Logger
 }

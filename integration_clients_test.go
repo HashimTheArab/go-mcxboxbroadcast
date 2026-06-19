@@ -581,6 +581,37 @@ func TestStartAdvertisesOpaqueNetherNetID(t *testing.T) {
 	}
 }
 
+func TestStartTimesOutDefaultSignalingDial(t *testing.T) {
+	started := make(chan struct{})
+	var once sync.Once
+	blockingClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		once.Do(func() { close(started) })
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})}
+	b, err := New(Config{
+		Server:               ServerInfo{Host: "127.0.0.1", Port: 19132},
+		XBLTokenSource:       staticTokenSource{xuid: "123"},
+		MinecraftTokenSource: minecraftTokenSourceWithPMID{pmid: uuid.New()},
+		HTTPClient:           blockingClient,
+		SignalingMode:        SignalingModeJSONRPC,
+		SignalingDialTimeout: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = b.Start(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Start() error = %v, want context deadline exceeded", err)
+	}
+	select {
+	case <-started:
+	default:
+		t.Fatal("signaling discovery request was not started")
+	}
+}
+
 func TestStartupFailureCleanupClosesSignaling(t *testing.T) {
 	sig := &fakeSignaling{}
 	b := &Broadcaster{signaling: sig}
