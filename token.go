@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -23,6 +24,8 @@ import (
 )
 
 const liveAuthScope = "service::user.auth.xboxlive.com::MBI_SSL"
+
+var minecraftServiceErrorPattern = regexp.MustCompile(`minecraft/service:\s*([^:]+):\s*"([^"]*)"`)
 
 // NewLiveTokenSource returns a Microsoft Live token source that uses ctx for
 // outbound authentication requests. If ctx carries oauth2.HTTPClient, that
@@ -68,6 +71,10 @@ func NewXSAPIClient(ctx context.Context, src xsapi.TokenSource, client *http.Cli
 }
 
 func NewMinecraftTokenSource(ctx context.Context, xbl *xsapi.Client, client *http.Client) (service.TokenSource, error) {
+	return newMinecraftTokenSource(ctx, xbl, client, nil)
+}
+
+func newMinecraftTokenSource(ctx context.Context, xbl *xsapi.Client, client *http.Client, log *slog.Logger) (service.TokenSource, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -77,17 +84,22 @@ func NewMinecraftTokenSource(ctx context.Context, xbl *xsapi.Client, client *htt
 	if client != nil {
 		ctx = context.WithValue(ctx, oauth2.HTTPClient, client)
 	}
+	debugLog(log, "discovering minecraft services")
 	discovery, err := service.Discover(ctx, service.ApplicationTypeMinecraftPE, protocol.CurrentVersion)
 	if err != nil {
 		return nil, fmt.Errorf("discover minecraft services: %w", err)
 	}
+	debugLog(log, "discovered minecraft services")
+	debugLog(log, "loading minecraft auth environment")
 	env := new(service.AuthorizationEnvironment)
 	if err := discovery.Environment(env); err != nil {
 		return nil, fmt.Errorf("load auth environment: %w", err)
 	}
+	debugLog(log, "loaded minecraft auth environment", "playfab_title_id", env.PlayFabTitleID)
 	if client != nil {
 		env.HTTPClient = client
 	}
+	debugLog(log, "logging in to playfab with xbox")
 	playfabClient, err := playfab.LoginWithXbox(ctx, env.PlayFabTitleID, xbl, playfab.ClientConfig{
 		HTTPClient:    client,
 		CreateAccount: true,
@@ -95,7 +107,57 @@ func NewMinecraftTokenSource(ctx context.Context, xbl *xsapi.Client, client *htt
 	if err != nil {
 		return nil, fmt.Errorf("login to playfab with xbox: %w", err)
 	}
-	return env.TokenSource(playfabClient, service.TokenConfig{}), nil
+	debugLog(log, "logged in to playfab with xbox")
+	return withMinecraftTokenDiagnostics(env.TokenSource(playfabClient, service.TokenConfig{})), nil
+}
+
+func withMinecraftTokenDiagnostics(src service.TokenSource) service.TokenSource {
+	if src == nil {
+		return nil
+	}
+	if _, ok := src.(diagnosticMinecraftTokenSource); ok {
+		return src
+	}
+	return diagnosticMinecraftTokenSource{TokenSource: src}
+}
+
+type diagnosticMinecraftTokenSource struct {
+	service.TokenSource
+}
+
+func (s diagnosticMinecraftTokenSource) ServiceToken(ctx context.Context) (*service.Token, error) {
+	tok, err := s.TokenSource.ServiceToken(ctx)
+	if err != nil {
+		return nil, minecraftServiceTokenError(err)
+	}
+	return tok, nil
+}
+
+func minecraftServiceTokenError(err error) error {
+	matches := minecraftServiceErrorPattern.FindStringSubmatch(err.Error())
+	if len(matches) != 3 {
+		return err
+	}
+	detail := &minecraftTokenHeaderError{
+		Code:    matches[1],
+		Message: matches[2],
+		err:     err,
+	}
+	return detail
+}
+
+type minecraftTokenHeaderError struct {
+	Code    string
+	Message string
+	err     error
+}
+
+func (e *minecraftTokenHeaderError) Error() string {
+	return fmt.Sprintf("failed to get MC token header: error: %s, error message: %s", e.Code, e.Message)
+}
+
+func (e *minecraftTokenHeaderError) Unwrap() error {
+	return e.err
 }
 
 func withDefaultXBLTokenCache(ctx context.Context) context.Context {

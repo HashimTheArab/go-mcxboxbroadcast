@@ -15,8 +15,6 @@ import (
 )
 
 const (
-	peopleHubDecorations      = "bio,detail,multiplayerSummary,preferredColor,presenceDetail"
-	peopleHubGroupURL         = "https://peoplehub.xboxlive.com/users/me/people/%s/decoration/" + peopleHubDecorations
 	FriendErrorKindUnknown    = "unknown"
 	FriendErrorKindFullList   = "friend_list_full"
 	FriendErrorKindRestricted = "restricted"
@@ -36,10 +34,6 @@ type Person struct {
 	IsFollowingCaller    bool   `json:"isFollowingCaller"`
 	IsFollowedByCaller   bool   `json:"isFollowedByCaller"`
 	UniqueModernGamertag string `json:"uniqueModernGamertag"`
-}
-
-type peopleHubResponse struct {
-	People []xblsocial.User `json:"people"`
 }
 
 // AcceptFriendRequestsError reports a successful bulk accept response that
@@ -125,26 +119,16 @@ func IsFriendRestricted(err error) bool {
 func (c FriendClient) Friends(ctx context.Context) ([]Person, error) {
 	// go-xsapi/social.Friends only returns accepted friends; sync needs both
 	// sides of the relationship so pending inbound followers can be accepted.
-	followers, err := c.peopleHubGroup(ctx, "followers")
+	socialClient := c.social()
+	followers, err := socialClient.Followers(ctx)
 	if err != nil {
 		return nil, err
 	}
-	social, err := c.peopleHubGroup(ctx, "social")
+	following, err := socialClient.Following(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return mergePeople(followers, social), nil
-}
-
-// Follow follows the XUID, which makes the user a friend when they also follow
-// the authenticated account.
-func (c FriendClient) Follow(ctx context.Context, xuid string) error {
-	return c.social().Follow(ctx, xuid)
-}
-
-// Unfollow removes the authenticated account's follow relationship for xuid.
-func (c FriendClient) Unfollow(ctx context.Context, xuid string) error {
-	return c.social().Unfollow(ctx, xuid)
+	return mergePeople(peopleFromSocialUsers(followers), peopleFromSocialUsers(following)), nil
 }
 
 // AcceptPendingFriendRequests accepts incoming Xbox friend requests and returns
@@ -187,33 +171,15 @@ func (c FriendClient) social() *xblsocial.Client {
 	return xblsocial.New(classifyingFriendHTTPClient(c.client()), nil, xsts.UserInfo{}, nil)
 }
 
-func (c FriendClient) peopleHubGroup(ctx context.Context, group string) ([]Person, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf(peopleHubGroupURL, group), nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("X-Xbl-Contract-Version", "7")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Accept-Language", "en-US")
+// Follow follows the XUID, which makes the user a friend when they also follow
+// the authenticated account.
+func (c FriendClient) Follow(ctx context.Context, xuid string) error {
+	return c.social().Follow(ctx, xuid)
+}
 
-	resp, err := c.client().Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, friendResponseError(req, resp)
-	}
-	var data peopleHubResponse
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, err
-	}
-	return peopleFromSocialUsers(data.People), nil
+// Unfollow removes the authenticated account's follow relationship for xuid.
+func (c FriendClient) Unfollow(ctx context.Context, xuid string) error {
+	return c.social().Unfollow(ctx, xuid)
 }
 
 func peopleFromSocialUsers(users []xblsocial.User) []Person {

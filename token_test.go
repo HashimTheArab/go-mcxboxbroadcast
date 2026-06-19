@@ -64,6 +64,14 @@ func (staticMinecraftTokenSource) ServiceToken(context.Context) (*service.Token,
 	return &service.Token{AuthorizationHeader: "Bearer minecraft", ValidUntil: time.Now().Add(time.Hour)}, nil
 }
 
+type failingMinecraftTokenSource struct {
+	err error
+}
+
+func (s failingMinecraftTokenSource) ServiceToken(context.Context) (*service.Token, error) {
+	return nil, s.err
+}
+
 type contextCapturingTokenSource struct {
 	ctx context.Context
 }
@@ -78,6 +86,26 @@ func (*contextCapturingTokenSource) DeviceToken(context.Context) (*xasd.Token, e
 }
 
 func (*contextCapturingTokenSource) ProofKey() *ecdsa.PrivateKey { return nil }
+
+type blockingTokenSource struct {
+	started chan<- struct{}
+	unblock <-chan struct{}
+}
+
+func (s blockingTokenSource) XSTSToken(ctx context.Context, _ string) (*xsts.Token, error) {
+	select {
+	case s.started <- struct{}{}:
+	default:
+	}
+	<-s.unblock
+	return nil, ctx.Err()
+}
+
+func (blockingTokenSource) DeviceToken(context.Context) (*xasd.Token, error) {
+	return nil, errors.New("unexpected device token request")
+}
+
+func (blockingTokenSource) ProofKey() *ecdsa.PrivateKey { return nil }
 
 func TestNewLiveTokenSourceUsesContextHTTPClientForRefresh(t *testing.T) {
 	var called bool
@@ -111,6 +139,23 @@ func TestNewLiveTokenSourceUsesContextHTTPClientForRefresh(t *testing.T) {
 	}
 	if tok.RefreshToken != "new-refresh" {
 		t.Fatalf("unexpected refresh token %q", tok.RefreshToken)
+	}
+}
+
+func TestMinecraftTokenDiagnosticsFormatsPlayerBannedError(t *testing.T) {
+	baseErr := errors.New(`minecraft/service: PlayerBanned: "Player 2535433454914320 is banned." ()`)
+	src := withMinecraftTokenDiagnostics(failingMinecraftTokenSource{err: baseErr})
+
+	_, err := src.ServiceToken(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, baseErr) {
+		t.Fatalf("expected wrapped base error, got %v", err)
+	}
+	want := "failed to get MC token header: error: PlayerBanned, error message: Player 2535433454914320 is banned."
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err.Error(), want)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -25,6 +26,7 @@ const galleryURL = "https://persona.franchise.minecraft-services.net/api/v1.0/ga
 type GalleryClient struct {
 	TokenSource service.TokenSource
 	Client      *http.Client
+	Log         *slog.Logger
 }
 
 type GalleryImage struct {
@@ -56,6 +58,7 @@ func (g GalleryClient) SetShowcase(ctx context.Context, xuid, imagePath string, 
 	if err != nil {
 		return err
 	}
+	g.debug(ctx, "loaded gallery showcase images", "xuid", xuid, "count", len(images))
 	newHash, err := fileHash(imagePath)
 	if err != nil {
 		return err
@@ -66,28 +69,39 @@ func (g GalleryClient) SetShowcase(ctx context.Context, xuid, imagePath string, 
 			continue
 		}
 		hash, err := g.remoteImageHash(ctx, img.URL)
-		if err == nil && hash == newHash {
+		if err != nil {
+			g.debug(ctx, "failed to compare gallery image", "image_id", img.ID, "err", err)
+			continue
+		}
+		if hash == newHash {
 			imageID = img.ID
+			g.debug(ctx, "gallery showcase image already set", "image_id", imageID)
 			break
 		}
 	}
 	if imageID == "" {
+		g.debug(ctx, "uploading gallery showcase image", "path", imagePath)
 		img, err := g.Upload(ctx, imagePath, true)
 		if err != nil {
 			return err
 		}
 		imageID = img.ID
+		g.debug(ctx, "uploaded gallery showcase image", "image_id", imageID)
 	}
 	if deleteOther {
 		var deleteErr error
+		deleted := 0
 		for _, img := range images {
 			if img.ID != "" && img.ID != imageID {
+				g.debug(ctx, "deleting old gallery image", "image_id", img.ID)
 				deleteErr = errors.Join(deleteErr, g.Delete(ctx, img.ID))
+				deleted++
 			}
 		}
 		if deleteErr != nil {
 			return fmt.Errorf("delete old gallery images: %w", deleteErr)
 		}
+		g.debug(ctx, "deleted old gallery images", "count", deleted)
 	}
 	return nil
 }
@@ -205,6 +219,12 @@ func (g GalleryClient) client() *http.Client {
 		return g.Client
 	}
 	return http.DefaultClient
+}
+
+func (g GalleryClient) debug(ctx context.Context, msg string, args ...any) {
+	if g.Log != nil {
+		g.Log.DebugContext(ctx, msg, args...)
+	}
 }
 
 func fileHash(path string) (uint32, error) {

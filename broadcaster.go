@@ -367,7 +367,7 @@ func (b *Broadcaster) minecraftTokenSource(ctx context.Context) (service.TokenSo
 	if err != nil {
 		return nil, err
 	}
-	tokens, err := NewMinecraftTokenSource(ctx, client, b.conf.HTTPClient)
+	tokens, err := newMinecraftTokenSource(ctx, client, b.conf.HTTPClient, b.log)
 	if err != nil {
 		return nil, err
 	}
@@ -464,6 +464,7 @@ func (b *Broadcaster) signalingFor(ctx context.Context) (nethernet.Signaling, er
 	defer cancel()
 	b.debug("dialing nethernet signaling", "signaling_mode", mode, "timeout", timeout)
 	conf := b.defaultSignalingConfig(mode)
+	conf.httpClient = signalingStartupHTTPClient(conf.httpClient, timeout)
 	resultCh := make(chan defaultSignalingResult)
 	go func() {
 		result := dialDefaultSignaling(dialCtx, conf)
@@ -559,7 +560,7 @@ func (conf defaultSignalingConfig) minecraftTokenSource(ctx context.Context) (se
 		}
 		createdClient = client
 	}
-	tokens, err := NewMinecraftTokenSource(ctx, client, conf.httpClient)
+	tokens, err := newMinecraftTokenSource(ctx, client, conf.httpClient, conf.log)
 	if err != nil {
 		return nil, createdClient, err
 	}
@@ -594,6 +595,21 @@ func (b *Broadcaster) signalingDialTimeout() time.Duration {
 		return b.conf.SignalingDialTimeout
 	}
 	return defaultSignalingDialTimeout
+}
+
+func signalingStartupHTTPClient(client *http.Client, timeout time.Duration) *http.Client {
+	if timeout <= 0 {
+		return client
+	}
+	if client == nil {
+		return &http.Client{Timeout: timeout}
+	}
+	if client.Timeout > 0 && client.Timeout <= timeout {
+		return client
+	}
+	clone := *client
+	clone.Timeout = timeout
+	return &clone
 }
 
 func (b *Broadcaster) newAnnouncer(ctx context.Context) (room.Announcer, error) {
@@ -735,7 +751,7 @@ func (b *Broadcaster) uploadGallery(ctx context.Context) {
 		b.notify(ctx, "Showcase image upload skipped: Xbox profile XUID is empty.")
 		return
 	}
-	client := GalleryClient{TokenSource: src, Client: cfg.Client}
+	client := GalleryClient{TokenSource: src, Client: cfg.Client, Log: b.log}
 	if client.Client == nil {
 		client.Client = b.conf.HTTPClient
 	}
@@ -1058,7 +1074,9 @@ func (b *Broadcaster) updateLoop() {
 		select {
 		case <-ticker.C:
 			ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
-			if err := b.Update(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			if err := b.Update(ctx); err == nil {
+				b.debug("updated xbox live session")
+			} else if !errors.Is(err, context.Canceled) {
 				b.log.Error("update session", "err", err)
 				b.notifySessionUpdateFailure(ctx, err)
 			}

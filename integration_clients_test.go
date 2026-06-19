@@ -603,6 +603,51 @@ func TestStartTimesOutDefaultSignalingDial(t *testing.T) {
 	}
 }
 
+func TestStartTimesOutDefaultSignalingTokenSourceCreation(t *testing.T) {
+	started := make(chan struct{}, 1)
+	unblock := make(chan struct{})
+	defer close(unblock)
+
+	b, err := New(Config{
+		Server:               ServerInfo{Host: "127.0.0.1", Port: 19132},
+		XBLTokenSource:       blockingTokenSource{started: started, unblock: unblock},
+		SignalingMode:        SignalingModeJSONRPC,
+		SignalingDialTimeout: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = b.Start(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Start() error = %v, want context deadline exceeded", err)
+	}
+	select {
+	case <-started:
+	default:
+		t.Fatal("default signaling did not start xbox live token source creation")
+	}
+}
+
+func TestSignalingStartupHTTPClientBoundsTimeout(t *testing.T) {
+	base := &http.Client{}
+	got := signalingStartupHTTPClient(base, 2*time.Second)
+	if got == base {
+		t.Fatal("expected a cloned client when adding a timeout")
+	}
+	if got.Timeout != 2*time.Second {
+		t.Fatalf("timeout = %s, want 2s", got.Timeout)
+	}
+	if base.Timeout != 0 {
+		t.Fatalf("base client was mutated: timeout = %s", base.Timeout)
+	}
+
+	existing := &http.Client{Timeout: time.Second}
+	if got := signalingStartupHTTPClient(existing, 2*time.Second); got != existing {
+		t.Fatal("expected existing tighter timeout to be reused")
+	}
+}
+
 func TestStartupFailureCleanupClosesSignaling(t *testing.T) {
 	sig := &fakeSignaling{}
 	b := &Broadcaster{signaling: sig}

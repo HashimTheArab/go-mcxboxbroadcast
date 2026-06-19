@@ -49,3 +49,5 @@ require (
 )
 
 replace github.com/sandertv/gophertunnel => github.com/hashimthearab/gophertunnel v1.25.3-0.20260619021431-5ef101cfa26f
+
+replace github.com/df-mc/go-xsapi/v2 => github.com/HashimTheArab/go-xsapi/v2 v2.0.0-20260619072458-523ea64c1412
