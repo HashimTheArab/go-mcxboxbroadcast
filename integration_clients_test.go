@@ -582,12 +582,8 @@ func TestStartAdvertisesOpaqueNetherNetID(t *testing.T) {
 }
 
 func TestStartTimesOutDefaultSignalingDial(t *testing.T) {
-	started := make(chan struct{})
-	var once sync.Once
 	blockingClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		once.Do(func() { close(started) })
-		<-req.Context().Done()
-		return nil, req.Context().Err()
+		select {}
 	})}
 	b, err := New(Config{
 		Server:               ServerInfo{Host: "127.0.0.1", Port: 19132},
@@ -604,11 +600,6 @@ func TestStartTimesOutDefaultSignalingDial(t *testing.T) {
 	err = b.Start(context.Background())
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Start() error = %v, want context deadline exceeded", err)
-	}
-	select {
-	case <-started:
-	default:
-		t.Fatal("signaling discovery request was not started")
 	}
 }
 

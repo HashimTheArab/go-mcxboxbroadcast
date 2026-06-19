@@ -71,6 +71,22 @@ type transferConn interface {
 	IdentityData() login.IdentityData
 }
 
+type defaultSignalingResult struct {
+	signaling     nethernet.Signaling
+	minecraft     service.TokenSource
+	createdClient *xsapi.Client
+	err           error
+}
+
+type defaultSignalingConfig struct {
+	mode            SignalingMode
+	log             *slog.Logger
+	httpClient      *http.Client
+	xblClient       *xsapi.Client
+	xblTokenSource  xsapi.TokenSource
+	minecraftTokens service.TokenSource
+}
+
 // New validates conf and returns a Broadcaster.
 func New(conf Config) (*Broadcaster, error) {
 	if err := conf.Server.validate(); err != nil {
@@ -447,22 +463,130 @@ func (b *Broadcaster) signalingFor(ctx context.Context) (nethernet.Signaling, er
 	dialCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	b.debug("dialing nethernet signaling", "signaling_mode", mode, "timeout", timeout)
-	src, err := b.minecraftTokenSource(dialCtx)
-	if err != nil {
-		return nil, err
-	}
-	if mode == SignalingModeJSONRPC {
-		d := messaging.Dialer{
-			Log:        b.log,
-			HTTPClient: b.conf.HTTPClient,
+	conf := b.defaultSignalingConfig(mode)
+	resultCh := make(chan defaultSignalingResult)
+	go func() {
+		result := dialDefaultSignaling(dialCtx, conf)
+		select {
+		case resultCh <- result:
+		case <-dialCtx.Done():
+			closeDefaultSignalingResult(result)
 		}
-		return d.DialContext(dialCtx, src)
+	}()
+	select {
+	case result := <-resultCh:
+		if dialCtx.Err() != nil {
+			closeDefaultSignalingResult(result)
+			return nil, fmt.Errorf("dial nethernet signaling: %w", dialCtx.Err())
+		}
+		if result.err != nil {
+			if result.createdClient != nil {
+				_ = result.createdClient.Close()
+			}
+			return nil, result.err
+		}
+		b.cacheDefaultSignalingResult(result)
+		return result.signaling, nil
+	case <-dialCtx.Done():
+		return nil, fmt.Errorf("dial nethernet signaling: %w", dialCtx.Err())
 	}
+}
+
+func (b *Broadcaster) defaultSignalingConfig(mode SignalingMode) defaultSignalingConfig {
+	client := b.conf.XBLClient
+	if client == nil {
+		client = b.xblClient
+	}
+	tokens := b.conf.MinecraftTokenSource
+	if tokens == nil {
+		tokens = b.minecraftTokens
+	}
+	return defaultSignalingConfig{
+		mode:            mode,
+		log:             b.log,
+		httpClient:      b.conf.HTTPClient,
+		xblClient:       client,
+		xblTokenSource:  b.conf.XBLTokenSource,
+		minecraftTokens: tokens,
+	}
+}
+
+func dialDefaultSignaling(ctx context.Context, conf defaultSignalingConfig) defaultSignalingResult {
+	debugLog(conf.log, "creating minecraft token source for signaling")
+	src, createdClient, err := conf.minecraftTokenSource(ctx)
+	if err != nil {
+		return defaultSignalingResult{createdClient: createdClient, err: err}
+	}
+	debugLog(conf.log, "created minecraft token source for signaling")
+	if conf.mode == SignalingModeJSONRPC {
+		debugLog(conf.log, "dialing jsonrpc messaging signaling websocket")
+		d := messaging.Dialer{
+			Log:        conf.log,
+			HTTPClient: conf.httpClient,
+		}
+		sig, err := d.DialContext(ctx, src)
+		if err != nil {
+			return defaultSignalingResult{createdClient: createdClient, err: err}
+		}
+		return defaultSignalingResult{signaling: sig, minecraft: src, createdClient: createdClient}
+	}
+	debugLog(conf.log, "dialing websocket signaling websocket")
 	d := websocketsignaling.Dialer{
-		Log:        b.log,
-		HTTPClient: b.conf.HTTPClient,
+		Log:        conf.log,
+		HTTPClient: conf.httpClient,
 	}
-	return d.DialContext(dialCtx, src)
+	sig, err := d.DialContext(ctx, src)
+	if err != nil {
+		return defaultSignalingResult{createdClient: createdClient, err: err}
+	}
+	return defaultSignalingResult{signaling: sig, minecraft: src, createdClient: createdClient}
+}
+
+func (conf defaultSignalingConfig) minecraftTokenSource(ctx context.Context) (service.TokenSource, *xsapi.Client, error) {
+	if conf.minecraftTokens != nil {
+		return conf.minecraftTokens, nil, nil
+	}
+	client := conf.xblClient
+	var createdClient *xsapi.Client
+	if client == nil {
+		if conf.xblTokenSource == nil {
+			return nil, nil, errors.New("xbox live token source is required")
+		}
+		var err error
+		client, err = NewXSAPIClient(ctx, conf.xblTokenSource, conf.httpClient, conf.log)
+		if err != nil {
+			return nil, nil, fmt.Errorf("create xbox live client: %w", err)
+		}
+		createdClient = client
+	}
+	tokens, err := NewMinecraftTokenSource(ctx, client, conf.httpClient)
+	if err != nil {
+		return nil, createdClient, err
+	}
+	return tokens, createdClient, nil
+}
+
+func (b *Broadcaster) cacheDefaultSignalingResult(result defaultSignalingResult) {
+	if result.createdClient != nil {
+		b.xblClient = result.createdClient
+		b.conf.XBLClient = result.createdClient
+		b.createdXBLClients = append(b.createdXBLClients, result.createdClient)
+	}
+	if b.conf.MinecraftTokenSource == nil && b.minecraftTokens == nil && result.minecraft != nil {
+		b.minecraftTokens = result.minecraft
+		b.conf.MinecraftTokenSource = result.minecraft
+	}
+}
+
+func closeDefaultSignalingResult(result defaultSignalingResult) {
+	if result.signaling != nil {
+		if c, ok := result.signaling.(interface{ Close() error }); ok {
+			_ = c.Close()
+		}
+	}
+	if result.createdClient != nil {
+		_ = result.createdClient.Close()
+	}
 }
 
 func (b *Broadcaster) signalingDialTimeout() time.Duration {
@@ -635,8 +759,12 @@ func (b *Broadcaster) sharedTokenSourceContext(fallback context.Context) context
 }
 
 func (b *Broadcaster) debug(msg string, args ...any) {
-	if b.log != nil {
-		b.log.Debug(msg, args...)
+	debugLog(b.log, msg, args...)
+}
+
+func debugLog(log *slog.Logger, msg string, args ...any) {
+	if log != nil {
+		log.Debug(msg, args...)
 	}
 }
 
