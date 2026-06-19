@@ -158,3 +158,33 @@ func TestSessionNonceAnnouncerUpdateNoncesWritesCustomProperties(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSessionNonceAnnouncerRepublishClearsNonceState(t *testing.T) {
+	session := &mpsd.Session{}
+	announcer := newSessionNonceAnnouncer(&room.XBLAnnouncer{Session: session}, "100", nil)
+	announcer.Session = session
+	announcer.handledSession = session
+	announcer.nonces["200"] = "stale"
+
+	announcer.resetForRepublishLocked()
+
+	if announcer.Session != nil {
+		t.Fatal("session should be cleared before republish")
+	}
+	if announcer.handledSession != nil {
+		t.Fatal("handled session should be cleared before republish")
+	}
+	custom, err := marshalStatusWithNonces(room.Status{WorldName: "World"}, announcer.nonces)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Nonces map[string]string `json:"nonces"`
+	}
+	if err := json.Unmarshal(custom, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Nonces) != 0 {
+		t.Fatalf("stale nonce state survived republish reset: %#v", got.Nonces)
+	}
+}

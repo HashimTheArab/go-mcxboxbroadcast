@@ -44,11 +44,7 @@ func (a *sessionNonceAnnouncer) Announce(ctx context.Context, status room.Status
 	a.Lock()
 	defer a.Unlock()
 
-	custom, err := marshalStatusWithNonces(status, a.nonces)
-	if err != nil {
-		return fmt.Errorf("encode: %w", err)
-	}
-	config, read, join := a.publishConfig(status, custom)
+	read, join := a.publishRestrictions(status)
 	if a.Session != nil && a.readRestriction == "" && a.joinRestriction == "" {
 		if properties := a.Session.Properties(); properties.System != nil {
 			a.readRestriction = properties.System.ReadRestriction
@@ -56,6 +52,10 @@ func (a *sessionNonceAnnouncer) Announce(ctx context.Context, status room.Status
 		}
 	}
 
+	custom, err := marshalStatusWithNonces(status, a.nonces)
+	if err != nil {
+		return fmt.Errorf("encode: %w", err)
+	}
 	a.lastStatus = status
 	if bytes.Equal(custom, a.custom) && read == a.readRestriction && join == a.joinRestriction {
 		a.handleSessionLocked()
@@ -70,9 +70,14 @@ func (a *sessionNonceAnnouncer) Announce(ctx context.Context, status room.Status
 		if err := a.Session.CloseContext(ctx); err != nil {
 			return fmt.Errorf("close stale session: %w", err)
 		}
-		a.Session = nil
-		a.handledSession = nil
+		a.resetForRepublishLocked()
 	}
+
+	custom, err = marshalStatusWithNonces(status, a.nonces)
+	if err != nil {
+		return fmt.Errorf("encode: %w", err)
+	}
+	config, read, join := a.publishConfig(status, custom)
 
 	if a.Session == nil {
 		if a.Client == nil {
@@ -104,21 +109,30 @@ func (a *sessionNonceAnnouncer) Announce(ctx context.Context, status room.Status
 	return nil
 }
 
+func (a *sessionNonceAnnouncer) resetForRepublishLocked() {
+	a.Session = nil
+	a.handledSession = nil
+	a.nonces = make(map[string]string)
+}
+
 func (a *sessionNonceAnnouncer) publishConfig(status room.Status, custom []byte) (mpsd.PublishConfig, string, string) {
-	read, join := sessionRestrictions(status.BroadcastSetting)
+	read, join := a.publishRestrictions(status)
 	config := a.PublishConfig
 	config.CustomProperties = custom
-	if config.ReadRestriction == "" {
-		config.ReadRestriction = read
-	} else {
-		read = config.ReadRestriction
-	}
-	if config.JoinRestriction == "" {
-		config.JoinRestriction = join
-	} else {
-		join = config.JoinRestriction
-	}
+	config.ReadRestriction = read
+	config.JoinRestriction = join
 	return config, read, join
+}
+
+func (a *sessionNonceAnnouncer) publishRestrictions(status room.Status) (read, join string) {
+	read, join = sessionRestrictions(status.BroadcastSetting)
+	if a.PublishConfig.ReadRestriction != "" {
+		read = a.PublishConfig.ReadRestriction
+	}
+	if a.PublishConfig.JoinRestriction != "" {
+		join = a.PublishConfig.JoinRestriction
+	}
+	return read, join
 }
 
 func sessionRestrictions(setting int32) (read, join string) {
