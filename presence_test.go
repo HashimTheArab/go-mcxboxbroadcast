@@ -2,6 +2,7 @@ package broadcaster
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -36,8 +37,14 @@ func TestPresenceClientUpdatePostsActiveStateAndReturnsHeartbeat(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if string(body) != `{"state":"active"}` {
-				t.Fatalf("unexpected body %q", string(body))
+			var payload struct {
+				State string `json:"state"`
+			}
+			if err := json.Unmarshal(body, &payload); err != nil {
+				t.Fatalf("decode body %q: %v", string(body), err)
+			}
+			if payload.State != "active" {
+				t.Fatalf("unexpected body state %q", payload.State)
 			}
 			resp := response(http.StatusOK, "")
 			resp.Header.Set("X-Heartbeat-After", "42")

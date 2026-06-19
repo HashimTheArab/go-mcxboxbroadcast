@@ -514,6 +514,39 @@ func TestStartAdvertisesJSONRPCConnectionWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestStartAdvertisesJSONRPCConnectionFromTokenHeaderPMID(t *testing.T) {
+	pmsgID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
+	sig := &fakeSignaling{networkID: "123456789"}
+	announcer := &fakeAnnouncer{}
+	b := &Broadcaster{
+		conf: Config{
+			Server:               ServerInfo{Host: "127.0.0.1", Port: 19132},
+			XBLTokenSource:       staticTokenSource{xuid: "123"},
+			Signaling:            sig,
+			SignalingMode:        SignalingModeJSONRPC,
+			MinecraftTokenSource: minecraftTokenSourceWithHeaderPMID{pmid: pmsgID},
+			Status:               Status{HostName: "Host", WorldName: "World"},
+			UpdateInterval:       30 * time.Second,
+		},
+		announcerFactory: func(*Broadcaster) room.Announcer {
+			return announcer
+		},
+	}
+
+	if err := b.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+
+	status := announcer.Status()
+	if len(status.SupportedConnections) != 1 {
+		t.Fatalf("unexpected connections: %#v", status.SupportedConnections)
+	}
+	if got := status.SupportedConnections[0].PmsgID; got != pmsgID {
+		t.Fatalf("pmsg id = %s, want %s", got, pmsgID)
+	}
+}
+
 func TestStartAdvertisesOpaqueNetherNetID(t *testing.T) {
 	pmsgID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
 	networkID := uuid.MustParse("11111111-2222-3333-4444-555555555555").String()
@@ -756,5 +789,20 @@ func (s minecraftTokenSourceWithPMID) ServiceToken(context.Context) (*service.To
 		AuthorizationHeader: "Bearer header." + base64.RawURLEncoding.EncodeToString(payload) + ".signature",
 		ValidUntil:          time.Now().Add(time.Hour),
 		Claims:              service.Claims{PlayerMessagingID: s.pmid},
+	}, nil
+}
+
+type minecraftTokenSourceWithHeaderPMID struct {
+	pmid uuid.UUID
+}
+
+func (s minecraftTokenSourceWithHeaderPMID) ServiceToken(context.Context) (*service.Token, error) {
+	payload, err := json.Marshal(map[string]string{"pmid": s.pmid.String()})
+	if err != nil {
+		return nil, err
+	}
+	return &service.Token{
+		AuthorizationHeader: "Bearer header." + base64.RawURLEncoding.EncodeToString(payload) + ".signature",
+		ValidUntil:          time.Now().Add(time.Hour),
 	}, nil
 }

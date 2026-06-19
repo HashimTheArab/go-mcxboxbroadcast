@@ -123,6 +123,8 @@ func IsFriendRestricted(err error) bool {
 // Friends returns a merged view of people following the authenticated account
 // and people the authenticated account follows.
 func (c FriendClient) Friends(ctx context.Context) ([]Person, error) {
+	// go-xsapi/social.Friends only returns accepted friends; sync needs both
+	// sides of the relationship so pending inbound followers can be accepted.
 	followers, err := c.peopleHubGroup(ctx, "followers")
 	if err != nil {
 		return nil, err

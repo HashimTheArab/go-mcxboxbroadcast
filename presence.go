@@ -3,17 +3,16 @@ package broadcaster
 import (
 	"context"
 	"errors"
-	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
+
+	"github.com/df-mc/go-xsapi/v2/presence"
+	"github.com/df-mc/go-xsapi/v2/xal/xsts"
 )
 
 const (
-	presenceStateActive      = `{"state":"active"}`
 	defaultPresenceHeartbeat = 300 * time.Second
 )
 
@@ -31,23 +30,12 @@ func (c PresenceClient) Update(ctx context.Context) (time.Duration, error) {
 	if c.XUID == "" {
 		return defaultPresenceHeartbeat, errors.New("xuid is empty")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, presenceURL(c.XUID), strings.NewReader(presenceStateActive))
-	if err != nil {
+	heartbeat := defaultPresenceHeartbeat
+	presenceClient := presence.New(c.clientWithHeartbeat(&heartbeat), xsts.UserInfo{XUID: c.XUID})
+	if err := presenceClient.Update(ctx, presence.TitleRequest{State: presence.StateActive}); err != nil {
 		return defaultPresenceHeartbeat, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Xbl-Contract-Version", "3")
-
-	resp, err := c.client().Do(req)
-	if err != nil {
-		return defaultPresenceHeartbeat, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		return defaultPresenceHeartbeat, fmt.Errorf("%s %s: %s", req.Method, req.URL, resp.Status)
-	}
-	return heartbeatAfter(resp.Header.Get("X-Heartbeat-After")), nil
+	return heartbeat, nil
 }
 
 func (c PresenceClient) Run(ctx context.Context, log *slog.Logger) {
@@ -83,8 +71,29 @@ func (c PresenceClient) client() *http.Client {
 	return http.DefaultClient
 }
 
-func presenceURL(xuid string) string {
-	return fmt.Sprintf("https://userpresence.xboxlive.com/users/xuid(%s)/devices/current/titles/current", xuid)
+func (c PresenceClient) clientWithHeartbeat(heartbeat *time.Duration) *http.Client {
+	base := c.client()
+	client := new(http.Client)
+	*client = *base
+	client.Transport = heartbeatTransport{base: base.Transport, heartbeat: heartbeat}
+	return client
+}
+
+type heartbeatTransport struct {
+	base      http.RoundTripper
+	heartbeat *time.Duration
+}
+
+func (t heartbeatTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	resp, err := base.RoundTrip(req)
+	if err == nil && resp != nil && t.heartbeat != nil {
+		*t.heartbeat = heartbeatAfter(resp.Header.Get("X-Heartbeat-After"))
+	}
+	return resp, err
 }
 
 func heartbeatAfter(header string) time.Duration {
