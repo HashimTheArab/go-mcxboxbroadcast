@@ -64,7 +64,7 @@ func NewXSAPIClient(ctx context.Context, src xsapi.TokenSource, client *http.Cli
 	if client != nil {
 		ctx = context.WithValue(ctx, oauth2.HTTPClient, client)
 	}
-	return xsapi.ClientConfig{HTTPClient: client, Logger: log}.New(ctx, src)
+	return xsapi.ClientConfig{HTTPClient: client, Logger: log, RTAMode: xsapi.RTALazy}.New(ctx, src)
 }
 
 func NewMinecraftTokenSource(ctx context.Context, xbl *xsapi.Client, client *http.Client) (service.TokenSource, error) {

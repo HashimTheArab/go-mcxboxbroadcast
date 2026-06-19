@@ -187,6 +187,21 @@ func TestNewXBLTokenSourceCachesDeviceAndXSTSTokens(t *testing.T) {
 	}
 }
 
+func TestNewXSAPIClientUsesLazyRTA(t *testing.T) {
+	client := &http.Client{Transport: tokenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		t.Fatalf("unexpected HTTP request during xsapi client construction: %s %s", req.Method, req.URL)
+		return nil, nil
+	})}
+
+	xbl, err := NewXSAPIClient(context.Background(), staticTokenSource{}, client, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if xbl.RTA() != nil {
+		t.Fatal("xsapi client opened RTA during construction")
+	}
+}
+
 type tokenRoundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f tokenRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
