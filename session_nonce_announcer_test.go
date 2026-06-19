@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/df-mc/go-xsapi/v2/mpsd"
@@ -164,6 +165,9 @@ func TestSessionNonceAnnouncerRepublishClearsNonceState(t *testing.T) {
 	announcer := newSessionNonceAnnouncer(&room.XBLAnnouncer{Session: session}, "100", nil)
 	announcer.Session = session
 	announcer.handledSession = session
+	announcer.custom = []byte("cached")
+	announcer.readRestriction = mpsd.SessionRestrictionFollowed
+	announcer.joinRestriction = mpsd.SessionRestrictionFollowed
 	announcer.nonces["200"] = "stale"
 
 	announcer.resetForRepublishLocked()
@@ -173,6 +177,9 @@ func TestSessionNonceAnnouncerRepublishClearsNonceState(t *testing.T) {
 	}
 	if announcer.handledSession != nil {
 		t.Fatal("handled session should be cleared before republish")
+	}
+	if announcer.custom != nil || announcer.readRestriction != "" || announcer.joinRestriction != "" {
+		t.Fatal("cached publish state should be cleared before republish")
 	}
 	custom, err := marshalStatusWithNonces(room.Status{WorldName: "World"}, announcer.nonces)
 	if err != nil {
@@ -186,5 +193,28 @@ func TestSessionNonceAnnouncerRepublishClearsNonceState(t *testing.T) {
 	}
 	if len(got.Nonces) != 0 {
 		t.Fatalf("stale nonce state survived republish reset: %#v", got.Nonces)
+	}
+}
+
+func TestSessionNonceAnnouncerDoesNotNoOpWithoutSession(t *testing.T) {
+	status := room.Status{
+		WorldName:        "World",
+		BroadcastSetting: room.BroadcastSettingFriendsOfFriends,
+	}
+	custom, err := marshalStatusWithNonces(status, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	announcer := newSessionNonceAnnouncer(&room.XBLAnnouncer{}, "100", nil)
+	announcer.custom = custom
+	announcer.readRestriction = mpsd.SessionRestrictionFollowed
+	announcer.joinRestriction = mpsd.SessionRestrictionFollowed
+
+	err = announcer.Announce(context.Background(), status)
+	if err == nil {
+		t.Fatal("Announce returned nil without an active session")
+	}
+	if !strings.Contains(err.Error(), "XBLAnnouncer.Client is nil") {
+		t.Fatalf("Announce error = %v, want missing client publish attempt", err)
 	}
 }

@@ -57,7 +57,7 @@ func (a *sessionNonceAnnouncer) Announce(ctx context.Context, status room.Status
 		return fmt.Errorf("encode: %w", err)
 	}
 	a.lastStatus = status
-	if bytes.Equal(custom, a.custom) && read == a.readRestriction && join == a.joinRestriction {
+	if a.Session != nil && bytes.Equal(custom, a.custom) && read == a.readRestriction && join == a.joinRestriction {
 		a.handleSessionLocked()
 		return nil
 	}
@@ -112,6 +112,9 @@ func (a *sessionNonceAnnouncer) Announce(ctx context.Context, status room.Status
 func (a *sessionNonceAnnouncer) resetForRepublishLocked() {
 	a.Session = nil
 	a.handledSession = nil
+	a.custom = nil
+	a.readRestriction = ""
+	a.joinRestriction = ""
 	a.nonces = make(map[string]string)
 }
 
