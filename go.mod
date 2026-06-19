@@ -5,7 +5,7 @@ go 1.26.2
 require (
 	github.com/df-mc/go-nethernet v1.0.15-0.20260617180759-48a921e29502
 	github.com/df-mc/go-playfab/v2 v2.0.2-0.20260618232935-6d86fc87875f
-	github.com/df-mc/go-xsapi/v2 v2.0.2-0.20260619224852-7d999b476370
+	github.com/df-mc/go-xsapi/v2 v2.0.2-0.20260619232631-6de88d6f84dd
 	github.com/go-gl/mathgl v1.2.0
 	github.com/google/uuid v1.6.0
 	github.com/pelletier/go-toml/v2 v2.2.4

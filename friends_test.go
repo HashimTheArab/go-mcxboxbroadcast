@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	xblsocial "github.com/df-mc/go-xsapi/v2/social"
 	"golang.org/x/oauth2"
 )
 
@@ -112,14 +113,12 @@ func TestFriendClientFollowReturnsRetryAfterError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected retry-after error")
 	}
-	var retry interface {
-		RetryDelay() time.Duration
+	var responseErr *xblsocial.ResponseError
+	if !errors.As(err, &responseErr) {
+		t.Fatalf("expected social response error, got %T: %v", err, err)
 	}
-	if !errors.As(err, &retry) {
-		t.Fatalf("expected retry-after error, got %T: %v", err, err)
-	}
-	if retry.RetryDelay() != 7*time.Second {
-		t.Fatalf("retry delay = %s, want 7s", retry.RetryDelay())
+	if responseErr.RetryAfter != 7*time.Second {
+		t.Fatalf("retry delay = %s, want 7s", responseErr.RetryAfter)
 	}
 }
 
@@ -141,41 +140,39 @@ func TestFriendClientUnfollowReturnsRetryAfterError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected retry-after error")
 	}
-	var retry interface {
-		RetryDelay() time.Duration
+	var responseErr *xblsocial.ResponseError
+	if !errors.As(err, &responseErr) {
+		t.Fatalf("expected social response error, got %T: %v", err, err)
 	}
-	if !errors.As(err, &retry) {
-		t.Fatalf("expected retry-after error, got %T: %v", err, err)
-	}
-	if retry.RetryDelay() != 3*time.Second {
-		t.Fatalf("retry delay = %s, want 3s", retry.RetryDelay())
+	if responseErr.RetryAfter != 3*time.Second {
+		t.Fatalf("retry delay = %s, want 3s", responseErr.RetryAfter)
 	}
 }
 
-func TestFriendClientFollowClassifiesSocialModifyErrors(t *testing.T) {
+func TestFriendClientFollowReturnsSocialResponseErrors(t *testing.T) {
 	tests := []struct {
 		name string
 		body string
 		code int
-		kind string
+		want error
 	}{
 		{
 			name: "friend list full",
 			body: `{"code":1028,"description":"The attempted People request was rejected because it would exceed the People list limit."}`,
 			code: 1028,
-			kind: "friend_list_full",
+			want: xblsocial.ErrFriendListFull,
 		},
 		{
 			name: "restricted account",
 			body: `{"code":1049,"description":"Target user privacy settings do not allow friend requests to be received."}`,
 			code: 1049,
-			kind: "restricted",
+			want: xblsocial.ErrFriendRestricted,
 		},
 		{
 			name: "blocked or forbidden",
 			body: `{"code":1011,"description":"The requested friend operation was forbidden."}`,
 			code: 1011,
-			kind: "restricted",
+			want: xblsocial.ErrFriendRestricted,
 		},
 	}
 	for _, tt := range tests {
@@ -189,18 +186,15 @@ func TestFriendClientFollowClassifiesSocialModifyErrors(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected social error")
 			}
-			var social interface {
-				XboxSocialCode() int
-				FriendErrorKind() string
+			var responseErr *xblsocial.ResponseError
+			if !errors.As(err, &responseErr) {
+				t.Fatalf("expected social response error, got %T: %v", err, err)
 			}
-			if !errors.As(err, &social) {
-				t.Fatalf("expected social error, got %T: %v", err, err)
+			if responseErr.Code != tt.code {
+				t.Fatalf("social code = %d, want %d", responseErr.Code, tt.code)
 			}
-			if social.XboxSocialCode() != tt.code {
-				t.Fatalf("social code = %d, want %d", social.XboxSocialCode(), tt.code)
-			}
-			if social.FriendErrorKind() != tt.kind {
-				t.Fatalf("kind = %q, want %q", social.FriendErrorKind(), tt.kind)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("errors.Is(%v) = false for %T: %v", tt.want, err, err)
 			}
 		})
 	}
@@ -303,14 +297,12 @@ func TestFriendClientAcceptPendingFriendRequestsReturnsRetryAfterError(t *testin
 	if err == nil {
 		t.Fatal("expected retry-after error")
 	}
-	var retry interface {
-		RetryDelay() time.Duration
+	var responseErr *xblsocial.ResponseError
+	if !errors.As(err, &responseErr) {
+		t.Fatalf("expected social response error, got %T: %v", err, err)
 	}
-	if !errors.As(err, &retry) {
-		t.Fatalf("expected retry-after error, got %T: %v", err, err)
-	}
-	if retry.RetryDelay() != 11*time.Second {
-		t.Fatalf("retry delay = %s, want 11s", retry.RetryDelay())
+	if responseErr.RetryAfter != 11*time.Second {
+		t.Fatalf("retry delay = %s, want 11s", responseErr.RetryAfter)
 	}
 }
 

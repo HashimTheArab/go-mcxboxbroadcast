@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/df-mc/go-xsapi/v2/mpsd"
+	xblsocial "github.com/df-mc/go-xsapi/v2/social"
 )
 
 type FriendAPI interface {
@@ -271,21 +272,20 @@ func shouldStopPendingFriendAccept(err error) bool {
 }
 
 func friendErrorKind(err error) string {
-	var classified interface {
-		FriendErrorKind() string
+	switch {
+	case IsFriendListFull(err):
+		return FriendErrorKindFullList
+	case IsFriendRestricted(err):
+		return FriendErrorKindRestricted
+	default:
+		return ""
 	}
-	if errors.As(err, &classified) {
-		return classified.FriendErrorKind()
-	}
-	return ""
 }
 
 func retryDelay(err error) time.Duration {
-	var retry interface {
-		RetryDelay() time.Duration
-	}
-	if errors.As(err, &retry) {
-		return retry.RetryDelay()
+	var responseErr *xblsocial.ResponseError
+	if errors.As(err, &responseErr) {
+		return responseErr.RetryAfter
 	}
 	return 0
 }

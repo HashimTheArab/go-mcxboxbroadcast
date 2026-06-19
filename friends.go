@@ -2,20 +2,15 @@ package broadcaster
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"strconv"
-	"time"
 
 	xblsocial "github.com/df-mc/go-xsapi/v2/social"
 	"github.com/df-mc/go-xsapi/v2/xal/xsts"
 )
 
 const (
-	FriendErrorKindUnknown    = "unknown"
 	FriendErrorKindFullList   = "friend_list_full"
 	FriendErrorKindRestricted = "restricted"
 )
@@ -50,68 +45,12 @@ func (e *AcceptFriendRequestsError) FailedXUIDs() []string {
 	return append([]string(nil), e.Failed...)
 }
 
-// RetryAfterError reports an Xbox social rate limit and the server requested
-// delay before retrying.
-type RetryAfterError struct {
-	Method     string
-	URL        string
-	StatusCode int
-	Delay      time.Duration
-}
-
-func (e *RetryAfterError) Error() string {
-	if e.Delay <= 0 {
-		return fmt.Sprintf("%s %s: rate limited", e.Method, e.URL)
-	}
-	return fmt.Sprintf("%s %s: rate limited, retry after %s", e.Method, e.URL, e.Delay)
-}
-
-func (e *RetryAfterError) RetryDelay() time.Duration {
-	return e.Delay
-}
-
-// FriendSocialError carries Xbox social modify error details, including known
-// friend-list hard-cap and restricted/privacy classifications.
-type FriendSocialError struct {
-	Method      string
-	URL         string
-	StatusCode  int
-	Code        int
-	Description string
-	Source      string
-	Kind        string
-}
-
-func (e *FriendSocialError) Error() string {
-	if e.Code == 0 {
-		return fmt.Sprintf("%s %s: %d", e.Method, e.URL, e.StatusCode)
-	}
-	if e.Description == "" {
-		return fmt.Sprintf("%s %s: xbox social code %d", e.Method, e.URL, e.Code)
-	}
-	return fmt.Sprintf("%s %s: xbox social code %d: %s", e.Method, e.URL, e.Code, e.Description)
-}
-
-func (e *FriendSocialError) XboxSocialCode() int {
-	return e.Code
-}
-
-func (e *FriendSocialError) FriendErrorKind() string {
-	return e.Kind
-}
-
 func IsFriendListFull(err error) bool {
-	var social interface {
-		FriendErrorKind() string
-	}
-	return errors.As(err, &social) && social.FriendErrorKind() == FriendErrorKindFullList
+	return errors.Is(err, xblsocial.ErrFriendListFull)
 }
 
 func IsFriendRestricted(err error) bool {
-	var social interface {
-		FriendErrorKind() string
-	}
-	return errors.As(err, &social) && social.FriendErrorKind() == FriendErrorKindRestricted
+	return errors.Is(err, xblsocial.ErrFriendRestricted)
 }
 
 // Friends returns a merged view of people following the authenticated account
@@ -168,7 +107,7 @@ func (c FriendClient) social() *xblsocial.Client {
 	if c.Social != nil {
 		return c.Social
 	}
-	return xblsocial.New(classifyingFriendHTTPClient(c.client()), nil, xsts.UserInfo{}, nil)
+	return xblsocial.New(c.client(), nil, xsts.UserInfo{}, nil)
 }
 
 // Follow follows the XUID, which makes the user a friend when they also follow
@@ -241,110 +180,6 @@ func personFromSocialUser(user xblsocial.User) Person {
 		IsFollowingCaller:    user.Followed,
 		IsFollowedByCaller:   user.Following,
 		UniqueModernGamertag: user.UniqueModernGamerTag,
-	}
-}
-
-func classifyingFriendHTTPClient(client *http.Client) *http.Client {
-	if client == nil {
-		client = http.DefaultClient
-	}
-	clone := *client
-	base := clone.Transport
-	if base == nil {
-		base = http.DefaultTransport
-	}
-	clone.Transport = friendErrorTransport{base: base}
-	return &clone
-}
-
-type friendErrorTransport struct {
-	base http.RoundTripper
-}
-
-func (t friendErrorTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	base := t.base
-	if base == nil {
-		base = http.DefaultTransport
-	}
-	resp, err := base.RoundTrip(req)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return resp, nil
-	}
-	err = friendResponseError(req, resp)
-	_ = resp.Body.Close()
-	return nil, err
-}
-
-func friendResponseError(req *http.Request, resp *http.Response) error {
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return &RetryAfterError{
-			Method:     req.Method,
-			URL:        req.URL.String(),
-			StatusCode: resp.StatusCode,
-			Delay:      parseRetryAfter(resp.Header.Get("Retry-After")),
-		}
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("%s %s: %s: read error body: %w", req.Method, req.URL, resp.Status, err)
-	}
-	social := decodeFriendSocialError(body)
-	social.Method = req.Method
-	social.URL = req.URL.String()
-	social.StatusCode = resp.StatusCode
-	if social.Kind == "" {
-		social.Kind = FriendErrorKindUnknown
-	}
-	return social
-}
-
-func parseRetryAfter(value string) time.Duration {
-	if value == "" {
-		return 0
-	}
-	if seconds, err := strconv.Atoi(value); err == nil {
-		if seconds <= 0 {
-			return 0
-		}
-		return time.Duration(seconds) * time.Second
-	}
-	when, err := http.ParseTime(value)
-	if err != nil {
-		return 0
-	}
-	delay := time.Until(when)
-	if delay < 0 {
-		return 0
-	}
-	return delay
-}
-
-func decodeFriendSocialError(body []byte) *FriendSocialError {
-	var data struct {
-		Code        int    `json:"code"`
-		Description string `json:"description"`
-		Source      string `json:"source"`
-	}
-	_ = json.Unmarshal(body, &data)
-	return &FriendSocialError{
-		Code:        data.Code,
-		Description: data.Description,
-		Source:      data.Source,
-		Kind:        classifyFriendSocialCode(data.Code),
-	}
-}
-
-func classifyFriendSocialCode(code int) string {
-	switch code {
-	case 1028:
-		return FriendErrorKindFullList
-	case 1011, 1049:
-		return FriendErrorKindRestricted
-	default:
-		return FriendErrorKindUnknown
 	}
 }
 

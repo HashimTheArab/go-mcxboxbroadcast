@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	xblsocial "github.com/df-mc/go-xsapi/v2/social"
 )
 
 func TestFriendSyncerAcceptsPendingIncomingRequests(t *testing.T) {
@@ -161,7 +163,7 @@ func TestFriendSyncerLogsInitialInviteFailure(t *testing.T) {
 
 func TestFriendSyncerStopsAutoFollowPassWhenFriendListIsFull(t *testing.T) {
 	var log bytes.Buffer
-	fullErr := classifiedSyncErr{kind: "friend_list_full"}
+	fullErr := &xblsocial.ResponseError{Code: 1028}
 	client := &syncFriendClient{
 		people: []Person{
 			{XUID: "1", IsFollowingCaller: true},
@@ -193,7 +195,7 @@ func TestFriendSyncerStopsAutoFollowPassWhenFriendListIsFull(t *testing.T) {
 func TestFriendSyncRunStateSuppressesMutationsDuringRetryAfter(t *testing.T) {
 	now := time.Unix(100, 0)
 	state := friendSyncRunState{}
-	state.recordError(now, &RetryAfterError{Delay: 2 * time.Minute})
+	state.recordError(now, &xblsocial.ResponseError{StatusCode: 429, RetryAfter: 2 * time.Minute})
 
 	blocked := state.options(now.Add(time.Minute), true)
 	if blocked.autoFollow || blocked.autoUnfollow {
@@ -209,7 +211,7 @@ func TestFriendSyncRunStateSuppressesMutationsDuringRetryAfter(t *testing.T) {
 func TestFriendSyncRunStateSkipsReadsDuringRetryAfter(t *testing.T) {
 	now := time.Unix(100, 0)
 	state := friendSyncRunState{}
-	state.recordError(now, &RetryAfterError{Delay: 2 * time.Minute})
+	state.recordError(now, &xblsocial.ResponseError{StatusCode: 429, RetryAfter: 2 * time.Minute})
 
 	if !state.backingOff(now.Add(time.Minute)) {
 		t.Fatal("expected sync skipped during retry-after")
@@ -223,7 +225,7 @@ func TestFriendSyncRunStateSkipsReadsDuringRetryAfter(t *testing.T) {
 func TestFriendSyncRunStateSuppressesAutoFollowWhenFriendListIsFull(t *testing.T) {
 	now := time.Unix(100, 0)
 	state := friendSyncRunState{}
-	state.recordError(now, classifiedSyncErr{kind: FriendErrorKindFullList})
+	state.recordError(now, &xblsocial.ResponseError{Code: 1028})
 
 	opts := state.options(now.Add(time.Minute), true)
 	if opts.autoFollow {
@@ -280,16 +282,4 @@ func (f fakeSyncInviter) Invite(_ context.Context, xuid, _ string) error {
 		f.invite(xuid)
 	}
 	return f.err
-}
-
-type classifiedSyncErr struct {
-	kind string
-}
-
-func (e classifiedSyncErr) Error() string {
-	return e.kind
-}
-
-func (e classifiedSyncErr) FriendErrorKind() string {
-	return e.kind
 }
