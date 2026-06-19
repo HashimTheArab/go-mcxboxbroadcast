@@ -4,7 +4,7 @@ go 1.26.2
 
 require (
 	github.com/df-mc/go-nethernet v1.0.15-0.20260617180759-48a921e29502
-	github.com/df-mc/go-playfab/v2 v2.0.1
+	github.com/df-mc/go-playfab/v2 v2.0.2-0.20260618232935-6d86fc87875f
 	github.com/df-mc/go-xsapi/v2 v2.0.2-0.20260618232321-7db98a0b7856
 	github.com/go-gl/mathgl v1.2.0
 	github.com/google/uuid v1.6.0
@@ -48,4 +48,4 @@ require (
 	golang.org/x/time v0.10.0 // indirect
 )
 
-replace github.com/sandertv/gophertunnel => github.com/hashimthearab/gophertunnel v1.25.3-0.20260617203815-2d95f21b73ec
+replace github.com/sandertv/gophertunnel => github.com/hashimthearab/gophertunnel v1.25.3-0.20260619021431-5ef101cfa26f

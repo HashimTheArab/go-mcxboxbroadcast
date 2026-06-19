@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/df-mc/go-nethernet"
@@ -56,8 +55,8 @@ func (b *Broadcaster) signalingConnection(ctx context.Context, sig nethernet.Sig
 		return nil, errors.New("jsonrpc signaling connection: signaling is nil")
 	}
 	networkID := sig.NetworkID()
-	if _, err := strconv.ParseUint(networkID, 10, 64); err != nil {
-		return nil, fmt.Errorf("jsonrpc signaling connection: invalid nethernet id %q: %w", networkID, err)
+	if strings.TrimSpace(networkID) == "" {
+		return nil, errors.New("jsonrpc signaling connection: nethernet id is empty")
 	}
 	pmsgID, err := b.playerMessagingID(ctx)
 	if err != nil {
