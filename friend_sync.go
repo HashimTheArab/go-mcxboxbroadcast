@@ -72,7 +72,7 @@ func (s *friendSyncRunState) recordError(now time.Time, err error) {
 	if delay := retryDelay(err); delay > 0 {
 		s.retryUntil = now.Add(delay)
 	}
-	if IsFriendListFull(err) {
+	if errors.Is(err, xblsocial.ErrFriendListFull) {
 		s.autoFollowUntil = now.Add(friendListFullBackoff)
 	}
 }
@@ -247,10 +247,10 @@ func (s FriendSyncer) logFriendSyncError(op string, p Person, err error) {
 	if s.Log == nil {
 		return
 	}
-	switch friendErrorKind(err) {
-	case FriendErrorKindFullList:
+	switch {
+	case errors.Is(err, xblsocial.ErrFriendListFull):
 		s.Log.Warn("friend list full while syncing friends", "op", op, "xuid", p.XUID, "gamertag", p.Gamertag, "err", err)
-	case FriendErrorKindRestricted:
+	case errors.Is(err, xblsocial.ErrFriendRestricted):
 		s.Log.Warn("friend restricted while syncing friends", "op", op, "xuid", p.XUID, "gamertag", p.Gamertag, "err", err)
 	}
 }
@@ -269,17 +269,6 @@ func (s FriendSyncer) debug(ctx context.Context, msg string, args ...any) {
 
 func shouldStopPendingFriendAccept(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || retryDelay(err) > 0
-}
-
-func friendErrorKind(err error) string {
-	switch {
-	case IsFriendListFull(err):
-		return FriendErrorKindFullList
-	case IsFriendRestricted(err):
-		return FriendErrorKindRestricted
-	default:
-		return ""
-	}
 }
 
 func retryDelay(err error) time.Duration {

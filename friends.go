@@ -10,11 +10,6 @@ import (
 	"github.com/df-mc/go-xsapi/v2/xal/xsts"
 )
 
-const (
-	FriendErrorKindFullList   = "friend_list_full"
-	FriendErrorKindRestricted = "restricted"
-)
-
 // FriendClient adapts go-xsapi/v2's Xbox social client to the FriendSyncer API.
 type FriendClient struct {
 	Client *http.Client
@@ -43,14 +38,6 @@ func (e *AcceptFriendRequestsError) Error() string {
 
 func (e *AcceptFriendRequestsError) FailedXUIDs() []string {
 	return append([]string(nil), e.Failed...)
-}
-
-func IsFriendListFull(err error) bool {
-	return errors.Is(err, xblsocial.ErrFriendListFull)
-}
-
-func IsFriendRestricted(err error) bool {
-	return errors.Is(err, xblsocial.ErrFriendRestricted)
 }
 
 // Friends returns a merged view of people following the authenticated account
