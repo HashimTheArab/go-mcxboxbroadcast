@@ -16,6 +16,7 @@ import (
 	"github.com/df-mc/go-nethernet"
 	"github.com/df-mc/go-xsapi/v2"
 	"github.com/df-mc/go-xsapi/v2/mpsd"
+	"github.com/google/uuid"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/login"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
 	"github.com/sandertv/gophertunnel/minecraft/room"
@@ -187,6 +188,83 @@ func TestBroadcasterWarnsForWebSocketSignaling(t *testing.T) {
 	b.warnWebSocketSignalingMode(SignalingModeJSONRPC)
 	if log.Len() != 0 {
 		t.Fatalf("unexpected warning for jsonrpc mode: %q", log.String())
+	}
+}
+
+func TestBroadcasterUpdateLogsUpdatedSession(t *testing.T) {
+	var log bytes.Buffer
+	b := &Broadcaster{
+		log:       slog.New(slog.NewTextHandler(&log, nil)),
+		announcer: &fakeAnnouncer{},
+		started:   true,
+		conf: Config{
+			Server: ServerInfo{Host: "play.example.net", Port: 19132},
+			XUID:   "123",
+			Status: Status{HostName: "Host", WorldName: "World"},
+		},
+	}
+
+	if err := b.Update(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := log.String(); !strings.Contains(got, "updated session") {
+		t.Fatalf("updated session log missing: %q", got)
+	}
+}
+
+func TestBroadcasterTransferLogsBedrockClientAndTarget(t *testing.T) {
+	var log bytes.Buffer
+	conn := &recordingTransferConn{}
+	b := &Broadcaster{
+		log: slog.New(slog.NewTextHandler(&log, nil)),
+		conf: Config{
+			Server: ServerInfo{Host: "play.example.net", Port: 19133},
+		},
+		transferCloseTimeout: -1,
+	}
+
+	b.transfer(conn)
+
+	got := log.String()
+	if !strings.Contains(got, "transferred bedrock client") {
+		t.Fatalf("transfer log missing: %q", got)
+	}
+	if !strings.Contains(got, "xuid=visitor") || !strings.Contains(got, "name=Visitor") || !strings.Contains(got, "target=play.example.net:19133") {
+		t.Fatalf("transfer log missing client or target fields: %q", got)
+	}
+}
+
+func TestBroadcasterSignalingFactoryIsUsedOnceForSharedSignaling(t *testing.T) {
+	var calls int
+	sig := &fakeSignaling{networkID: "123456789"}
+	b := &Broadcaster{
+		conf: Config{
+			Server:               ServerInfo{Host: "127.0.0.1", Port: 19132},
+			XUID:                 "123",
+			SignalingMode:        SignalingModeJSONRPC,
+			MinecraftTokenSource: minecraftTokenSourceWithPMID{pmid: uuid.New()},
+			Status:               Status{HostName: "Host", WorldName: "World"},
+			UpdateInterval:       30 * time.Second,
+			SignalingFactory: func(context.Context, Config) (nethernet.Signaling, error) {
+				calls++
+				return sig, nil
+			},
+		},
+		announcerFactory: func(*Broadcaster) room.Announcer {
+			return &fakeAnnouncer{}
+		},
+	}
+
+	if err := b.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+
+	if calls != 1 {
+		t.Fatalf("signaling factory calls = %d, want 1", calls)
+	}
+	if b.signaling != sig {
+		t.Fatal("broadcaster did not keep the shared signaling instance")
 	}
 }
 

@@ -47,23 +47,34 @@ type galleryUploadResponse struct {
 	Result GalleryImage `json:"result"`
 }
 
+type SetShowcaseResult struct {
+	ImageID    string
+	Uploaded   bool
+	AlreadySet bool
+}
+
 func (g GalleryClient) SetShowcase(ctx context.Context, xuid, imagePath string, deleteOther bool) error {
+	_, err := g.SetShowcaseResult(ctx, xuid, imagePath, deleteOther)
+	return err
+}
+
+func (g GalleryClient) SetShowcaseResult(ctx context.Context, xuid, imagePath string, deleteOther bool) (SetShowcaseResult, error) {
 	if imagePath == "" {
-		return errors.New("image path is empty")
+		return SetShowcaseResult{}, errors.New("image path is empty")
 	}
 	if _, err := os.Stat(imagePath); err != nil {
-		return err
+		return SetShowcaseResult{}, err
 	}
 	images, err := g.Images(ctx, xuid)
 	if err != nil {
-		return err
+		return SetShowcaseResult{}, err
 	}
 	g.debug(ctx, "loaded gallery showcase images", "xuid", xuid, "count", len(images))
 	newHash, err := fileHash(imagePath)
 	if err != nil {
-		return err
+		return SetShowcaseResult{}, err
 	}
-	var imageID string
+	var result SetShowcaseResult
 	for _, img := range images {
 		if img.URL == "" {
 			continue
@@ -74,36 +85,38 @@ func (g GalleryClient) SetShowcase(ctx context.Context, xuid, imagePath string, 
 			continue
 		}
 		if hash == newHash {
-			imageID = img.ID
-			g.debug(ctx, "gallery showcase image already set", "image_id", imageID)
+			result.ImageID = img.ID
+			result.AlreadySet = true
+			g.debug(ctx, "gallery showcase image already set", "image_id", result.ImageID)
 			break
 		}
 	}
-	if imageID == "" {
+	if result.ImageID == "" {
 		g.debug(ctx, "uploading gallery showcase image", "path", imagePath)
 		img, err := g.Upload(ctx, imagePath, true)
 		if err != nil {
-			return err
+			return SetShowcaseResult{}, err
 		}
-		imageID = img.ID
-		g.debug(ctx, "uploaded gallery showcase image", "image_id", imageID)
+		result.ImageID = img.ID
+		result.Uploaded = true
+		g.debug(ctx, "uploaded gallery showcase image", "image_id", result.ImageID)
 	}
 	if deleteOther {
 		var deleteErr error
 		deleted := 0
 		for _, img := range images {
-			if img.ID != "" && img.ID != imageID {
+			if img.ID != "" && img.ID != result.ImageID {
 				g.debug(ctx, "deleting old gallery image", "image_id", img.ID)
 				deleteErr = errors.Join(deleteErr, g.Delete(ctx, img.ID))
 				deleted++
 			}
 		}
 		if deleteErr != nil {
-			return fmt.Errorf("delete old gallery images: %w", deleteErr)
+			return SetShowcaseResult{}, fmt.Errorf("delete old gallery images: %w", deleteErr)
 		}
 		g.debug(ctx, "deleted old gallery images", "count", deleted)
 	}
-	return nil
+	return result, nil
 }
 
 func (g GalleryClient) Images(ctx context.Context, xuid string) ([]GalleryImage, error) {

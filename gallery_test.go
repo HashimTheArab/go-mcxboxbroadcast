@@ -55,6 +55,46 @@ func TestGalleryClientReusesReencodedEquivalentImage(t *testing.T) {
 	}
 }
 
+func TestGalleryClientSetShowcaseResultReportsExistingImage(t *testing.T) {
+	localImage := testPNG(t, png.BestCompression)
+	remoteImage := testPNG(t, png.NoCompression)
+	imagePath := filepath.Join(t.TempDir(), "image.png")
+	if err := os.WriteFile(imagePath, localImage, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	g := GalleryClient{
+		TokenSource: galleryMinecraftTokenSource{},
+		Client: &http.Client{Transport: galleryRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch {
+			case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/xuid/1"):
+				return galleryHTTPResponse(http.StatusOK, `{"result":{"showcasedImages":[{"id":"img","url":"https://cdn.example.test/image.png"}]}}`), nil
+			case req.Method == http.MethodGet && req.URL.Host == "cdn.example.test":
+				return responseBytes(http.StatusOK, remoteImage), nil
+			case req.Method == http.MethodPost && req.URL.Path == "/api/v1.0/gallery":
+				t.Fatal("image should have been reused instead of uploaded")
+			default:
+				t.Fatalf("unexpected request %s %s", req.Method, req.URL)
+			}
+			return nil, nil
+		})},
+	}
+
+	result, err := g.SetShowcaseResult(context.Background(), "1", imagePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ImageID != "img" {
+		t.Fatalf("image id = %q, want img", result.ImageID)
+	}
+	if !result.AlreadySet {
+		t.Fatal("expected existing showcase image to be reported")
+	}
+	if result.Uploaded {
+		t.Fatal("existing showcase image should not be reported as uploaded")
+	}
+}
+
 func TestGalleryClientReportsInvalidLocalImage(t *testing.T) {
 	imagePath := filepath.Join(t.TempDir(), "image.txt")
 	if err := os.WriteFile(imagePath, []byte("not an image"), 0o600); err != nil {

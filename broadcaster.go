@@ -213,6 +213,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	}
 	b.listener = l
 	b.started = true
+	b.info("nethernet broadcaster started", "network_id", signalingNetworkID(sig), "signaling_mode", mode)
 	b.debug("started nethernet listener")
 
 	go b.accept()
@@ -755,13 +756,17 @@ func (b *Broadcaster) uploadGallery(ctx context.Context) {
 	if client.Client == nil {
 		client.Client = b.conf.HTTPClient
 	}
-	b.debug("setting showcase image", "path", cfg.ImagePath, "delete_other", cfg.DeleteOtherImages)
-	if err := client.SetShowcase(ctx, xuid, cfg.ImagePath, cfg.DeleteOtherImages); err != nil {
+	b.info("setting showcase image", "path", cfg.ImagePath, "delete_other", cfg.DeleteOtherImages)
+	result, err := client.SetShowcaseResult(ctx, xuid, cfg.ImagePath, cfg.DeleteOtherImages)
+	if err != nil {
 		b.log.Error("set showcase image", "err", err)
 		b.notify(ctx, "Showcase image upload failed: "+err.Error())
 		return
 	}
-	b.debug("set showcase image", "path", cfg.ImagePath)
+	if result.AlreadySet {
+		b.info("showcase image is already set, skipping upload", "image_id", result.ImageID)
+	}
+	b.info("successfully set showcase image", "path", cfg.ImagePath, "image_id", result.ImageID, "uploaded", result.Uploaded)
 }
 
 func (b *Broadcaster) sharedTokenSourceContext(fallback context.Context) context.Context {
@@ -781,6 +786,12 @@ func (b *Broadcaster) debug(msg string, args ...any) {
 func debugLog(log *slog.Logger, msg string, args ...any) {
 	if log != nil {
 		log.Debug(msg, args...)
+	}
+}
+
+func (b *Broadcaster) info(msg string, args ...any) {
+	if b.log != nil {
+		b.log.Info(msg, args...)
 	}
 }
 
@@ -955,7 +966,7 @@ func (b *Broadcaster) transfer(conn transferConn) {
 			b.log.Error("record player history", "xuid", id.XUID, "err", err)
 		}
 	}
-	b.log.Info("transferred client", "xuid", id.XUID, "name", id.DisplayName, "target", b.conf.Server.Address())
+	b.info("transferred bedrock client", "xuid", id.XUID, "name", id.DisplayName, "target", b.conf.Server.Address())
 	b.waitForTransferredClientDisconnect(conn, id)
 }
 
@@ -1099,7 +1110,11 @@ func (b *Broadcaster) Update(ctx context.Context) error {
 		return err
 	}
 	b.debugRoomStatus("resolved room status update", status)
-	return b.announcer.Announce(ctx, status)
+	if err := b.announcer.Announce(ctx, status); err != nil {
+		return err
+	}
+	b.info("updated session")
+	return nil
 }
 
 func (b *Broadcaster) cleanupPublishedSessions(closeAnnouncer bool) error {
