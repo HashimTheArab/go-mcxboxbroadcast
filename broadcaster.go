@@ -1154,6 +1154,10 @@ func (b *Broadcaster) recreateSession() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	if b.ctx.Err() != nil || !b.started {
+		return errors.New("broadcaster is shut down")
+	}
+
 	if b.listener != nil {
 		_ = b.listener.Close()
 	}
