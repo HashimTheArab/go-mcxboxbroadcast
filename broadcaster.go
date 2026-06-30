@@ -217,6 +217,10 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	b.debug("started nethernet listener")
 
 	go b.accept()
+	go func() {
+		<-b.ctx.Done()
+		close(b.done)
+	}()
 	go b.updateLoop()
 	go b.watchSignaling()
 	presenceClients := b.presenceClients()
@@ -925,9 +929,12 @@ func (b *Broadcaster) notifySessionUpdateFailure(ctx context.Context, err error)
 }
 
 func (b *Broadcaster) accept() {
-	defer close(b.done)
+	b.acceptListener(b.listener)
+}
+
+func (b *Broadcaster) acceptListener(l *minecraft.Listener) {
 	for {
-		conn, err := b.listener.Accept()
+		conn, err := l.Accept()
 		if err != nil {
 			if !errors.Is(err, net.ErrClosed) && b.ctx.Err() == nil {
 				b.log.Error("accept client", "err", err)
@@ -1099,9 +1106,17 @@ func (b *Broadcaster) updateLoop() {
 	}
 }
 
+func (b *Broadcaster) canRecreateSignaling() bool {
+	return b.conf.Signaling == nil
+}
+
 func (b *Broadcaster) watchSignaling() {
 	sig := b.signaling
 	if sig == nil {
+		return
+	}
+	if !b.canRecreateSignaling() {
+		b.debug("signaling reconnection disabled for static signaling")
 		return
 	}
 	select {
@@ -1112,7 +1127,8 @@ func (b *Broadcaster) watchSignaling() {
 		b.warn("connection to signaling lost, re-creating session...",
 			"cause", context.Cause(sig.Context()))
 		if err := b.recreateSession(); err != nil {
-			b.log.Error("session is dead and hit exception trying to re-create it", "err", err)
+			b.log.Error("re-create session failed", "err", err)
+			b.notify(b.ctx, "Signaling reconnection failed: "+err.Error())
 			return
 		}
 		b.info("signaling session reconnected")
@@ -1134,6 +1150,7 @@ func (b *Broadcaster) recreateSession() error {
 			_ = c.Close()
 		}
 	}
+	b.signaling = nil
 
 	mode, err := b.signalingMode()
 	if err != nil {
@@ -1166,6 +1183,7 @@ func (b *Broadcaster) recreateSession() error {
 		return fmt.Errorf("re-announce session: %w", err)
 	}
 	if err := b.startSubAccounts(b.ctx); err != nil {
+		_ = b.cleanupPublishedSessions(true)
 		return fmt.Errorf("re-create sub-accounts: %w", err)
 	}
 
@@ -1193,12 +1211,13 @@ func (b *Broadcaster) recreateSession() error {
 	listenConf.AuthenticationDisabled = true
 	l, err := listenConf.Listen("nethernet", "")
 	if err != nil {
+		_ = b.cleanupPublishedSessions(true)
 		return fmt.Errorf("re-listen nethernet: %w", err)
 	}
 	b.listener = l
 	b.info("nethernet broadcaster started", "network_id", signalingNetworkID(sig), "signaling_mode", mode)
 
-	go b.accept()
+	go b.acceptListener(l)
 	go b.uploadGalleryWithTimeout()
 	return nil
 }

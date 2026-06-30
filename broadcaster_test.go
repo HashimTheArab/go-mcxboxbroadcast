@@ -3,6 +3,7 @@ package broadcaster
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -276,6 +277,14 @@ func TestBroadcasterWatchSignalingDetectsDeadSignaling(t *testing.T) {
 		log:       slog.New(slog.NewTextHandler(&log, nil)),
 		signaling: &cancelableSignaling{ctx: sigCtx, networkID: "12345"},
 		started:   true,
+		conf: Config{
+			Server: ServerInfo{Host: "127.0.0.1", Port: 19132},
+			XUID:   "123",
+			Status: Status{HostName: "Host", WorldName: "World"},
+			SignalingFactory: func(context.Context, Config) (nethernet.Signaling, error) {
+				return nil, errors.New("test: signaling factory error")
+			},
+		},
 	}
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	defer b.cancel()
@@ -295,6 +304,38 @@ func TestBroadcasterWatchSignalingDetectsDeadSignaling(t *testing.T) {
 	got := log.String()
 	if !strings.Contains(got, "connection to signaling lost") {
 		t.Fatalf("expected signaling lost warning, got: %q", got)
+	}
+	if !strings.Contains(got, "re-create session failed") {
+		t.Fatalf("expected re-create error log, got: %q", got)
+	}
+}
+
+func TestBroadcasterWatchSignalingSkipsStaticSignaling(t *testing.T) {
+	sigCtx, sigCancel := context.WithCancel(context.Background())
+	defer sigCancel()
+	var log bytes.Buffer
+	staticSig := &cancelableSignaling{ctx: sigCtx, networkID: "12345"}
+	b := &Broadcaster{
+		log:       slog.New(slog.NewTextHandler(&log, nil)),
+		signaling: staticSig,
+		started:   true,
+		conf: Config{
+			Signaling: staticSig,
+		},
+	}
+	b.ctx, b.cancel = context.WithCancel(context.Background())
+	defer b.cancel()
+
+	done := make(chan struct{})
+	go func() {
+		b.watchSignaling()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("watchSignaling should have returned immediately for static signaling")
 	}
 }
 
