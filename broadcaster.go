@@ -1158,6 +1158,14 @@ func (b *Broadcaster) recreateSession() error {
 		return errors.New("broadcaster is shut down")
 	}
 
+	b.acceptWg.Add(1)
+	reconnectDone := false
+	defer func() {
+		if !reconnectDone {
+			b.acceptWg.Done()
+		}
+	}()
+
 	if b.listener != nil {
 		_ = b.listener.Close()
 	}
@@ -1237,7 +1245,7 @@ func (b *Broadcaster) recreateSession() error {
 	b.listener = l
 	b.info("nethernet broadcaster started", "network_id", signalingNetworkID(sig), "signaling_mode", mode)
 
-	b.acceptWg.Add(1)
+	reconnectDone = true
 	go func() {
 		defer b.acceptWg.Done()
 		b.acceptListener(l)
