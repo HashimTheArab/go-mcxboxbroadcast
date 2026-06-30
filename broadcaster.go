@@ -209,6 +209,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	}()
 	go func() {
 		<-b.ctx.Done()
+		_ = b.listener.Close()
 		b.acceptWg.Wait()
 		close(b.done)
 	}()
@@ -427,8 +428,8 @@ type broadcasterInviter struct {
 
 func (i *broadcasterInviter) Invite(ctx context.Context, xuid, titleID string) error {
 	i.b.mu.Lock()
+	defer i.b.mu.Unlock()
 	announcer, ok := xblAnnouncer(i.b.announcer)
-	i.b.mu.Unlock()
 	if !ok || announcer.Session == nil {
 		return errors.New("invite: no active MPSD session")
 	}
@@ -1169,6 +1170,12 @@ func (b *Broadcaster) recreateSession() error {
 	sig, err := b.signalingFor(b.ctx)
 	if err != nil {
 		return fmt.Errorf("re-create signaling: %w", err)
+	}
+	if sig.Context().Err() != nil {
+		if c, ok := sig.(interface{ Close() error }); ok {
+			_ = c.Close()
+		}
+		return errors.New("re-create signaling: factory returned signaling with dead context")
 	}
 	b.signaling = sig
 	b.debug("nethernet signaling re-created", "signaling_mode", mode, "network_id", signalingNetworkID(sig))
