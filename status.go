@@ -13,6 +13,7 @@ import (
 
 	"github.com/sandertv/go-raknet"
 	"github.com/sandertv/gophertunnel/minecraft"
+	"github.com/sandertv/gophertunnel/minecraft/p2p"
 	"github.com/sandertv/gophertunnel/minecraft/protocol"
 	"github.com/sandertv/gophertunnel/minecraft/room"
 )
@@ -60,11 +61,11 @@ func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 		WorldType:               defaultString(st.WorldType, room.WorldTypeCreative),
 		MemberCount:             max(st.Players, 1),
 		MaxMemberCount:          max(st.MaxPlayers, max(st.Players, 1)+1),
-		BroadcastSetting:        defaultInt32(st.Broadcast, room.BroadcastSettingFriendsOfFriends),
-		Joinability:             defaultString(st.Joinability, room.JoinabilityJoinableByFriends),
+		BroadcastSetting:        defaultBroadcastSetting(p2p.BroadcastSetting(st.Broadcast), p2p.BroadcastSettingFriendsOfFriends),
+		Joinability:             defaultString(st.Joinability, p2p.JoinabilityFriends),
 		Protocol:                protocol.CurrentProtocol,
 		Version:                 protocol.CurrentVersion,
-		TransportLayer:          room.TransportLayerNetherNet,
+		TransportLayer:          p2p.TransportLayerNetherNet,
 		LanGame:                 false,
 		OnlineCrossPlatformGame: true,
 		CrossPlayDisabled:       false,
@@ -122,10 +123,10 @@ func normalizeStatus(status room.Status) room.Status {
 		status.MaxMemberCount = status.MemberCount + 1
 	}
 	if status.BroadcastSetting == 0 {
-		status.BroadcastSetting = room.BroadcastSettingFriendsOfFriends
+		status.BroadcastSetting = p2p.BroadcastSettingFriendsOfFriends
 	}
 	if status.Joinability == "" {
-		status.Joinability = room.JoinabilityJoinableByFriends
+		status.Joinability = p2p.JoinabilityFriends
 	}
 	if status.Protocol == 0 {
 		status.Protocol = protocol.CurrentProtocol
@@ -136,7 +137,7 @@ func normalizeStatus(status room.Status) room.Status {
 	// Minecraft friend-list sessions use TitleId=0 in MPSD custom properties.
 	// The package TitleID constant is still used for Xbox invite handles.
 	status.TitleID = 0
-	status.TransportLayer = room.TransportLayerNetherNet
+	status.TransportLayer = p2p.TransportLayerNetherNet
 	status.OnlineCrossPlatformGame = true
 	if status.LevelID == "" {
 		status.LevelID = defaults.LevelID
@@ -313,7 +314,7 @@ func defaultString(s, d string) string {
 	return s
 }
 
-func defaultInt32(v, d int32) int32 {
+func defaultBroadcastSetting(v, d p2p.BroadcastSetting) p2p.BroadcastSetting {
 	if v == 0 {
 		return d
 	}

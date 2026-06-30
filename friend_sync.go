@@ -100,8 +100,8 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 		if accepter, ok := s.Client.(pendingFriendRequestAccepter); ok {
 			s.debug(ctx, "accepting pending friend requests")
 			accepted, err := accepter.AcceptPendingFriendRequests(ctx)
-			if len(accepted) > 0 {
-				s.debug(ctx, "added friends", "source", "pending_requests", "count", len(accepted))
+			for _, p := range accepted {
+				s.info(ctx, "added friend", "xuid", p.XUID, "gamertag", p.Gamertag, "source", "pending_requests")
 			}
 			if s.Config.InitialInvite && s.Inviter != nil {
 				for _, p := range accepted {
@@ -148,7 +148,7 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 				return err
 			}
 			added++
-			s.debug(ctx, "added friend", "xuid", p.XUID, "gamertag", p.Gamertag)
+			s.info(ctx, "added friend", "xuid", p.XUID, "gamertag", p.Gamertag)
 			if s.Config.InitialInvite && s.Inviter != nil {
 				s.sendInitialInvite(ctx, p, "auto_follow")
 			}
@@ -159,7 +159,7 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 				return err
 			}
 			removed++
-			s.debug(ctx, "removed friend", "xuid", p.XUID, "gamertag", p.Gamertag)
+			s.info(ctx, "removed friend", "xuid", p.XUID, "gamertag", p.Gamertag)
 			if s.History != nil {
 				_ = s.History.Clear(ctx, p.XUID)
 			}
@@ -183,12 +183,12 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 				expiryDays = 15
 			}
 			if ok && lastSeen.Before(time.Now().Add(-time.Duration(expiryDays)*24*time.Hour)) {
-				s.debug(ctx, "removing inactive friend", "xuid", p.XUID, "gamertag", p.Gamertag, "last_seen", lastSeen)
+				s.info(ctx, "removing inactive friend", "xuid", p.XUID, "gamertag", p.Gamertag, "last_seen", lastSeen)
 				if err := s.Client.Unfollow(ctx, p.XUID); err != nil {
 					s.debug(ctx, "failed to remove inactive friend", "xuid", p.XUID, "gamertag", p.Gamertag, "err", err)
 					return err
 				}
-				s.debug(ctx, "removed friend", "xuid", p.XUID, "gamertag", p.Gamertag, "reason", "inactive")
+				s.info(ctx, "removed friend", "xuid", p.XUID, "gamertag", p.Gamertag, "reason", "inactive")
 				_ = s.History.Clear(ctx, p.XUID)
 			}
 		}
@@ -258,6 +258,12 @@ func (s FriendSyncer) logFriendSyncError(op string, p Person, err error) {
 func (s FriendSyncer) logPendingFriendAcceptError(err error) {
 	if s.Log != nil {
 		s.Log.Warn("accept pending friend requests", "err", err)
+	}
+}
+
+func (s FriendSyncer) info(ctx context.Context, msg string, args ...any) {
+	if s.Log != nil {
+		s.Log.InfoContext(ctx, msg, args...)
 	}
 }
 

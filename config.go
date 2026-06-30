@@ -13,6 +13,7 @@ import (
 	"github.com/df-mc/go-xsapi/v2"
 	"github.com/df-mc/go-xsapi/v2/mpsd"
 	"github.com/sandertv/gophertunnel/minecraft"
+	"github.com/sandertv/gophertunnel/minecraft/p2p"
 	"github.com/sandertv/gophertunnel/minecraft/room"
 	"github.com/sandertv/gophertunnel/minecraft/service"
 	"golang.org/x/oauth2"
@@ -144,8 +145,8 @@ const (
 )
 
 const (
-	JoinabilityInviteOnly        = room.JoinabilityInviteOnly
-	JoinabilityJoinableByFriends = room.JoinabilityJoinableByFriends
+	JoinabilityInviteOnly        = p2p.JoinabilityInviteOnly
+	JoinabilityJoinableByFriends = p2p.JoinabilityFriends
 
 	WorldTypeCreative  = room.WorldTypeCreative
 	WorldTypeSurvival  = "Survival"

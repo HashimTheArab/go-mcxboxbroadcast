@@ -3,6 +3,7 @@ package broadcaster
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,6 +18,7 @@ import (
 	"github.com/df-mc/go-xsapi/v2"
 	"github.com/df-mc/go-xsapi/v2/mpsd"
 	"github.com/google/uuid"
+	"github.com/sandertv/gophertunnel/minecraft/p2p"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/login"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
 	"github.com/sandertv/gophertunnel/minecraft/room"
@@ -161,7 +163,7 @@ func TestXBLAnnouncerUnwrapsDiagnosticsWrappers(t *testing.T) {
 	wrapped := signalingConnectionAnnouncer{
 		Announcer: loggingAnnouncer{Announcer: inner},
 		connection: room.Connection{
-			ConnectionType: room.ConnectionTypeJSONRPCSignaling,
+			ConnectionType: p2p.ConnectionTypeSignalingOverJSONRPC,
 		},
 	}
 	got, ok := xblAnnouncer(wrapped)
@@ -268,13 +270,100 @@ func TestBroadcasterSignalingFactoryIsUsedOnceForSharedSignaling(t *testing.T) {
 	}
 }
 
+func TestBroadcasterWatchSignalingDetectsDeadSignaling(t *testing.T) {
+	sigCtx, sigCancel := context.WithCancel(context.Background())
+	defer sigCancel()
+	var log bytes.Buffer
+	b := &Broadcaster{
+		log:       slog.New(slog.NewTextHandler(&log, nil)),
+		signaling: &cancelableSignaling{ctx: sigCtx, networkID: "12345"},
+		started:   true,
+		conf: Config{
+			Server: ServerInfo{Host: "127.0.0.1", Port: 19132},
+			XUID:   "123",
+			Status: Status{HostName: "Host", WorldName: "World"},
+			SignalingFactory: func(context.Context, Config) (nethernet.Signaling, error) {
+				return nil, errors.New("test: signaling factory error")
+			},
+		},
+	}
+	b.ctx, b.cancel = context.WithCancel(context.Background())
+	defer b.cancel()
+
+	sigCancel()
+	done := make(chan struct{})
+	go func() {
+		b.watchSignaling()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("watchSignaling did not return after signaling context was canceled")
+	}
+	got := log.String()
+	if !strings.Contains(got, "connection to signaling lost") {
+		t.Fatalf("expected signaling lost warning, got: %q", got)
+	}
+	if !strings.Contains(got, "re-create session failed") {
+		t.Fatalf("expected re-create error log, got: %q", got)
+	}
+}
+
+func TestBroadcasterWatchSignalingSkipsStaticSignaling(t *testing.T) {
+	sigCtx, sigCancel := context.WithCancel(context.Background())
+	defer sigCancel()
+	var log bytes.Buffer
+	staticSig := &cancelableSignaling{ctx: sigCtx, networkID: "12345"}
+	b := &Broadcaster{
+		log:       slog.New(slog.NewTextHandler(&log, nil)),
+		signaling: staticSig,
+		started:   true,
+		conf: Config{
+			Signaling: staticSig,
+		},
+	}
+	b.ctx, b.cancel = context.WithCancel(context.Background())
+	defer b.cancel()
+
+	done := make(chan struct{})
+	go func() {
+		b.watchSignaling()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("watchSignaling should have returned immediately for static signaling")
+	}
+}
+
+type cancelableSignaling struct {
+	ctx       context.Context
+	networkID string
+}
+
+func (s *cancelableSignaling) Signal(context.Context, *nethernet.Signal) error { return nil }
+func (s *cancelableSignaling) Notify(nethernet.Notifier) func() {
+	return func() {}
+}
+func (s *cancelableSignaling) Context() context.Context { return s.ctx }
+func (s *cancelableSignaling) Credentials(context.Context) (*nethernet.Credentials, error) {
+	return nil, nil
+}
+func (s *cancelableSignaling) NetworkID() string { return s.networkID }
+func (s *cancelableSignaling) PongData([]byte)   {}
+
 func TestBroadcasterUsesLongerDefaultNetherNetTransportTimeout(t *testing.T) {
 	b := &Broadcaster{}
 	conf := b.netherNetListenConfig()
 	if conf.ConnContext == nil {
 		t.Fatal("default nethernet ConnContext missing")
 	}
-	ctx := conf.ConnContext(context.Background(), nil)
+	ctx, cancel := conf.ConnContext(context.Background(), nil)
+	defer cancel()
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		t.Fatal("default nethernet ConnContext has no deadline")
@@ -296,14 +385,15 @@ func TestBroadcasterPreservesCustomNetherNetTransportContext(t *testing.T) {
 	want := context.WithValue(context.Background(), contextKey{}, "custom")
 	called := false
 	b := &Broadcaster{conf: Config{NetherNetListenConfig: nethernet.ListenConfig{
-		ConnContext: func(context.Context, *nethernet.Conn) context.Context {
+		ConnContext: func(ctx context.Context, _ *nethernet.Conn) (context.Context, context.CancelFunc) {
 			called = true
-			return want
+			return want, func() {}
 		},
 	}}}
 
 	conf := b.netherNetListenConfig()
-	got := conf.ConnContext(context.Background(), nil)
+	got, cancel := conf.ConnContext(context.Background(), nil)
+	defer cancel()
 	if !called {
 		t.Fatal("custom nethernet ConnContext was not called")
 	}

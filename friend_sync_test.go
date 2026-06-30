@@ -126,10 +126,11 @@ func TestFriendSyncerDebugLogsPendingFriendAccepts(t *testing.T) {
 	output := log.String()
 	for _, want := range []string{
 		`msg="accepting pending friend requests"`,
-		`msg="added friends" source=pending_requests count=2`,
+		`msg="added friend" xuid=9 gamertag=PendingOne source=pending_requests`,
+		`msg="added friend" xuid=10 gamertag=PendingTwo source=pending_requests`,
 	} {
 		if !strings.Contains(output, want) {
-			t.Fatalf("debug log missing %q in:\n%s", want, output)
+			t.Fatalf("log missing %q in:\n%s", want, output)
 		}
 	}
 }
