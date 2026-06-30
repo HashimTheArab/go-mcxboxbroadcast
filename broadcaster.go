@@ -209,7 +209,6 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	}()
 	go func() {
 		<-b.ctx.Done()
-		_ = b.listener.Close()
 		b.acceptWg.Wait()
 		close(b.done)
 	}()
