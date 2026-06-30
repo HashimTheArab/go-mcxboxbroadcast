@@ -72,6 +72,7 @@ type transferConn interface {
 	IdentityData() login.IdentityData
 }
 
+// defaultSignalingResult holds the result of a default signaling dial.
 type defaultSignalingResult struct {
 	signaling     nethernet.Signaling
 	minecraft     service.TokenSource
@@ -79,6 +80,7 @@ type defaultSignalingResult struct {
 	err           error
 }
 
+// defaultSignalingConfig holds the inputs for creating a default signaling connection.
 type defaultSignalingConfig struct {
 	mode            SignalingMode
 	log             *slog.Logger
@@ -232,6 +234,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	return nil
 }
 
+// presenceClients builds the list of Xbox presence clients for heartbeat updates.
 func (b *Broadcaster) presenceClients() []PresenceClient {
 	clients := []PresenceClient{{
 		XUID:   b.primaryXUID(),
@@ -256,6 +259,7 @@ func (b *Broadcaster) presenceClients() []PresenceClient {
 	return clients
 }
 
+// friendSyncer creates a FriendSyncer from the broadcaster's current config.
 func (b *Broadcaster) friendSyncer() FriendSyncer {
 	syncer := FriendSyncer{
 		Client:  b.friendClientFor(b.conf.XBLClient),
@@ -269,6 +273,7 @@ func (b *Broadcaster) friendSyncer() FriendSyncer {
 	return syncer
 }
 
+// roomStatusProvider returns the room status provider, falling back to config defaults.
 func (b *Broadcaster) roomStatusProvider(status room.Status) room.StatusProvider {
 	if b.conf.StatusProvider != nil {
 		return normalizedStatusProvider{Provider: b.conf.StatusProvider, OwnerID: b.primaryXUID()}
@@ -276,6 +281,7 @@ func (b *Broadcaster) roomStatusProvider(status room.Status) room.StatusProvider
 	return room.NewStatusProvider(status)
 }
 
+// roomListenConfig builds the room.ListenConfig for the nethernet listener.
 func (b *Broadcaster) roomListenConfig(status room.Status) room.ListenConfig {
 	return room.ListenConfig{
 		Announcer:                   b.announcer,
@@ -285,6 +291,7 @@ func (b *Broadcaster) roomListenConfig(status room.Status) room.ListenConfig {
 	}
 }
 
+// netherNetListenConfig returns the nethernet listen config with a default conn context applied.
 func (b *Broadcaster) netherNetListenConfig() nethernet.ListenConfig {
 	conf := b.conf.NetherNetListenConfig
 	if conf.ConnContext == nil {
@@ -293,6 +300,7 @@ func (b *Broadcaster) netherNetListenConfig() nethernet.ListenConfig {
 	return conf
 }
 
+// registerNetherNetNetwork registers the "nethernet" network for the minecraft listener.
 func (b *Broadcaster) registerNetherNetNetwork(sig nethernet.Signaling, status room.Status) {
 	minecraft.RegisterNetwork("nethernet", func(l *slog.Logger) minecraft.Network {
 		return room.Network{
@@ -302,10 +310,12 @@ func (b *Broadcaster) registerNetherNetNetwork(sig nethernet.Signaling, status r
 	})
 }
 
+// usesDefaultNetherNetConnContext reports whether the default conn timeout is in use.
 func (b *Broadcaster) usesDefaultNetherNetConnContext() bool {
 	return b.conf.NetherNetListenConfig.ConnContext == nil
 }
 
+// netherNetTransportTimeoutLogValue returns a human-readable transport timeout for logging.
 func (b *Broadcaster) netherNetTransportTimeoutLogValue() string {
 	if b.usesDefaultNetherNetConnContext() {
 		return defaultNetherNetConnTimeout.String()
@@ -313,10 +323,12 @@ func (b *Broadcaster) netherNetTransportTimeoutLogValue() string {
 	return "custom"
 }
 
+// defaultNetherNetConnContext provides a 30s timeout context for nethernet connections.
 func defaultNetherNetConnContext(parent context.Context, _ *nethernet.Conn) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(parent, defaultNetherNetConnTimeout)
 }
 
+// minecraftStatusProvider returns the minecraft status provider for the listener.
 func (b *Broadcaster) minecraftStatusProvider(status room.Status) minecraft.ServerStatusProvider {
 	if b.conf.StatusProvider != nil {
 		return roomMinecraftStatusProvider{Provider: b.conf.StatusProvider}
@@ -324,6 +336,7 @@ func (b *Broadcaster) minecraftStatusProvider(status room.Status) minecraft.Serv
 	return minecraft.NewStatusProvider(status.WorldName, status.HostName)
 }
 
+// primaryXBLClient returns or lazily creates the primary Xbox Live client.
 func (b *Broadcaster) primaryXBLClient(ctx context.Context) (*xsapi.Client, error) {
 	if b.conf.XBLClient != nil {
 		return b.conf.XBLClient, nil
@@ -344,6 +357,7 @@ func (b *Broadcaster) primaryXBLClient(ctx context.Context) (*xsapi.Client, erro
 	return client, nil
 }
 
+// subAccountXBLClient returns or lazily creates an Xbox Live client for a sub-account.
 func (b *Broadcaster) subAccountXBLClient(ctx context.Context, account *SubAccountConfig) (*xsapi.Client, error) {
 	if account.XBLClient != nil {
 		return account.XBLClient, nil
@@ -360,6 +374,7 @@ func (b *Broadcaster) subAccountXBLClient(ctx context.Context, account *SubAccou
 	return client, nil
 }
 
+// minecraftTokenSource returns or lazily creates the Minecraft service token source.
 func (b *Broadcaster) minecraftTokenSource(ctx context.Context) (service.TokenSource, error) {
 	if b.conf.MinecraftTokenSource != nil {
 		return b.conf.MinecraftTokenSource, nil
@@ -380,6 +395,7 @@ func (b *Broadcaster) minecraftTokenSource(ctx context.Context) (service.TokenSo
 	return tokens, nil
 }
 
+// primaryXUID returns the primary account's XUID from config or client.
 func (b *Broadcaster) primaryXUID() string {
 	if b.conf.XUID != "" {
 		return b.conf.XUID
@@ -390,6 +406,7 @@ func (b *Broadcaster) primaryXUID() string {
 	return clientXUID(b.xblClient)
 }
 
+// accountXUID returns a sub-account's XUID from config or client.
 func accountXUID(account SubAccountConfig) string {
 	if account.XUID != "" {
 		return account.XUID
@@ -397,10 +414,12 @@ func accountXUID(account SubAccountConfig) string {
 	return clientXUID(account.XBLClient)
 }
 
+// subAccountHasXBLCredentials reports whether a sub-account has Xbox credentials.
 func subAccountHasXBLCredentials(account SubAccountConfig) bool {
 	return account.XBLClient != nil || account.XBLTokenSource != nil
 }
 
+// clientXUID extracts the XUID from an xsapi.Client, returning empty if nil.
 func clientXUID(client *xsapi.Client) string {
 	if client == nil {
 		return ""
@@ -408,10 +427,12 @@ func clientXUID(client *xsapi.Client) string {
 	return client.UserInfo().XUID
 }
 
+// friendClientFor wraps an Xbox client into a FriendClient for social API calls.
 func (b *Broadcaster) friendClientFor(client *xsapi.Client) FriendClient {
 	return FriendClient{Client: authenticatedHTTPClient(client, b.conf.HTTPClient)}
 }
 
+// authenticatedHTTPClient returns the client's authenticated HTTP client or the fallback.
 func authenticatedHTTPClient(client *xsapi.Client, fallback *http.Client) *http.Client {
 	if client != nil {
 		if httpClient := client.HTTPClient(); httpClient != nil {
@@ -421,10 +442,12 @@ func authenticatedHTTPClient(client *xsapi.Client, fallback *http.Client) *http.
 	return fallback
 }
 
+// broadcasterInviter resolves the current MPSD session dynamically for friend invites.
 type broadcasterInviter struct {
 	b *Broadcaster
 }
 
+// Invite snapshots the active MPSD session under the mutex and sends a game invite.
 func (i *broadcasterInviter) Invite(ctx context.Context, xuid, titleID string) error {
 	i.b.mu.Lock()
 	announcer, ok := xblAnnouncer(i.b.announcer)
@@ -438,16 +461,19 @@ func (i *broadcasterInviter) Invite(ctx context.Context, xuid, titleID string) e
 	return err
 }
 
+// loggingAnnouncer wraps an announcer with debug-level status logging.
 type loggingAnnouncer struct {
 	room.Announcer
 	log *slog.Logger
 }
 
+// Announce logs the status at debug level before delegating to the wrapped announcer.
 func (a loggingAnnouncer) Announce(ctx context.Context, status room.Status) error {
 	debugRoomStatus(a.log, "publishing xbox live session status", status)
 	return a.Announcer.Announce(ctx, status)
 }
 
+// xblAnnouncer unwraps announcer wrappers to find the underlying XBLAnnouncer.
 func xblAnnouncer(announcer room.Announcer) (*room.XBLAnnouncer, bool) {
 	switch a := announcer.(type) {
 	case *room.XBLAnnouncer:
@@ -463,6 +489,7 @@ func xblAnnouncer(announcer room.Announcer) (*room.XBLAnnouncer, bool) {
 	}
 }
 
+// signalingFor returns or creates the nethernet signaling connection.
 func (b *Broadcaster) signalingFor(ctx context.Context) (nethernet.Signaling, error) {
 	if b.conf.Signaling != nil {
 		b.debug("using configured nethernet signaling", "signaling_type", fmt.Sprintf("%T", b.conf.Signaling))
@@ -514,6 +541,7 @@ func (b *Broadcaster) signalingFor(ctx context.Context) (nethernet.Signaling, er
 	}
 }
 
+// defaultSignalingConfig builds the signaling config from the broadcaster's current state.
 func (b *Broadcaster) defaultSignalingConfig(mode SignalingMode) defaultSignalingConfig {
 	client := b.conf.XBLClient
 	if client == nil {
@@ -533,6 +561,7 @@ func (b *Broadcaster) defaultSignalingConfig(mode SignalingMode) defaultSignalin
 	}
 }
 
+// dialDefaultSignaling dials a nethernet signaling connection using the given config.
 func dialDefaultSignaling(ctx context.Context, conf defaultSignalingConfig) defaultSignalingResult {
 	debugLog(conf.log, "creating minecraft token source for signaling")
 	src, createdClient, err := conf.minecraftTokenSource(ctx)
@@ -564,6 +593,7 @@ func dialDefaultSignaling(ctx context.Context, conf defaultSignalingConfig) defa
 	return defaultSignalingResult{signaling: sig, minecraft: src, createdClient: createdClient}
 }
 
+// minecraftTokenSource returns or creates a Minecraft token source for signaling.
 func (conf defaultSignalingConfig) minecraftTokenSource(ctx context.Context) (service.TokenSource, *xsapi.Client, error) {
 	if conf.minecraftTokens != nil {
 		return conf.minecraftTokens, nil, nil
@@ -588,6 +618,7 @@ func (conf defaultSignalingConfig) minecraftTokenSource(ctx context.Context) (se
 	return tokens, createdClient, nil
 }
 
+// cacheDefaultSignalingResult stores lazily-created clients and tokens from signaling dial.
 func (b *Broadcaster) cacheDefaultSignalingResult(result defaultSignalingResult) {
 	if result.createdClient != nil {
 		b.xblClient = result.createdClient
@@ -600,6 +631,7 @@ func (b *Broadcaster) cacheDefaultSignalingResult(result defaultSignalingResult)
 	}
 }
 
+// closeDefaultSignalingResult closes resources from a signaling dial result.
 func closeDefaultSignalingResult(result defaultSignalingResult) {
 	if result.signaling != nil {
 		if c, ok := result.signaling.(interface{ Close() error }); ok {
@@ -611,6 +643,7 @@ func closeDefaultSignalingResult(result defaultSignalingResult) {
 	}
 }
 
+// signalingDialTimeout returns the configured or default signaling dial timeout.
 func (b *Broadcaster) signalingDialTimeout() time.Duration {
 	if b.conf.SignalingDialTimeout > 0 {
 		return b.conf.SignalingDialTimeout
@@ -618,6 +651,7 @@ func (b *Broadcaster) signalingDialTimeout() time.Duration {
 	return defaultSignalingDialTimeout
 }
 
+// signalingStartupHTTPClient returns a clone of the HTTP client with a startup timeout applied.
 func signalingStartupHTTPClient(client *http.Client, timeout time.Duration) *http.Client {
 	if timeout <= 0 {
 		return client
@@ -633,6 +667,7 @@ func signalingStartupHTTPClient(client *http.Client, timeout time.Duration) *htt
 	return &clone
 }
 
+// newAnnouncer creates and configures the MPSD session announcer.
 func (b *Broadcaster) newAnnouncer(ctx context.Context) (room.Announcer, error) {
 	if b.announcerFactory != nil {
 		b.debug("using configured xbox live announcer factory")
@@ -671,6 +706,7 @@ func (b *Broadcaster) newAnnouncer(ctx context.Context) (room.Announcer, error) 
 	}, b.primaryXUID(), b.log), nil
 }
 
+// startSubAccounts publishes MPSD sessions for all enabled sub-accounts.
 func (b *Broadcaster) startSubAccounts(ctx context.Context) error {
 	for i := range b.conf.SubAccounts {
 		account := &b.conf.SubAccounts[i]
@@ -717,6 +753,7 @@ func (b *Broadcaster) startSubAccounts(ctx context.Context) error {
 	return nil
 }
 
+// publishSubAccount publishes a single sub-account's MPSD session.
 func (b *Broadcaster) publishSubAccount(ctx context.Context, account SubAccountConfig, pub mpsd.PublishConfig) (*mpsd.Session, error) {
 	if b.subAccountPublisher != nil {
 		return b.subAccountPublisher(ctx, account, b.sessionRef, pub)
@@ -731,6 +768,7 @@ func (b *Broadcaster) publishSubAccount(ctx context.Context, account SubAccountC
 	return client.Publish(ctx, b.sessionRef, pub)
 }
 
+// ensureSubAccountMutualFollow makes the primary and sub-account follow each other.
 func (b *Broadcaster) ensureSubAccountMutualFollow(ctx context.Context, account SubAccountConfig) error {
 	primaryXUID := b.primaryXUID()
 	subXUID := accountXUID(account)
@@ -748,6 +786,7 @@ func (b *Broadcaster) ensureSubAccountMutualFollow(ctx context.Context, account 
 	return nil
 }
 
+// uploadGallery uploads the configured showcase image to the Xbox gallery.
 func (b *Broadcaster) uploadGallery(ctx context.Context) {
 	cfg := b.conf.Gallery
 	if cfg == nil || !cfg.Enabled {
@@ -789,6 +828,7 @@ func (b *Broadcaster) uploadGallery(ctx context.Context) {
 	b.info("successfully set showcase image", "path", cfg.ImagePath, "image_id", result.ImageID, "uploaded", result.Uploaded)
 }
 
+// sharedTokenSourceContext returns the broadcaster's context or the fallback if unavailable.
 func (b *Broadcaster) sharedTokenSourceContext(fallback context.Context) context.Context {
 	if b.ctx != nil && b.ctx.Err() == nil {
 		return b.ctx
@@ -799,28 +839,33 @@ func (b *Broadcaster) sharedTokenSourceContext(fallback context.Context) context
 	return context.Background()
 }
 
+// debug logs a message at debug level if the logger is set.
 func (b *Broadcaster) debug(msg string, args ...any) {
 	debugLog(b.log, msg, args...)
 }
 
+// debugLog logs a message at debug level using the given logger if non-nil.
 func debugLog(log *slog.Logger, msg string, args ...any) {
 	if log != nil {
 		log.Debug(msg, args...)
 	}
 }
 
+// info logs a message at info level if the logger is set.
 func (b *Broadcaster) info(msg string, args ...any) {
 	if b.log != nil {
 		b.log.Info(msg, args...)
 	}
 }
 
+// warn logs a message at warn level if the logger is set.
 func (b *Broadcaster) warn(msg string, args ...any) {
 	if b.log != nil {
 		b.log.Warn(msg, args...)
 	}
 }
 
+// warnWebSocketSignalingMode warns when websocket signaling is configured instead of jsonrpc.
 func (b *Broadcaster) warnWebSocketSignalingMode(mode SignalingMode) {
 	if mode != SignalingModeWebSocket {
 		return
@@ -832,10 +877,12 @@ func (b *Broadcaster) warnWebSocketSignalingMode(mode SignalingMode) {
 	)
 }
 
+// debugRoomStatus logs the room status at debug level.
 func (b *Broadcaster) debugRoomStatus(msg string, status room.Status) {
 	debugRoomStatus(b.log, msg, status)
 }
 
+// debugRoomStatus logs the room status at debug level using the given logger.
 func debugRoomStatus(log *slog.Logger, msg string, status room.Status) {
 	if log == nil || !log.Enabled(context.Background(), slog.LevelDebug) {
 		return
@@ -843,6 +890,7 @@ func debugRoomStatus(log *slog.Logger, msg string, status room.Status) {
 	log.Debug(msg, roomStatusLogArgs(status)...)
 }
 
+// roomStatusLogArgs builds slog key-value args from a room status.
 func roomStatusLogArgs(status room.Status) []any {
 	return []any{
 		"host_name", status.HostName,
@@ -868,6 +916,7 @@ func roomStatusLogArgs(status room.Status) []any {
 	}
 }
 
+// roomConnectionLogValue is a loggable representation of a room connection.
 type roomConnectionLogValue struct {
 	ConnectionType int
 	HostIPAddress  string
@@ -879,6 +928,7 @@ type roomConnectionLogValue struct {
 	PmsgIDSet      bool
 }
 
+// roomConnectionLogValues converts room connections to loggable values.
 func roomConnectionLogValues(connections []room.Connection) []roomConnectionLogValue {
 	values := make([]roomConnectionLogValue, 0, len(connections))
 	for _, connection := range connections {
@@ -897,6 +947,7 @@ func roomConnectionLogValues(connections []room.Connection) []roomConnectionLogV
 	return values
 }
 
+// signalingNetworkID returns the network ID from the signaling or an empty string if nil.
 func signalingNetworkID(sig nethernet.Signaling) string {
 	if sig == nil {
 		return ""
@@ -904,6 +955,7 @@ func signalingNetworkID(sig nethernet.Signaling) string {
 	return sig.NetworkID()
 }
 
+// presenceClientXUIDs extracts the XUIDs from a slice of presence clients.
 func presenceClientXUIDs(clients []PresenceClient) []string {
 	xuids := make([]string, 0, len(clients))
 	for _, client := range clients {
@@ -912,12 +964,14 @@ func presenceClientXUIDs(clients []PresenceClient) []string {
 	return xuids
 }
 
+// uploadGalleryWithTimeout runs uploadGallery with a 30-second timeout.
 func (b *Broadcaster) uploadGalleryWithTimeout() {
 	ctx, cancel := context.WithTimeout(b.ctx, 30*time.Second)
 	defer cancel()
 	b.uploadGallery(ctx)
 }
 
+// notify sends a notification via the configured notifier, if any.
 func (b *Broadcaster) notify(ctx context.Context, message string) {
 	if b.conf.Notifier == nil {
 		return
@@ -936,6 +990,7 @@ func (b *Broadcaster) notify(ctx context.Context, message string) {
 	}
 }
 
+// notifySessionUpdateFailure notifies about a session update failure unless suppressed.
 func (b *Broadcaster) notifySessionUpdateFailure(ctx context.Context, err error) {
 	if b.conf.SuppressSessionUpdateMessage {
 		return
@@ -943,6 +998,7 @@ func (b *Broadcaster) notifySessionUpdateFailure(ctx context.Context, err error)
 	b.notify(ctx, "Xbox session update failed: "+err.Error())
 }
 
+// acceptListener accepts connections from the given listener and transfers each to the target server.
 func (b *Broadcaster) acceptListener(l *minecraft.Listener) {
 	for {
 		conn, err := l.Accept()
@@ -962,6 +1018,7 @@ func (b *Broadcaster) acceptListener(l *minecraft.Listener) {
 	}
 }
 
+// transfer sends a StartGame and Transfer packet to redirect a client to the target server.
 func (b *Broadcaster) transfer(conn transferConn) {
 	defer conn.Close()
 	id := conn.IdentityData()
@@ -989,6 +1046,7 @@ func (b *Broadcaster) transfer(conn transferConn) {
 	b.waitForTransferredClientDisconnect(conn, id)
 }
 
+// effectiveTransferCloseTimeout returns the configured or default transfer close timeout.
 func (b *Broadcaster) effectiveTransferCloseTimeout() time.Duration {
 	if b.transferCloseTimeout == 0 {
 		return defaultTransferCloseTimeout
@@ -999,6 +1057,7 @@ func (b *Broadcaster) effectiveTransferCloseTimeout() time.Duration {
 	return b.transferCloseTimeout
 }
 
+// waitForTransferredClientDisconnect waits for a transferred client to disconnect or times out.
 func (b *Broadcaster) waitForTransferredClientDisconnect(conn transferConn, id login.IdentityData) {
 	timeout := b.effectiveTransferCloseTimeout()
 	if timeout <= 0 {
@@ -1027,6 +1086,7 @@ func (b *Broadcaster) waitForTransferredClientDisconnect(conn transferConn, id l
 	}
 }
 
+// closeTransferredClientOnStop closes a transferred connection when the broadcaster stops.
 func (b *Broadcaster) closeTransferredClientOnStop(conn transferConn) func() {
 	if b.ctx == nil {
 		return func() {}
@@ -1044,6 +1104,7 @@ func (b *Broadcaster) closeTransferredClientOnStop(conn transferConn) func() {
 	}
 }
 
+// writeStartGameBeforeTransfer writes the StartGame packet before transferring the client.
 func (b *Broadcaster) writeStartGameBeforeTransfer(conn transferConn) error {
 	pk := b.startGameBeforeTransfer()
 	if err := conn.WritePacket(pk); err != nil {
@@ -1052,6 +1113,7 @@ func (b *Broadcaster) writeStartGameBeforeTransfer(conn transferConn) error {
 	return nil
 }
 
+// startGameBeforeTransfer builds a minimal StartGame packet for the redirect flow.
 func (b *Broadcaster) startGameBeforeTransfer() *packet.StartGame {
 	worldName := b.conf.Status.WorldName
 	if worldName == "" {
@@ -1097,6 +1159,7 @@ func (b *Broadcaster) startGameBeforeTransfer() *packet.StartGame {
 	}
 }
 
+// updateLoop periodically refreshes the Xbox session metadata.
 func (b *Broadcaster) updateLoop() {
 	ticker := time.NewTicker(b.conf.UpdateInterval)
 	defer ticker.Stop()
@@ -1117,10 +1180,12 @@ func (b *Broadcaster) updateLoop() {
 	}
 }
 
+// canRecreateSignaling reports whether signaling can be rebuilt (not statically configured).
 func (b *Broadcaster) canRecreateSignaling() bool {
 	return b.conf.Signaling == nil
 }
 
+// watchSignaling monitors the signaling context and triggers session reconnection on loss.
 func (b *Broadcaster) watchSignaling() {
 	sig := b.signaling
 	if sig == nil {
@@ -1149,6 +1214,7 @@ func (b *Broadcaster) watchSignaling() {
 	}
 }
 
+// recreateSession tears down and rebuilds signaling, session, and listener after a drop.
 func (b *Broadcaster) recreateSession() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -1271,6 +1337,7 @@ func (b *Broadcaster) Update(ctx context.Context) error {
 	return nil
 }
 
+// cleanupPublishedSessions closes sub-sessions and optionally the announcer.
 func (b *Broadcaster) cleanupPublishedSessions(closeAnnouncer bool) error {
 	var err error
 	for _, s := range b.subSessions {
@@ -1283,6 +1350,7 @@ func (b *Broadcaster) cleanupPublishedSessions(closeAnnouncer bool) error {
 	return err
 }
 
+// cleanupStartupFailure cleans up all resources after a failed Start.
 func (b *Broadcaster) cleanupStartupFailure(closeAnnouncer bool) error {
 	err := b.cleanupPublishedSessions(closeAnnouncer)
 	if b.signaling != nil {
@@ -1294,6 +1362,7 @@ func (b *Broadcaster) cleanupStartupFailure(closeAnnouncer bool) error {
 	return err
 }
 
+// closeCreatedXBLClients closes Xbox Live clients that were created during startup.
 func (b *Broadcaster) closeCreatedXBLClients() error {
 	if len(b.createdXBLClients) == 0 {
 		return nil
@@ -1310,6 +1379,7 @@ func (b *Broadcaster) closeCreatedXBLClients() error {
 	return err
 }
 
+// createdXBLClientSet builds a set of created clients for reference clearing.
 func createdXBLClientSet(clients []*xsapi.Client) map[*xsapi.Client]struct{} {
 	created := make(map[*xsapi.Client]struct{}, len(clients))
 	for _, client := range clients {
@@ -1320,6 +1390,7 @@ func createdXBLClientSet(clients []*xsapi.Client) map[*xsapi.Client]struct{} {
 	return created
 }
 
+// clearCreatedXBLClientReferences nils out config references to closed clients.
 func (b *Broadcaster) clearCreatedXBLClientReferences(created map[*xsapi.Client]struct{}) {
 	primaryCreated := xblClientCreated(b.conf.XBLClient, created) || xblClientCreated(b.xblClient, created)
 	if primaryCreated {
@@ -1337,6 +1408,7 @@ func (b *Broadcaster) clearCreatedXBLClientReferences(created map[*xsapi.Client]
 	}
 }
 
+// xblClientCreated reports whether a client was created by the broadcaster.
 func xblClientCreated(client *xsapi.Client, created map[*xsapi.Client]struct{}) bool {
 	if client == nil {
 		return false
