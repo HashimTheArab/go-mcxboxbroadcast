@@ -268,6 +268,53 @@ func TestBroadcasterSignalingFactoryIsUsedOnceForSharedSignaling(t *testing.T) {
 	}
 }
 
+func TestBroadcasterWatchSignalingDetectsDeadSignaling(t *testing.T) {
+	sigCtx, sigCancel := context.WithCancel(context.Background())
+	defer sigCancel()
+	var log bytes.Buffer
+	b := &Broadcaster{
+		log:       slog.New(slog.NewTextHandler(&log, nil)),
+		signaling: &cancelableSignaling{ctx: sigCtx, networkID: "12345"},
+		started:   true,
+	}
+	b.ctx, b.cancel = context.WithCancel(context.Background())
+	defer b.cancel()
+
+	sigCancel()
+	done := make(chan struct{})
+	go func() {
+		b.watchSignaling()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("watchSignaling did not return after signaling context was canceled")
+	}
+	got := log.String()
+	if !strings.Contains(got, "connection to signaling lost") {
+		t.Fatalf("expected signaling lost warning, got: %q", got)
+	}
+}
+
+type cancelableSignaling struct {
+	ctx       context.Context
+	networkID string
+}
+
+func (s *cancelableSignaling) Signal(context.Context, *nethernet.Signal) error { return nil }
+func (s *cancelableSignaling) Notify() (<-chan *nethernet.Signal, func()) {
+	ch := make(chan *nethernet.Signal)
+	return ch, func() {}
+}
+func (s *cancelableSignaling) Context() context.Context { return s.ctx }
+func (s *cancelableSignaling) Credentials(context.Context) (*nethernet.Credentials, error) {
+	return nil, nil
+}
+func (s *cancelableSignaling) NetworkID() string { return s.networkID }
+func (s *cancelableSignaling) PongData([]byte)   {}
+
 func TestBroadcasterUsesLongerDefaultNetherNetTransportTimeout(t *testing.T) {
 	b := &Broadcaster{}
 	conf := b.netherNetListenConfig()

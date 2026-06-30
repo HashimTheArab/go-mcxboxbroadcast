@@ -117,6 +117,7 @@ type RuntimeConfigInput struct {
 func DefaultConfigFile() ConfigFile {
 	return ConfigFile{
 		ConfigVersion: CurrentConfigVersion,
+		DebugMode:     true,
 		Session: SessionFileConfig{
 			RemoteAddress:    "auto",
 			RemotePort:       "auto",

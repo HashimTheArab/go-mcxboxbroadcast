@@ -162,13 +162,13 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 		b.announcer = signalingConnectionAnnouncer{Announcer: b.announcer, connection: *connection}
 		b.debug("using jsonrpc signaling", "nethernet_id", connection.NetherNetID, "pmsg_id", connection.PmsgID)
 	}
-	b.debug("creating xbox live session")
+	b.info("creating xbox live session")
 	if err := b.announcer.Announce(b.ctx, status); err != nil {
 		b.cancel()
 		err = errors.Join(fmt.Errorf("announce session: %w", err), b.cleanupStartupFailure(true))
 		return err
 	}
-	b.debug("created xbox live session")
+	b.info("created xbox live session")
 	b.debug("starting sub-account sessions", "count", len(b.conf.SubAccounts))
 	if err := b.startSubAccounts(b.ctx); err != nil {
 		b.cancel()
@@ -218,6 +218,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 
 	go b.accept()
 	go b.updateLoop()
+	go b.watchSignaling()
 	presenceClients := b.presenceClients()
 	b.debug("starting presence updates", "count", len(presenceClients), "xuids", presenceClientXUIDs(presenceClients))
 	for _, client := range presenceClients {
@@ -1096,6 +1097,110 @@ func (b *Broadcaster) updateLoop() {
 			return
 		}
 	}
+}
+
+func (b *Broadcaster) watchSignaling() {
+	sig := b.signaling
+	if sig == nil {
+		return
+	}
+	select {
+	case <-sig.Context().Done():
+		if b.ctx.Err() != nil {
+			return
+		}
+		b.warn("connection to signaling lost, re-creating session...",
+			"cause", context.Cause(sig.Context()))
+		if err := b.recreateSession(); err != nil {
+			b.log.Error("session is dead and hit exception trying to re-create it", "err", err)
+			return
+		}
+		b.info("signaling session reconnected")
+		go b.watchSignaling()
+	case <-b.ctx.Done():
+	}
+}
+
+func (b *Broadcaster) recreateSession() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.listener != nil {
+		_ = b.listener.Close()
+	}
+	_ = b.cleanupPublishedSessions(true)
+	if b.signaling != nil {
+		if c, ok := b.signaling.(interface{ Close() error }); ok {
+			_ = c.Close()
+		}
+	}
+
+	mode, err := b.signalingMode()
+	if err != nil {
+		return err
+	}
+	sig, err := b.signalingFor(b.ctx)
+	if err != nil {
+		return fmt.Errorf("re-create signaling: %w", err)
+	}
+	b.signaling = sig
+	b.debug("nethernet signaling re-created", "signaling_mode", mode, "network_id", signalingNetworkID(sig))
+
+	status, err := b.status(b.ctx)
+	if err != nil {
+		return fmt.Errorf("re-create session status: %w", err)
+	}
+	announcer, err := b.newAnnouncer(b.ctx)
+	if err != nil {
+		return fmt.Errorf("re-create announcer: %w", err)
+	}
+	b.announcer = loggingAnnouncer{Announcer: announcer, log: b.log}
+	connection, err := b.signalingConnection(b.ctx, sig)
+	if err != nil {
+		return fmt.Errorf("re-create signaling connection: %w", err)
+	}
+	if connection != nil {
+		b.announcer = signalingConnectionAnnouncer{Announcer: b.announcer, connection: *connection}
+	}
+	if err := b.announcer.Announce(b.ctx, status); err != nil {
+		return fmt.Errorf("re-announce session: %w", err)
+	}
+	if err := b.startSubAccounts(b.ctx); err != nil {
+		return fmt.Errorf("re-create sub-accounts: %w", err)
+	}
+
+	minecraft.RegisterNetwork("nethernet", func(l *slog.Logger) minecraft.Network {
+		netherNetListenConfig := b.netherNetListenConfig()
+		return room.Network{
+			Network: minecraft.NetherNet{
+				Signaling: sig,
+				ListenConfig: nethernet.ListenConfig{
+					Log:                b.log,
+					ConnContext:        netherNetListenConfig.ConnContext,
+					NegotiationContext: netherNetListenConfig.NegotiationContext,
+					ICEGatherPolicy:    netherNetListenConfig.ICEGatherPolicy,
+					DisableTrickleICE:  netherNetListenConfig.DisableTrickleICE,
+					API:                netherNetListenConfig.API,
+				},
+			},
+			ListenConfig: b.roomListenConfig(status),
+		}
+	})
+
+	listenConf := b.conf.ListenConfig
+	listenConf.ErrorLog = b.log
+	listenConf.StatusProvider = b.minecraftStatusProvider(status)
+	listenConf.AuthenticationDisabled = true
+	l, err := listenConf.Listen("nethernet", "")
+	if err != nil {
+		return fmt.Errorf("re-listen nethernet: %w", err)
+	}
+	b.listener = l
+	b.info("nethernet broadcaster started", "network_id", signalingNetworkID(sig), "signaling_mode", mode)
+
+	go b.accept()
+	go b.uploadGalleryWithTimeout()
+	return nil
 }
 
 // Update refreshes the announced Xbox session metadata.
