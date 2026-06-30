@@ -428,12 +428,14 @@ type broadcasterInviter struct {
 
 func (i *broadcasterInviter) Invite(ctx context.Context, xuid, titleID string) error {
 	i.b.mu.Lock()
-	defer i.b.mu.Unlock()
 	announcer, ok := xblAnnouncer(i.b.announcer)
 	if !ok || announcer.Session == nil {
+		i.b.mu.Unlock()
 		return errors.New("invite: no active MPSD session")
 	}
-	_, err := announcer.Session.Invite(ctx, xuid, titleID)
+	session := announcer.Session
+	i.b.mu.Unlock()
+	_, err := session.Invite(ctx, xuid, titleID)
 	return err
 }
 
