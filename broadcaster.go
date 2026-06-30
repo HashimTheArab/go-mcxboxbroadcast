@@ -56,8 +56,9 @@ type Broadcaster struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 
-	mu      sync.Mutex
-	started bool
+	mu       sync.Mutex
+	started  bool
+	acceptWg sync.WaitGroup
 
 	transferCloseTimeout time.Duration
 }
@@ -216,9 +217,14 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	b.info("nethernet broadcaster started", "network_id", signalingNetworkID(sig), "signaling_mode", mode)
 	b.debug("started nethernet listener")
 
-	go b.accept()
+	b.acceptWg.Add(1)
+	go func() {
+		defer b.acceptWg.Done()
+		b.acceptListener(b.listener)
+	}()
 	go func() {
 		<-b.ctx.Done()
+		b.acceptWg.Wait()
 		close(b.done)
 	}()
 	go b.updateLoop()
@@ -928,10 +934,6 @@ func (b *Broadcaster) notifySessionUpdateFailure(ctx context.Context, err error)
 	b.notify(ctx, "Xbox session update failed: "+err.Error())
 }
 
-func (b *Broadcaster) accept() {
-	b.acceptListener(b.listener)
-}
-
 func (b *Broadcaster) acceptListener(l *minecraft.Listener) {
 	for {
 		conn, err := l.Accept()
@@ -1217,8 +1219,11 @@ func (b *Broadcaster) recreateSession() error {
 	b.listener = l
 	b.info("nethernet broadcaster started", "network_id", signalingNetworkID(sig), "signaling_mode", mode)
 
-	go b.acceptListener(l)
-	go b.uploadGalleryWithTimeout()
+	b.acceptWg.Add(1)
+	go func() {
+		defer b.acceptWg.Done()
+		b.acceptListener(l)
+	}()
 	return nil
 }
 
