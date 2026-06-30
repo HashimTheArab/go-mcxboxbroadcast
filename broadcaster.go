@@ -217,10 +217,11 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	b.info("nethernet broadcaster started", "network_id", signalingNetworkID(sig), "signaling_mode", mode)
 	b.debug("started nethernet listener")
 
+	startListener := b.listener
 	b.acceptWg.Add(1)
 	go func() {
 		defer b.acceptWg.Done()
-		b.acceptListener(b.listener)
+		b.acceptListener(startListener)
 	}()
 	go func() {
 		<-b.ctx.Done()
@@ -1165,27 +1166,39 @@ func (b *Broadcaster) recreateSession() error {
 	b.signaling = sig
 	b.debug("nethernet signaling re-created", "signaling_mode", mode, "network_id", signalingNetworkID(sig))
 
+	closeSignaling := func() {
+		if c, ok := sig.(interface{ Close() error }); ok {
+			_ = c.Close()
+		}
+		b.signaling = nil
+	}
+
 	status, err := b.status(b.ctx)
 	if err != nil {
+		closeSignaling()
 		return fmt.Errorf("re-create session status: %w", err)
 	}
 	announcer, err := b.newAnnouncer(b.ctx)
 	if err != nil {
+		closeSignaling()
 		return fmt.Errorf("re-create announcer: %w", err)
 	}
 	b.announcer = loggingAnnouncer{Announcer: announcer, log: b.log}
 	connection, err := b.signalingConnection(b.ctx, sig)
 	if err != nil {
+		closeSignaling()
 		return fmt.Errorf("re-create signaling connection: %w", err)
 	}
 	if connection != nil {
 		b.announcer = signalingConnectionAnnouncer{Announcer: b.announcer, connection: *connection}
 	}
 	if err := b.announcer.Announce(b.ctx, status); err != nil {
+		closeSignaling()
 		return fmt.Errorf("re-announce session: %w", err)
 	}
 	if err := b.startSubAccounts(b.ctx); err != nil {
 		_ = b.cleanupPublishedSessions(true)
+		closeSignaling()
 		return fmt.Errorf("re-create sub-accounts: %w", err)
 	}
 
@@ -1214,6 +1227,7 @@ func (b *Broadcaster) recreateSession() error {
 	l, err := listenConf.Listen("nethernet", "")
 	if err != nil {
 		_ = b.cleanupPublishedSessions(true)
+		closeSignaling()
 		return fmt.Errorf("re-listen nethernet: %w", err)
 	}
 	b.listener = l
