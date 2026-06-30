@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/sandertv/gophertunnel/minecraft/p2p"
 	"github.com/sandertv/gophertunnel/minecraft/room"
 )
 
@@ -42,7 +43,7 @@ func TestStatusDefaults(t *testing.T) {
 	if status.OwnerID != "123" {
 		t.Fatalf("unexpected owner id %q", status.OwnerID)
 	}
-	if status.TransportLayer != room.TransportLayerNetherNet {
+	if status.TransportLayer != p2p.TransportLayerNetherNet {
 		t.Fatalf("unexpected transport layer %d", status.TransportLayer)
 	}
 	if status.TitleID != 0 {

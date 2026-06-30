@@ -313,10 +313,8 @@ func (b *Broadcaster) netherNetTransportTimeoutLogValue() string {
 	return "custom"
 }
 
-func defaultNetherNetConnContext(parent context.Context, _ *nethernet.Conn) context.Context {
-	ctx, cancel := context.WithTimeout(parent, defaultNetherNetConnTimeout)
-	context.AfterFunc(ctx, cancel)
-	return ctx
+func defaultNetherNetConnContext(parent context.Context, _ *nethernet.Conn) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, defaultNetherNetConnTimeout)
 }
 
 func (b *Broadcaster) minecraftStatusProvider(status room.Status) minecraft.ServerStatusProvider {
@@ -869,7 +867,7 @@ func roomStatusLogArgs(status room.Status) []any {
 }
 
 type roomConnectionLogValue struct {
-	ConnectionType uint32
+	ConnectionType int
 	HostIPAddress  string
 	HostPort       uint16
 	NetherNetID    string

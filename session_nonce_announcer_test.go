@@ -10,6 +10,7 @@ import (
 
 	"github.com/df-mc/go-xsapi/v2/mpsd"
 	"github.com/google/uuid"
+	"github.com/sandertv/gophertunnel/minecraft/p2p"
 	"github.com/sandertv/gophertunnel/minecraft/room"
 )
 
@@ -24,10 +25,10 @@ func TestMarshalStatusWithNoncesIncludesJavaSessionFields(t *testing.T) {
 		Version:        "1.26.30",
 		TitleID:        0,
 		LevelID:        "level",
-		TransportLayer: room.TransportLayerNetherNet,
+		TransportLayer: p2p.TransportLayerNetherNet,
 		SupportedConnections: []room.Connection{{
-			ConnectionType: room.ConnectionTypeJSONRPCSignaling,
-			NetherNetID:    room.NetherNetID("123456789"),
+			ConnectionType: p2p.ConnectionTypeSignalingOverJSONRPC,
+			NetherNetID:    p2p.NetherNetID("123456789"),
 			PmsgID:         pmsgID,
 		}},
 	}, map[string]string{"200": "0102030405060708"})
@@ -51,7 +52,7 @@ func TestMarshalStatusWithNoncesIncludesJavaSessionFields(t *testing.T) {
 	}
 	connections := got["SupportedConnections"].([]any)
 	connection := connections[0].(map[string]any)
-	if connection["ConnectionType"] != float64(room.ConnectionTypeJSONRPCSignaling) {
+	if connection["ConnectionType"] != float64(p2p.ConnectionTypeSignalingOverJSONRPC) {
 		t.Fatalf("unexpected connection type: %#v", connection)
 	}
 	if connection["PmsgId"] != pmsgID.String() {
@@ -199,7 +200,7 @@ func TestSessionNonceAnnouncerRepublishClearsNonceState(t *testing.T) {
 func TestSessionNonceAnnouncerDoesNotNoOpWithoutSession(t *testing.T) {
 	status := room.Status{
 		WorldName:        "World",
-		BroadcastSetting: room.BroadcastSettingFriendsOfFriends,
+		BroadcastSetting: p2p.BroadcastSettingFriendsOfFriends,
 	}
 	custom, err := marshalStatusWithNonces(status, nil)
 	if err != nil {

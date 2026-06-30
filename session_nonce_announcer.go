@@ -14,6 +14,7 @@ import (
 
 	"github.com/df-mc/go-xsapi/v2/mpsd"
 	"github.com/google/uuid"
+	"github.com/sandertv/gophertunnel/minecraft/p2p"
 	"github.com/sandertv/gophertunnel/minecraft/room"
 )
 
@@ -138,11 +139,11 @@ func (a *sessionNonceAnnouncer) publishRestrictions(status room.Status) (read, j
 	return read, join
 }
 
-func sessionRestrictions(setting int32) (read, join string) {
+func sessionRestrictions(setting p2p.BroadcastSetting) (read, join string) {
 	switch setting {
-	case room.BroadcastSettingFriendsOfFriends, room.BroadcastSettingFriendsOnly:
+	case p2p.BroadcastSettingFriendsOfFriends, p2p.BroadcastSettingFriendsOnly:
 		return mpsd.SessionRestrictionFollowed, mpsd.SessionRestrictionFollowed
-	case room.BroadcastSettingInviteOnly:
+	case p2p.BroadcastSettingInviteOnly:
 		return mpsd.SessionRestrictionLocal, mpsd.SessionRestrictionFollowed
 	default:
 		return mpsd.SessionRestrictionFollowed, mpsd.SessionRestrictionFollowed

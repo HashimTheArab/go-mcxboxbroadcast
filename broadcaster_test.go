@@ -18,6 +18,7 @@ import (
 	"github.com/df-mc/go-xsapi/v2"
 	"github.com/df-mc/go-xsapi/v2/mpsd"
 	"github.com/google/uuid"
+	"github.com/sandertv/gophertunnel/minecraft/p2p"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/login"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
 	"github.com/sandertv/gophertunnel/minecraft/room"
@@ -162,7 +163,7 @@ func TestXBLAnnouncerUnwrapsDiagnosticsWrappers(t *testing.T) {
 	wrapped := signalingConnectionAnnouncer{
 		Announcer: loggingAnnouncer{Announcer: inner},
 		connection: room.Connection{
-			ConnectionType: room.ConnectionTypeJSONRPCSignaling,
+			ConnectionType: p2p.ConnectionTypeSignalingOverJSONRPC,
 		},
 	}
 	got, ok := xblAnnouncer(wrapped)
@@ -345,9 +346,8 @@ type cancelableSignaling struct {
 }
 
 func (s *cancelableSignaling) Signal(context.Context, *nethernet.Signal) error { return nil }
-func (s *cancelableSignaling) Notify() (<-chan *nethernet.Signal, func()) {
-	ch := make(chan *nethernet.Signal)
-	return ch, func() {}
+func (s *cancelableSignaling) Notify(nethernet.Notifier) func() {
+	return func() {}
 }
 func (s *cancelableSignaling) Context() context.Context { return s.ctx }
 func (s *cancelableSignaling) Credentials(context.Context) (*nethernet.Credentials, error) {
@@ -362,7 +362,8 @@ func TestBroadcasterUsesLongerDefaultNetherNetTransportTimeout(t *testing.T) {
 	if conf.ConnContext == nil {
 		t.Fatal("default nethernet ConnContext missing")
 	}
-	ctx := conf.ConnContext(context.Background(), nil)
+	ctx, cancel := conf.ConnContext(context.Background(), nil)
+	defer cancel()
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		t.Fatal("default nethernet ConnContext has no deadline")
@@ -384,14 +385,15 @@ func TestBroadcasterPreservesCustomNetherNetTransportContext(t *testing.T) {
 	want := context.WithValue(context.Background(), contextKey{}, "custom")
 	called := false
 	b := &Broadcaster{conf: Config{NetherNetListenConfig: nethernet.ListenConfig{
-		ConnContext: func(context.Context, *nethernet.Conn) context.Context {
+		ConnContext: func(ctx context.Context, _ *nethernet.Conn) (context.Context, context.CancelFunc) {
 			called = true
-			return want
+			return want, func() {}
 		},
 	}}}
 
 	conf := b.netherNetListenConfig()
-	got := conf.ConnContext(context.Background(), nil)
+	got, cancel := conf.ConnContext(context.Background(), nil)
+	defer cancel()
 	if !called {
 		t.Fatal("custom nethernet ConnContext was not called")
 	}

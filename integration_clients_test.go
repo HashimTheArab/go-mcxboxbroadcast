@@ -17,6 +17,7 @@ import (
 	"github.com/df-mc/go-nethernet"
 	"github.com/google/uuid"
 	"github.com/sandertv/gophertunnel/minecraft"
+	"github.com/sandertv/gophertunnel/minecraft/p2p"
 	"github.com/sandertv/gophertunnel/minecraft/room"
 	"github.com/sandertv/gophertunnel/minecraft/service"
 )
@@ -349,7 +350,7 @@ func TestRoomStatusProviderNormalizesConfiguredProvider(t *testing.T) {
 	if status.OwnerID != "123" {
 		t.Fatalf("provider owner id = %q", status.OwnerID)
 	}
-	if status.TransportLayer != room.TransportLayerNetherNet {
+	if status.TransportLayer != p2p.TransportLayerNetherNet {
 		t.Fatalf("provider transport layer = %d", status.TransportLayer)
 	}
 	if status.TitleID != 0 {
@@ -386,8 +387,8 @@ func TestRoomListenerDoesNotOverridePublishedStatusWithMinecraftPong(t *testing.
 		announcer: signalingConnectionAnnouncer{
 			Announcer: inner,
 			connection: room.Connection{
-				ConnectionType: room.ConnectionTypeJSONRPCSignaling,
-				NetherNetID:    room.NetherNetID("123456789"),
+				ConnectionType: p2p.ConnectionTypeSignalingOverJSONRPC,
+				NetherNetID:    p2p.NetherNetID("123456789"),
 				PmsgID:         pmsgID,
 			},
 		},
@@ -398,7 +399,7 @@ func TestRoomListenerDoesNotOverridePublishedStatusWithMinecraftPong(t *testing.
 		WorldType:      WorldTypeSurvival,
 		MemberCount:    1,
 		MaxMemberCount: 20,
-		TransportLayer: room.TransportLayerNetherNet,
+		TransportLayer: p2p.TransportLayerNetherNet,
 	}).Wrap(fakeNetworkListener{
 		addr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 19132},
 	})
@@ -421,8 +422,8 @@ func TestRoomListenerDoesNotOverridePublishedStatusWithMinecraftPong(t *testing.
 		t.Fatalf("unexpected supported connections: %#v", status.SupportedConnections)
 	}
 	connection := status.SupportedConnections[0]
-	if connection.ConnectionType != room.ConnectionTypeJSONRPCSignaling ||
-		connection.NetherNetID != room.NetherNetID("123456789") ||
+	if connection.ConnectionType != p2p.ConnectionTypeSignalingOverJSONRPC ||
+		connection.NetherNetID != p2p.NetherNetID("123456789") ||
 		connection.PmsgID != pmsgID {
 		t.Fatalf("json-rpc connection was not preserved: %#v", connection)
 	}
@@ -434,16 +435,16 @@ func TestSignalingConnectionAnnouncerPublishesJSONRPCConnection(t *testing.T) {
 	announcer := signalingConnectionAnnouncer{
 		Announcer: inner,
 		connection: room.Connection{
-			ConnectionType: room.ConnectionTypeJSONRPCSignaling,
-			NetherNetID:    room.NetherNetID("123456789"),
+			ConnectionType: p2p.ConnectionTypeSignalingOverJSONRPC,
+			NetherNetID:    p2p.NetherNetID("123456789"),
 			PmsgID:         pmsgID,
 		},
 	}
 
 	err := announcer.Announce(context.Background(), room.Status{
 		SupportedConnections: []room.Connection{{
-			ConnectionType: room.ConnectionTypeWebSocketsWebRTCSignaling,
-			NetherNetID:    room.NetherNetID("old"),
+			ConnectionType: p2p.ConnectionTypeSignalingOverWebSocket,
+			NetherNetID:    p2p.NetherNetID("old"),
 		}},
 	})
 	if err != nil {
@@ -454,10 +455,10 @@ func TestSignalingConnectionAnnouncerPublishesJSONRPCConnection(t *testing.T) {
 		t.Fatalf("unexpected connections: %#v", status.SupportedConnections)
 	}
 	got := status.SupportedConnections[0]
-	if got.ConnectionType != room.ConnectionTypeJSONRPCSignaling {
-		t.Fatalf("connection type = %d, want %d", got.ConnectionType, room.ConnectionTypeJSONRPCSignaling)
+	if got.ConnectionType != p2p.ConnectionTypeSignalingOverJSONRPC {
+		t.Fatalf("connection type = %d, want %d", got.ConnectionType, p2p.ConnectionTypeSignalingOverJSONRPC)
 	}
-	if got.NetherNetID != room.NetherNetID("123456789") {
+	if got.NetherNetID != p2p.NetherNetID("123456789") {
 		t.Fatalf("nethernet id = %q", got.NetherNetID)
 	}
 	if got.PmsgID != pmsgID {
@@ -494,10 +495,10 @@ func TestStartAdvertisesJSONRPCConnectionWhenConfigured(t *testing.T) {
 		t.Fatalf("unexpected connections: %#v", status.SupportedConnections)
 	}
 	got := status.SupportedConnections[0]
-	if got.ConnectionType != room.ConnectionTypeJSONRPCSignaling {
-		t.Fatalf("connection type = %d, want %d", got.ConnectionType, room.ConnectionTypeJSONRPCSignaling)
+	if got.ConnectionType != p2p.ConnectionTypeSignalingOverJSONRPC {
+		t.Fatalf("connection type = %d, want %d", got.ConnectionType, p2p.ConnectionTypeSignalingOverJSONRPC)
 	}
-	if got.NetherNetID != room.NetherNetID("123456789") {
+	if got.NetherNetID != p2p.NetherNetID("123456789") {
 		t.Fatalf("nethernet id = %q", got.NetherNetID)
 	}
 	if got.PmsgID != pmsgID {
@@ -506,7 +507,7 @@ func TestStartAdvertisesJSONRPCConnectionWhenConfigured(t *testing.T) {
 	if status.OwnerID != "123" {
 		t.Fatalf("owner id = %q", status.OwnerID)
 	}
-	if status.TransportLayer != room.TransportLayerNetherNet {
+	if status.TransportLayer != p2p.TransportLayerNetherNet {
 		t.Fatalf("transport layer = %d", status.TransportLayer)
 	}
 	if status.TitleID != 0 {
@@ -576,7 +577,7 @@ func TestStartAdvertisesOpaqueNetherNetID(t *testing.T) {
 	if len(status.SupportedConnections) != 1 {
 		t.Fatalf("unexpected connections: %#v", status.SupportedConnections)
 	}
-	if got := status.SupportedConnections[0].NetherNetID; got != room.NetherNetID(networkID) {
+	if got := status.SupportedConnections[0].NetherNetID; got != p2p.NetherNetID(networkID) {
 		t.Fatalf("nethernet id = %q, want %q", got, networkID)
 	}
 }
@@ -820,12 +821,8 @@ type fakeSignaling struct {
 }
 
 func (f *fakeSignaling) Signal(context.Context, *nethernet.Signal) error { return nil }
-func (f *fakeSignaling) Notify() (<-chan *nethernet.Signal, func()) {
-	ch := make(chan *nethernet.Signal)
-	var once sync.Once
-	return ch, func() {
-		once.Do(func() { close(ch) })
-	}
+func (f *fakeSignaling) Notify(nethernet.Notifier) func() {
+	return func() {}
 }
 func (f *fakeSignaling) Context() context.Context { return context.Background() }
 func (f *fakeSignaling) Credentials(context.Context) (*nethernet.Credentials, error) {

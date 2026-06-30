@@ -10,6 +10,7 @@ import (
 
 	"github.com/df-mc/go-nethernet"
 	"github.com/google/uuid"
+	"github.com/sandertv/gophertunnel/minecraft/p2p"
 	"github.com/sandertv/gophertunnel/minecraft/room"
 )
 
@@ -63,8 +64,8 @@ func (b *Broadcaster) signalingConnection(ctx context.Context, sig nethernet.Sig
 		return nil, err
 	}
 	return &room.Connection{
-		ConnectionType: room.ConnectionTypeJSONRPCSignaling,
-		NetherNetID:    room.NetherNetID(networkID),
+		ConnectionType: p2p.ConnectionTypeSignalingOverJSONRPC,
+		NetherNetID:    p2p.NetherNetID(networkID),
 		PmsgID:         pmsgID,
 	}, nil
 }
