@@ -263,8 +263,8 @@ func (b *Broadcaster) friendSyncer() FriendSyncer {
 		History: b.conf.FriendHistory,
 		Log:     b.log,
 	}
-	if announcer, ok := xblAnnouncer(b.announcer); ok && announcer.Session != nil {
-		syncer.Inviter = sessionInviter{session: announcer.Session}
+	if b.conf.FriendSync.InitialInvite {
+		syncer.Inviter = &broadcasterInviter{b: b}
 	}
 	return syncer
 }
@@ -421,6 +421,21 @@ func authenticatedHTTPClient(client *xsapi.Client, fallback *http.Client) *http.
 		}
 	}
 	return fallback
+}
+
+type broadcasterInviter struct {
+	b *Broadcaster
+}
+
+func (i *broadcasterInviter) Invite(ctx context.Context, xuid, titleID string) error {
+	i.b.mu.Lock()
+	announcer, ok := xblAnnouncer(i.b.announcer)
+	i.b.mu.Unlock()
+	if !ok || announcer.Session == nil {
+		return errors.New("invite: no active MPSD session")
+	}
+	_, err := announcer.Session.Invite(ctx, xuid, titleID)
+	return err
 }
 
 type loggingAnnouncer struct {
