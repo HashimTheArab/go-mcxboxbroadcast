@@ -177,23 +177,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 		return err
 	}
 
-	minecraft.RegisterNetwork("nethernet", func(l *slog.Logger) minecraft.Network {
-		netherNetListenConfig := b.netherNetListenConfig()
-		return room.Network{
-			Network: minecraft.NetherNet{
-				Signaling: sig,
-				ListenConfig: nethernet.ListenConfig{
-					Log:                b.log,
-					ConnContext:        netherNetListenConfig.ConnContext,
-					NegotiationContext: netherNetListenConfig.NegotiationContext,
-					ICEGatherPolicy:    netherNetListenConfig.ICEGatherPolicy,
-					DisableTrickleICE:  netherNetListenConfig.DisableTrickleICE,
-					API:                netherNetListenConfig.API,
-				},
-			},
-			ListenConfig: b.roomListenConfig(status),
-		}
-	})
+	b.registerNetherNetNetwork(sig, status)
 
 	listenConf := b.conf.ListenConfig
 	listenConf.ErrorLog = b.log
@@ -307,6 +291,15 @@ func (b *Broadcaster) netherNetListenConfig() nethernet.ListenConfig {
 		conf.ConnContext = defaultNetherNetConnContext
 	}
 	return conf
+}
+
+func (b *Broadcaster) registerNetherNetNetwork(sig nethernet.Signaling, status room.Status) {
+	minecraft.RegisterNetwork("nethernet", func(l *slog.Logger) minecraft.Network {
+		return room.Network{
+			Network:      minecraft.NetherNet{Signaling: sig, ListenConfig: b.netherNetListenConfig(), Log: b.log},
+			ListenConfig: b.roomListenConfig(status),
+		}
+	})
 }
 
 func (b *Broadcaster) usesDefaultNetherNetConnContext() bool {
@@ -1130,8 +1123,9 @@ func (b *Broadcaster) watchSignaling() {
 		b.warn("connection to signaling lost, re-creating session...",
 			"cause", context.Cause(sig.Context()))
 		if err := b.recreateSession(); err != nil {
-			b.log.Error("re-create session failed", "err", err)
-			b.notify(b.ctx, "Signaling reconnection failed: "+err.Error())
+			b.log.Error("re-create session failed, shutting down", "err", err)
+			b.notify(b.ctx, "Signaling reconnection failed, shutting down: "+err.Error())
+			b.cancel()
 			return
 		}
 		b.info("signaling session reconnected")
@@ -1202,23 +1196,7 @@ func (b *Broadcaster) recreateSession() error {
 		return fmt.Errorf("re-create sub-accounts: %w", err)
 	}
 
-	minecraft.RegisterNetwork("nethernet", func(l *slog.Logger) minecraft.Network {
-		netherNetListenConfig := b.netherNetListenConfig()
-		return room.Network{
-			Network: minecraft.NetherNet{
-				Signaling: sig,
-				ListenConfig: nethernet.ListenConfig{
-					Log:                b.log,
-					ConnContext:        netherNetListenConfig.ConnContext,
-					NegotiationContext: netherNetListenConfig.NegotiationContext,
-					ICEGatherPolicy:    netherNetListenConfig.ICEGatherPolicy,
-					DisableTrickleICE:  netherNetListenConfig.DisableTrickleICE,
-					API:                netherNetListenConfig.API,
-				},
-			},
-			ListenConfig: b.roomListenConfig(status),
-		}
-	})
+	b.registerNetherNetNetwork(sig, status)
 
 	listenConf := b.conf.ListenConfig
 	listenConf.ErrorLog = b.log
