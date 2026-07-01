@@ -294,6 +294,9 @@ func (b *Broadcaster) minecraftListenConfig(status room.Status) minecraft.Listen
 	conf.ErrorLog = b.log
 	conf.StatusProvider = b.minecraftStatusProvider(status)
 	conf.AuthenticationDisabled = true
+	conf.ForceDisableVibrantVisuals = true
+	conf.ResourcePackWorldTemplateUUID = uuid.New()
+	conf.ResourcePackWorldTemplateVersion = "*"
 	if b.debugEnabled() && conf.PacketFunc == nil {
 		conf.PacketFunc = b.logMinecraftPacket
 	}

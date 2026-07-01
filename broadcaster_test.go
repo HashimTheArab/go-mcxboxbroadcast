@@ -227,6 +227,12 @@ func TestMinecraftListenConfigKeepsFullLoginFlow(t *testing.T) {
 	if conf.DisablePacketHandling {
 		t.Fatal("expected listener to wait for resource-pack login flow")
 	}
+	if !conf.ForceDisableVibrantVisuals {
+		t.Fatal("expected listener to force-disable vibrant visuals")
+	}
+	if conf.ResourcePackWorldTemplateUUID == uuid.Nil || conf.ResourcePackWorldTemplateVersion != "*" {
+		t.Fatalf("unexpected resource-pack template metadata: uuid=%s version=%q", conf.ResourcePackWorldTemplateUUID, conf.ResourcePackWorldTemplateVersion)
+	}
 }
 
 func TestMinecraftListenConfigKeepsCustomPacketFunc(t *testing.T) {
