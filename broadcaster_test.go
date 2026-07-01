@@ -380,6 +380,14 @@ func TestBroadcasterUsesLongerDefaultNetherNetTransportTimeout(t *testing.T) {
 	}
 }
 
+func TestBroadcasterAllowsAnonymousNetherNetByDefault(t *testing.T) {
+	b := &Broadcaster{}
+	conf := b.netherNetListenConfig()
+	if !conf.AllowAnonymous {
+		t.Fatal("default nethernet listener should allow anonymous offers for Lunar friend-world compatibility")
+	}
+}
+
 func TestBroadcasterPreservesCustomNetherNetTransportContext(t *testing.T) {
 	type contextKey struct{}
 	want := context.WithValue(context.Background(), contextKey{}, "custom")

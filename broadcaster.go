@@ -294,6 +294,7 @@ func (b *Broadcaster) roomListenConfig(status room.Status) room.ListenConfig {
 // netherNetListenConfig returns the nethernet listen config with a default conn context applied.
 func (b *Broadcaster) netherNetListenConfig() nethernet.ListenConfig {
 	conf := b.conf.NetherNetListenConfig
+	conf.AllowAnonymous = true
 	if conf.ConnContext == nil {
 		conf.ConnContext = defaultNetherNetConnContext
 	}
