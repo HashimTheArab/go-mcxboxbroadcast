@@ -142,6 +142,75 @@ func TestNewLiveTokenSourceUsesContextHTTPClientForRefresh(t *testing.T) {
 	}
 }
 
+func TestLiveTokenSourcePersistsRotatedRefreshTokens(t *testing.T) {
+	client := &http.Client{Transport: tokenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return tokenTestResponse(http.StatusOK, `{"access_token":"new-access","token_type":"bearer","refresh_token":"rotated-refresh","expires_in":3600}`), nil
+	})}
+	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, client)
+	var persisted []*oauth2.Token
+	src := NewLiveTokenSourceWithPersist(ctx, &oauth2.Token{
+		AccessToken:  "old-access",
+		RefreshToken: "old-refresh",
+		Expiry:       time.Now().Add(-time.Hour),
+	}, io.Discard, func(tok *oauth2.Token) {
+		persisted = append(persisted, tok)
+	})
+
+	if _, err := src.Token(); err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted) != 1 || persisted[0].RefreshToken != "rotated-refresh" {
+		t.Fatalf("persisted tokens = %#v, want one with rotated-refresh", persisted)
+	}
+}
+
+func TestLiveTokenSourceDoesNotFallBackToDeviceCodeOnTransientRefreshError(t *testing.T) {
+	client := &http.Client{Transport: tokenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return nil, errors.New("network down")
+	})}
+	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, client)
+	src := NewLiveTokenSource(ctx, &oauth2.Token{
+		AccessToken:  "old-access",
+		RefreshToken: "old-refresh",
+		Expiry:       time.Now().Add(-time.Hour),
+	}, io.Discard)
+
+	if _, err := src.Token(); err == nil {
+		t.Fatal("expected transient refresh error to surface")
+	}
+}
+
+func TestLiveTokenSourceFallsBackToDeviceCodeWhenRefreshRejected(t *testing.T) {
+	// The device-code flow starts with a POST to the device-code endpoint; the
+	// fallback is detected by observing that request after a refresh rejection.
+	var urls []string
+	client := &http.Client{Transport: tokenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		urls = append(urls, req.URL.String())
+		if req.URL.String() == "https://login.live.com/oauth20_token.srf" {
+			return tokenTestResponse(http.StatusBadRequest, `{"error":"invalid_grant","error_description":"expired"}`), nil
+		}
+		return nil, errors.New("stop device-code flow")
+	})}
+	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, client)
+	src := NewLiveTokenSource(ctx, &oauth2.Token{
+		AccessToken:  "old-access",
+		RefreshToken: "old-refresh",
+		Expiry:       time.Now().Add(-time.Hour),
+	}, io.Discard)
+
+	_, err := src.Token()
+	if err == nil {
+		t.Fatal("expected error from aborted device-code flow")
+	}
+	if len(urls) < 2 {
+		t.Fatalf("requests = %v, want refresh followed by device-code fallback", urls)
+	}
+	var refreshErr *liveRefreshError
+	if errors.As(err, &refreshErr) {
+		t.Fatalf("refresh rejection should have been superseded by device-code fallback, got %v", err)
+	}
+}
+
 func TestMinecraftTokenDiagnosticsFormatsPlayerBannedError(t *testing.T) {
 	baseErr := errors.New(`minecraft/service: PlayerBanned: "Player 2535433454914320 is banned." ()`)
 	src := withMinecraftTokenDiagnostics(failingMinecraftTokenSource{err: baseErr})

@@ -53,6 +53,25 @@ func (s *FileHistoryStore) Seen(ctx context.Context, xuid string, when time.Time
 	return s.save(history)
 }
 
+// XUIDs returns every XUID with a recorded last-seen time.
+func (s *FileHistoryStore) XUIDs(ctx context.Context) ([]string, error) {
+	if err := ctxErr(ctx); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	history, err := s.load()
+	if err != nil {
+		return nil, err
+	}
+	xuids := make([]string, 0, len(history))
+	for xuid := range history {
+		xuids = append(xuids, xuid)
+	}
+	return xuids, nil
+}
+
 func (s *FileHistoryStore) Clear(ctx context.Context, xuid string) error {
 	if err := ctxErr(ctx); err != nil {
 		return err

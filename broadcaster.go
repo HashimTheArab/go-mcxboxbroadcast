@@ -60,7 +60,14 @@ type Broadcaster struct {
 	started  bool
 	acceptWg sync.WaitGroup
 
+	// lastQuery is the most recent successful target-server query, kept so
+	// query failures fall back to real data instead of failing the update.
+	lastQuery *minecraft.ServerStatus
+
 	transferCloseTimeout time.Duration
+	// subAccountSettleDelay is the wait after establishing a new sub-account
+	// friendship before joining the session.
+	subAccountSettleDelay time.Duration
 }
 
 type transferConn interface {
@@ -107,7 +114,12 @@ func New(conf Config) (*Broadcaster, error) {
 	if conf.UpdateInterval < 20*time.Second {
 		conf.UpdateInterval = 20 * time.Second
 	}
-	return &Broadcaster{conf: conf, log: conf.Log.With("src", "broadcaster")}, nil
+	return &Broadcaster{
+		conf:                  conf,
+		log:                   conf.Log.With("src", "broadcaster"),
+		transferCloseTimeout:  conf.TransferCloseTimeout,
+		subAccountSettleDelay: 5 * time.Second,
+	}, nil
 }
 
 // Start publishes the Xbox session and starts accepting NetherNet clients.
@@ -164,6 +176,12 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	if connection != nil {
 		b.announcer = signalingConnectionAnnouncer{Announcer: b.announcer, connection: *connection}
 		b.debug("using jsonrpc signaling", "nethernet_id", connection.NetherNetID, "pmsg_id", connection.PmsgID)
+	} else if len(status.SupportedConnections) == 0 {
+		// Without a signaling connection or caller-provided connections the
+		// session would publish SupportedConnections: null and be unjoinable.
+		b.cancel()
+		err := errors.New("session would publish no supported connections and be unjoinable; use jsonrpc signaling or provide SupportedConnections via a status provider")
+		return errors.Join(err, b.cleanupStartupFailure(true))
 	}
 	b.info("creating xbox live session")
 	if err := b.announcer.Announce(b.ctx, status); err != nil {
@@ -228,7 +246,53 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 		)
 		go b.friendSyncer().Run(b.ctx)
 	}
+	b.startSubAccountFriendSync()
+	go b.logSocialSummary()
 	return nil
+}
+
+// startSubAccountFriendSync runs a friend syncer per enabled sub-account so
+// people who friend a sub-account are followed back. Sub-accounts without an
+// explicit FriendSync configuration inherit the primary account's.
+func (b *Broadcaster) startSubAccountFriendSync() {
+	for _, account := range b.conf.SubAccounts {
+		if !account.Enabled || account.XBLClient == nil {
+			continue
+		}
+		conf := account.FriendSync
+		if conf == nil {
+			conf = b.conf.FriendSync
+		}
+		if conf == nil {
+			continue
+		}
+		syncer := FriendSyncer{
+			Client:   b.friendClientFor(account.XBLClient),
+			Config:   *conf,
+			History:  b.conf.FriendHistory,
+			Notifier: b.conf.Notifier,
+			Log:      b.log.With("sub_account", account.ID),
+		}
+		b.debug("starting sub-account friend sync", "sub_account", account.ID)
+		go syncer.Run(b.ctx)
+	}
+}
+
+// logSocialSummary logs the authenticated account and its friend usage at
+// startup, mirroring MCXboxBroadcast's "N/2000 friends" line.
+func (b *Broadcaster) logSocialSummary() {
+	ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
+	defer cancel()
+	summary, err := b.friendClientFor(b.conf.XBLClient).Summary(ctx)
+	if err != nil {
+		b.debug("fetch social summary", "err", err)
+		return
+	}
+	b.info("authenticated to xbox live",
+		"gamertag", b.hostNameFallback(),
+		"xuid", b.primaryXUID(),
+		"friends", fmt.Sprintf("%d/2000", summary.TargetFollowingCount),
+	)
 }
 
 // presenceClients builds the list of Xbox presence clients for heartbeat updates.
@@ -259,10 +323,13 @@ func (b *Broadcaster) presenceClients() []PresenceClient {
 // friendSyncer creates a FriendSyncer from the broadcaster's current config.
 func (b *Broadcaster) friendSyncer() FriendSyncer {
 	syncer := FriendSyncer{
-		Client:  b.friendClientFor(b.conf.XBLClient),
-		Config:  *b.conf.FriendSync,
-		History: b.conf.FriendHistory,
-		Log:     b.log,
+		Client:   b.friendClientFor(b.conf.XBLClient),
+		Config:   *b.conf.FriendSync,
+		History:  b.conf.FriendHistory,
+		Notifier: b.conf.Notifier,
+		// Only the primary account prunes the shared history store.
+		PruneHistory: true,
+		Log:          b.log,
 	}
 	if b.conf.FriendSync.InitialInvite {
 		syncer.Inviter = &broadcasterInviter{b: b}
@@ -289,11 +356,13 @@ func (b *Broadcaster) roomListenConfig(status room.Status) room.ListenConfig {
 }
 
 // minecraftListenConfig applies broadcaster defaults to a Minecraft listener.
+// Client authentication follows ListenConfig.AuthenticationDisabled: chains
+// are validated by default like MCXboxBroadcast, so player history only
+// records verified XUIDs.
 func (b *Broadcaster) minecraftListenConfig(status room.Status) minecraft.ListenConfig {
 	conf := b.conf.ListenConfig
 	conf.ErrorLog = b.log
 	conf.StatusProvider = b.minecraftStatusProvider(status)
-	conf.AuthenticationDisabled = true
 	conf.CompressionThreshold = -1
 	conf.ForceDisableVibrantVisuals = true
 	conf.ResourcePackWorldTemplateUUID = uuid.New()
@@ -720,7 +789,9 @@ func (b *Broadcaster) newAnnouncer(ctx context.Context) (room.Announcer, error) 
 	}, b.primaryXUID(), b.log), nil
 }
 
-// startSubAccounts publishes MPSD sessions for all enabled sub-accounts.
+// startSubAccounts joins the primary session with all enabled sub-accounts.
+// A failing sub-account is logged and skipped so it cannot take down the
+// broadcaster, matching MCXboxBroadcast.
 func (b *Broadcaster) startSubAccounts(ctx context.Context) error {
 	for i := range b.conf.SubAccounts {
 		account := &b.conf.SubAccounts[i]
@@ -737,38 +808,48 @@ func (b *Broadcaster) startSubAccounts(ctx context.Context) error {
 			b.log.Warn("sub-account skipped because xbox live credentials are missing", "sub_account", account.ID)
 			continue
 		}
-		if _, err := b.subAccountXBLClient(ctx, account); err != nil {
-			return fmt.Errorf("prepare sub-account %q xbox live client: %w", account.ID, err)
+		if err := b.startSubAccount(ctx, account); err != nil {
+			b.log.Error("start sub-account; continuing without it", "sub_account", account.ID, "err", err)
+			b.notify(ctx, "Sub-account "+account.ID+" failed to start: "+err.Error())
 		}
-		if account.XUID == "" {
-			account.XUID = accountXUID(*account)
-		}
-		if account.XUID == "" {
-			b.log.Warn("sub-account xuid unavailable", "sub_account", account.ID)
-		}
-		if err := b.ensureSubAccountMutualFollow(ctx, *account); err != nil {
-			return fmt.Errorf("prepare sub-account %q mutual follow: %w", account.ID, err)
-		}
-		pub := account.PublishConfig
-		b.debug("publishing sub-account session",
-			"sub_account", account.ID,
-			"xuid", account.XUID,
-			"session_name", b.sessionRef.Name,
-			"join_restriction", defaultString(pub.JoinRestriction, mpsd.SessionRestrictionFollowed),
-			"read_restriction", defaultString(pub.ReadRestriction, mpsd.SessionRestrictionFollowed),
-		)
-		s, err := b.publishSubAccount(ctx, *account, pub)
-		if err != nil {
-			return fmt.Errorf("start sub-account %q: %w", account.ID, err)
-		}
-		b.subSessions = append(b.subSessions, s)
-		b.debug("published sub-account session", "sub_account", account.ID, "xuid", account.XUID)
 	}
 	return nil
 }
 
-// publishSubAccount publishes a single sub-account's MPSD session.
-func (b *Broadcaster) publishSubAccount(ctx context.Context, account SubAccountConfig, pub mpsd.PublishConfig) (*mpsd.Session, error) {
+// startSubAccount prepares one sub-account and joins it to the primary session.
+func (b *Broadcaster) startSubAccount(ctx context.Context, account *SubAccountConfig) error {
+	if _, err := b.subAccountXBLClient(ctx, account); err != nil {
+		return fmt.Errorf("prepare xbox live client: %w", err)
+	}
+	if account.XUID == "" {
+		account.XUID = accountXUID(*account)
+	}
+	if account.XUID == "" {
+		b.log.Warn("sub-account xuid unavailable", "sub_account", account.ID)
+	}
+	if err := b.ensureSubAccountMutualFollow(ctx, *account); err != nil {
+		return fmt.Errorf("prepare mutual follow: %w", err)
+	}
+	pub := account.PublishConfig
+	b.debug("joining sub-account to session",
+		"sub_account", account.ID,
+		"xuid", account.XUID,
+		"session_name", b.sessionRef.Name,
+	)
+	s, err := b.joinSubAccount(ctx, *account, pub)
+	if err != nil {
+		return fmt.Errorf("join session: %w", err)
+	}
+	b.subSessions = append(b.subSessions, s)
+	b.debug("joined sub-account to session", "sub_account", account.ID, "xuid", account.XUID)
+	return nil
+}
+
+// joinSubAccount joins a sub-account to the primary session through the
+// primary account's activity handle. Publishing the same session reference
+// again would fail with 412 Precondition Failed, so the sub-account looks up
+// the handle and joins it like MCXboxBroadcast's sub-sessions.
+func (b *Broadcaster) joinSubAccount(ctx context.Context, account SubAccountConfig, pub mpsd.PublishConfig) (*mpsd.Session, error) {
 	if b.subAccountPublisher != nil {
 		return b.subAccountPublisher(ctx, account, b.sessionRef, pub)
 	}
@@ -779,10 +860,35 @@ func (b *Broadcaster) publishSubAccount(ctx context.Context, account SubAccountC
 	if client == nil {
 		return nil, errors.New("sub-account MPSD client is nil")
 	}
-	return client.Publish(ctx, b.sessionRef, pub)
+	handleID, err := b.primaryActivityHandleID(ctx, client)
+	if err != nil {
+		return nil, err
+	}
+	return client.Join(ctx, handleID, mpsd.JoinConfig{})
 }
 
-// ensureSubAccountMutualFollow makes the primary and sub-account follow each other.
+// primaryActivityHandleID finds the primary account's activity handle for the
+// published session.
+func (b *Broadcaster) primaryActivityHandleID(ctx context.Context, client *mpsd.Client) (uuid.UUID, error) {
+	primaryXUID := b.primaryXUID()
+	if primaryXUID == "" {
+		return uuid.Nil, errors.New("primary xuid unavailable for activity handle lookup")
+	}
+	handles, err := client.ActivitiesForUsers(ctx, b.sessionRef.ServiceConfigID, []string{primaryXUID})
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("query primary activity handles: %w", err)
+	}
+	for _, handle := range handles {
+		if handle.SessionReference.Name == b.sessionRef.Name {
+			return handle.ID, nil
+		}
+	}
+	return uuid.Nil, fmt.Errorf("no activity handle found for session %q", b.sessionRef.Name)
+}
+
+// ensureSubAccountMutualFollow makes the primary and sub-account follow each
+// other, skipping follows that already exist so restarts do not re-PUT both
+// directions.
 func (b *Broadcaster) ensureSubAccountMutualFollow(ctx context.Context, account SubAccountConfig) error {
 	primaryXUID := b.primaryXUID()
 	subXUID := accountXUID(account)
@@ -790,14 +896,47 @@ func (b *Broadcaster) ensureSubAccountMutualFollow(ctx context.Context, account 
 		return nil
 	}
 	primary := b.friendClientFor(b.conf.XBLClient)
-	if err := primary.Follow(ctx, subXUID); err != nil {
-		return fmt.Errorf("primary follow sub-account: %w", err)
-	}
 	sub := b.friendClientFor(account.XBLClient)
-	if err := sub.Follow(ctx, primaryXUID); err != nil {
-		return fmt.Errorf("sub-account follow primary: %w", err)
+	primaryFollowsSub, subFollowsPrimary := subAccountFollowState(ctx, sub, primaryXUID)
+	followed := false
+	if !primaryFollowsSub {
+		if err := primary.Follow(ctx, subXUID); err != nil {
+			return fmt.Errorf("primary follow sub-account: %w", err)
+		}
+		followed = true
+	}
+	if !subFollowsPrimary {
+		if err := sub.Follow(ctx, primaryXUID); err != nil {
+			return fmt.Errorf("sub-account follow primary: %w", err)
+		}
+		followed = true
+	}
+	if followed && b.subAccountSettleDelay > 0 {
+		// Give the friendship a moment to settle before the session join,
+		// like MCXboxBroadcast's sub-session startup.
+		select {
+		case <-time.After(b.subAccountSettleDelay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	return nil
+}
+
+// subAccountFollowState reports whether the primary and sub-account already
+// follow each other, from the sub-account's view of the primary profile.
+// Lookup failures return false so the follows are attempted anyway.
+func subAccountFollowState(ctx context.Context, sub FriendClient, primaryXUID string) (primaryFollowsSub, subFollowsPrimary bool) {
+	people, err := sub.Friends(ctx)
+	if err != nil {
+		return false, false
+	}
+	for _, p := range people {
+		if p.XUID == primaryXUID {
+			return p.IsFollowingCaller, p.IsFollowedByCaller
+		}
+	}
+	return false, false
 }
 
 // uploadGallery uploads the configured showcase image to the Xbox gallery.
@@ -1026,11 +1165,8 @@ func (b *Broadcaster) notify(ctx context.Context, message string) {
 	}
 }
 
-// notifySessionUpdateFailure notifies about a session update failure unless suppressed.
+// notifySessionUpdateFailure notifies about a session update failure.
 func (b *Broadcaster) notifySessionUpdateFailure(ctx context.Context, err error) {
-	if b.conf.SuppressSessionUpdateMessage {
-		return
-	}
 	b.notify(ctx, "Xbox session update failed: "+err.Error())
 }
 
@@ -1214,25 +1350,115 @@ func (b *Broadcaster) startGameBeforeTransfer() *packet.StartGame {
 	}
 }
 
-// updateLoop periodically refreshes the Xbox session metadata.
+const (
+	// sessionMemberRestartThreshold mirrors Java's restart at 28/30 members;
+	// a full member list permanently blocks new joiners.
+	sessionMemberRestartThreshold = 28
+	// sessionUpdateFailureLimit is how many consecutive update failures
+	// trigger a full session recreation.
+	sessionUpdateFailureLimit = 3
+)
+
+// updateLoop periodically refreshes the Xbox session metadata, checking
+// session health before each update like Java's checkConnection().
 func (b *Broadcaster) updateLoop() {
 	ticker := time.NewTicker(b.conf.UpdateInterval)
 	defer ticker.Stop()
+	consecutiveFailures := 0
 	for {
 		select {
 		case <-ticker.C:
+			if b.checkSessionHealth() {
+				consecutiveFailures = 0
+				continue
+			}
 			ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
 			if err := b.Update(ctx); err == nil {
+				consecutiveFailures = 0
 				b.debug("updated xbox live session")
 			} else if !errors.Is(err, context.Canceled) {
+				consecutiveFailures++
 				b.log.Error("update session", "err", err)
 				b.notifySessionUpdateFailure(ctx, err)
+				if consecutiveFailures >= sessionUpdateFailureLimit {
+					consecutiveFailures = 0
+					b.recreateAfterFailure("repeated session update failures")
+				}
 			}
 			cancel()
 		case <-b.ctx.Done():
 			return
 		}
 	}
+}
+
+// checkSessionHealth recreates the session when it is dead or nearly full and
+// reports whether a recreation was attempted.
+func (b *Broadcaster) checkSessionHealth() bool {
+	reason := b.sessionUnhealthyReason()
+	if reason == "" {
+		return false
+	}
+	b.recreateAfterFailure(reason)
+	return true
+}
+
+// sessionUnhealthyReason reports why the published session needs recreation,
+// or an empty string when it is healthy.
+func (b *Broadcaster) sessionUnhealthyReason() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	announcer, ok := xblAnnouncer(b.announcer)
+	if !ok {
+		return ""
+	}
+	announcer.Lock()
+	session := announcer.Session
+	announcer.Unlock()
+	if session == nil {
+		return ""
+	}
+	if session.Context().Err() != nil {
+		return "mpsd session lost"
+	}
+	if count := sessionMemberCount(session); count >= sessionMemberRestartThreshold {
+		return fmt.Sprintf("session has %d/30 members", count)
+	}
+	for _, s := range b.subSessions {
+		if s.Context().Err() != nil {
+			return "sub-account session lost"
+		}
+	}
+	return ""
+}
+
+// sessionMemberCount counts the members of an MPSD session.
+func sessionMemberCount(session *mpsd.Session) int {
+	count := 0
+	for range session.Members() {
+		count++
+	}
+	return count
+}
+
+// recreateAfterFailure rebuilds the whole session stack after a health-check
+// failure. Failures are logged and retried on the next tick rather than
+// shutting the broadcaster down.
+func (b *Broadcaster) recreateAfterFailure(reason string) {
+	if b.ctx.Err() != nil {
+		return
+	}
+	if !b.canRecreateSignaling() {
+		b.warn("session is unhealthy but signaling is statically configured; cannot re-create", "reason", reason)
+		return
+	}
+	b.warn("re-creating xbox live session", "reason", reason)
+	if err := b.recreateSession(); err != nil {
+		b.log.Error("re-create session failed", "reason", reason, "err", err)
+		b.notify(b.ctx, "Xbox session recreation failed: "+err.Error())
+		return
+	}
+	b.info("xbox live session re-created", "reason", reason)
 }
 
 // canRecreateSignaling reports whether signaling can be rebuilt (not statically configured).
@@ -1253,6 +1479,15 @@ func (b *Broadcaster) watchSignaling() {
 	select {
 	case <-sig.Context().Done():
 		if b.ctx.Err() != nil {
+			return
+		}
+		b.mu.Lock()
+		current := b.signaling
+		b.mu.Unlock()
+		if current != nil && current != sig {
+			// The session was already re-created (for example by the health
+			// check); watch the replacement signaling instead.
+			go b.watchSignaling()
 			return
 		}
 		b.warn("connection to signaling lost, re-creating session...",
@@ -1367,6 +1602,9 @@ func (b *Broadcaster) recreateSession() error {
 		defer b.acceptWg.Done()
 		b.acceptListener(l)
 	}()
+	// Re-showcase the gallery image so a swapped file does not require a
+	// process restart; the upload no-ops when the image is already set.
+	go b.uploadGalleryWithTimeout()
 	return nil
 }
 
@@ -1385,7 +1623,13 @@ func (b *Broadcaster) Update(ctx context.Context) error {
 	if err := b.announcer.Announce(ctx, status); err != nil {
 		return err
 	}
-	b.info("updated session")
+	// Matching MCXboxBroadcast, suppressSessionUpdateMessage only demotes the
+	// periodic success log to debug level.
+	if b.conf.SuppressSessionUpdateMessage {
+		b.debug("updated session")
+	} else {
+		b.info("updated session")
+	}
 	return nil
 }
 

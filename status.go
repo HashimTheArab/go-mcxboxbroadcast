@@ -43,24 +43,25 @@ func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 				"players", queried.PlayerCount,
 				"max_players", queried.MaxPlayers,
 			)
-			st.WorldName = queried.ServerName
-			st.HostName = queried.ServerSubName
-			st.Players = queried.PlayerCount
-			st.MaxPlayers = queried.MaxPlayers
-		} else if !st.QueryFallback {
-			return room.Status{}, err
+			b.lastQuery = &queried
+			applyQueriedStatus(&st, queried)
+		} else if !st.QueryFallback && b.lastQuery != nil {
+			// Keep the last successful query result instead of failing the
+			// whole update; configFallback: true resets to configured values.
+			b.debug("target server status query failed; keeping last successful query result", "err", err)
+			applyQueriedStatus(&st, *b.lastQuery)
 		} else {
 			b.debug("target server status query failed; using configured status fallback", "err", err)
 		}
 	}
 
 	return normalizeStatus(room.Status{
-		HostName:                stripColour(defaultString(st.HostName, "MCXboxBroadcast")),
-		WorldName:               stripColour(defaultString(st.WorldName, defaultString(st.HostName, "MCXboxBroadcast"))),
+		HostName:                stripColour(defaultString(st.HostName, b.hostNameFallback())),
+		WorldName:               stripColour(defaultString(st.WorldName, defaultString(st.HostName, b.hostNameFallback()))),
 		OwnerID:                 ownerID,
-		WorldType:               defaultString(st.WorldType, room.WorldTypeCreative),
-		MemberCount:             max(st.Players, 1),
-		MaxMemberCount:          max(st.MaxPlayers, max(st.Players, 1)+1),
+		WorldType:               defaultString(st.WorldType, WorldTypeSurvival),
+		MemberCount:             max(st.Players, 0),
+		MaxMemberCount:          max(st.MaxPlayers, max(st.Players, 0)+1),
 		BroadcastSetting:        defaultBroadcastSetting(p2p.BroadcastSetting(st.Broadcast), p2p.BroadcastSettingFriendsOfFriends),
 		Joinability:             defaultString(st.Joinability, p2p.JoinabilityFriends),
 		Protocol:                protocol.CurrentProtocol,
@@ -71,6 +72,29 @@ func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 		CrossPlayDisabled:       false,
 		LevelID:                 levelID(st.LevelID),
 	}), nil
+}
+
+// applyQueriedStatus overlays a queried server status onto the announced one.
+func applyQueriedStatus(st *Status, queried minecraft.ServerStatus) {
+	st.WorldName = queried.ServerName
+	st.HostName = queried.ServerSubName
+	st.Players = queried.PlayerCount
+	st.MaxPlayers = queried.MaxPlayers
+}
+
+// hostNameFallback returns the account gamertag for empty host names, matching
+// MCXboxBroadcast, with a static fallback when no profile is available.
+func (b *Broadcaster) hostNameFallback() string {
+	client := b.conf.XBLClient
+	if client == nil {
+		client = b.xblClient
+	}
+	if client != nil {
+		if gamertag := client.UserInfo().GamerTag; gamertag != "" {
+			return gamertag
+		}
+	}
+	return "MCXboxBroadcast"
 }
 
 func (b *Broadcaster) primaryXUIDForStatus(ctx context.Context) (string, error) {
@@ -114,10 +138,10 @@ func normalizeStatus(status room.Status) room.Status {
 	}
 	status.WorldName = stripColour(status.WorldName)
 	if status.WorldType == "" {
-		status.WorldType = room.WorldTypeCreative
+		status.WorldType = WorldTypeSurvival
 	}
-	if status.MemberCount <= 0 {
-		status.MemberCount = 1
+	if status.MemberCount < 0 {
+		status.MemberCount = 0
 	}
 	if status.MaxMemberCount <= status.MemberCount {
 		status.MaxMemberCount = status.MemberCount + 1
@@ -140,7 +164,8 @@ func normalizeStatus(status room.Status) room.Status {
 	status.TransportLayer = p2p.TransportLayerNetherNet
 	status.OnlineCrossPlatformGame = true
 	if status.LevelID == "" {
-		status.LevelID = defaults.LevelID
+		// MCXboxBroadcast always sends the literal "level".
+		status.LevelID = "level"
 	}
 	return status
 }
@@ -257,7 +282,8 @@ func httpClient(c *http.Client) *http.Client {
 
 func queryStatus(ctx context.Context, address string, timeout time.Duration) (minecraft.ServerStatus, error) {
 	if timeout == 0 {
-		timeout = 5 * time.Second
+		// MCXboxBroadcast pings with a 1500 ms timeout.
+		timeout = 1500 * time.Millisecond
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

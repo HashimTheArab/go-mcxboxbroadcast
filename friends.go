@@ -1,19 +1,22 @@
 package broadcaster
 
 import (
+	"bytes"
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strconv"
+	"time"
 
 	xblsocial "github.com/df-mc/go-xsapi/v2/social"
-	"github.com/df-mc/go-xsapi/v2/xal/xsts"
 )
 
-// FriendClient adapts go-xsapi/v2's Xbox social client to the FriendSyncer API.
+// FriendClient implements the Xbox social calls used by FriendSyncer with the
+// same endpoints, contract versions, and request shapes as MCXboxBroadcast.
 type FriendClient struct {
 	Client *http.Client
-	Social *xblsocial.Client
 }
 
 type Person struct {
@@ -25,6 +28,23 @@ type Person struct {
 	IsFollowedByCaller   bool   `json:"isFollowedByCaller"`
 	UniqueModernGamertag string `json:"uniqueModernGamertag"`
 }
+
+// SocialSummary is the caller's follower/following totals from the Xbox
+// social summary endpoint.
+type SocialSummary struct {
+	TargetFollowingCount int `json:"targetFollowingCount"`
+	TargetFollowerCount  int `json:"targetFollowerCount"`
+}
+
+const (
+	peopleHubFollowersURL = "https://peoplehub.xboxlive.com/users/me/people/followers"
+	peopleHubSocialURL    = "https://peoplehub.xboxlive.com/users/me/people/social"
+	pendingRequestsURL    = "https://peoplehub.xboxlive.com/users/me/people/friendrequests(received)"
+	bulkAddFriendsURL     = "https://social.xboxlive.com/bulk/users/me/people/friends/v2?method=add"
+	socialSummaryURL      = "https://social.xboxlive.com/users/me/summary"
+	peopleURLFormat       = "https://social.xboxlive.com/users/me/people/xuid(%s)"
+	followerURLFormat     = "https://social.xboxlive.com/users/me/people/follower/xuid(%s)"
+)
 
 // AcceptFriendRequestsError reports a successful bulk accept response that
 // still failed to update one or more pending friend requests.
@@ -41,48 +61,90 @@ func (e *AcceptFriendRequestsError) FailedXUIDs() []string {
 }
 
 // Friends returns a merged view of people following the authenticated account
-// and people the authenticated account follows.
+// and people the authenticated account follows. Both lists are fetched
+// undecorated with contract version 5, matching MCXboxBroadcast.
 func (c FriendClient) Friends(ctx context.Context) ([]Person, error) {
-	// go-xsapi/social.Friends only returns accepted friends; sync needs both
-	// sides of the relationship so pending inbound followers can be accepted.
-	socialClient := c.social()
-	followers, err := socialClient.Followers(ctx)
+	followers, err := c.people(ctx, peopleHubFollowersURL, "5")
 	if err != nil {
 		return nil, err
 	}
-	following, err := socialClient.Following(ctx)
+	following, err := c.people(ctx, peopleHubSocialURL, "5")
 	if err != nil {
 		return nil, err
 	}
-	return mergePeople(peopleFromSocialUsers(followers), peopleFromSocialUsers(following)), nil
+	return mergePeople(followers, following), nil
 }
 
-// AcceptPendingFriendRequests accepts incoming Xbox friend requests and returns
-// the people that Xbox reported as updated.
+// Summary returns the caller's social summary, including the total number of
+// people the account follows.
+func (c FriendClient) Summary(ctx context.Context) (SocialSummary, error) {
+	var summary SocialSummary
+	resp, err := c.do(ctx, http.MethodGet, socialSummaryURL, "3", nil)
+	if err != nil {
+		return SocialSummary{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return SocialSummary{}, socialResponseError(resp)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&summary); err != nil {
+		return SocialSummary{}, err
+	}
+	return summary, nil
+}
+
+// AcceptPendingFriendRequests accepts incoming Xbox friend requests with a
+// single bulk add call and returns the people that Xbox reported as updated.
 func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]Person, error) {
-	socialClient := c.social()
-	pending, err := socialClient.IncomingFriendRequests(ctx)
+	pending, err := c.people(ctx, pendingRequestsURL, "7")
 	if err != nil {
 		return nil, err
 	}
-	if len(pending) == 0 {
+	xuids := make([]string, 0, len(pending))
+	byXUID := make(map[string]Person, len(pending))
+	for _, person := range pending {
+		if person.XUID == "" {
+			continue
+		}
+		xuids = append(xuids, person.XUID)
+		byXUID[person.XUID] = person
+	}
+	if len(xuids) == 0 {
 		return nil, nil
 	}
 
-	accepted := make([]Person, 0, len(pending))
+	body, err := json.Marshal(map[string][]string{"xuids": xuids})
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.do(ctx, http.MethodPost, bulkAddFriendsURL, "1", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, socialResponseError(resp)
+	}
+	var result struct {
+		UpdatedPeople []string `json:"updatedPeople"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	updated := make(map[string]struct{}, len(result.UpdatedPeople))
+	accepted := make([]Person, 0, len(result.UpdatedPeople))
+	for _, xuid := range result.UpdatedPeople {
+		if person, ok := byXUID[xuid]; ok {
+			updated[xuid] = struct{}{}
+			accepted = append(accepted, person)
+		}
+	}
 	var failed []string
-	for _, user := range pending {
-		if user.XUID == "" {
-			continue
+	for _, xuid := range xuids {
+		if _, ok := updated[xuid]; !ok {
+			failed = append(failed, xuid)
 		}
-		if err := socialClient.AddFriend(ctx, user.XUID); err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || retryDelay(err) > 0 {
-				return accepted, err
-			}
-			failed = append(failed, user.XUID)
-			continue
-		}
-		accepted = append(accepted, personFromSocialUser(user))
 	}
 	if len(failed) > 0 {
 		return accepted, &AcceptFriendRequestsError{Failed: failed}
@@ -90,30 +152,114 @@ func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]Person
 	return accepted, nil
 }
 
-func (c FriendClient) social() *xblsocial.Client {
-	if c.Social != nil {
-		return c.Social
-	}
-	return xblsocial.New(c.client(), nil, xsts.UserInfo{}, nil)
-}
-
 // Follow follows the XUID, which makes the user a friend when they also follow
 // the authenticated account.
 func (c FriendClient) Follow(ctx context.Context, xuid string) error {
-	return c.social().Follow(ctx, xuid)
+	return c.relationship(ctx, http.MethodPut, fmt.Sprintf(peopleURLFormat, xuid), http.StatusOK, http.StatusNoContent)
 }
 
 // Unfollow removes the authenticated account's follow relationship for xuid.
 func (c FriendClient) Unfollow(ctx context.Context, xuid string) error {
-	return c.social().Unfollow(ctx, xuid)
+	return c.relationship(ctx, http.MethodDelete, fmt.Sprintf(peopleURLFormat, xuid), http.StatusOK, http.StatusNoContent)
 }
 
-func peopleFromSocialUsers(users []xblsocial.User) []Person {
-	people := make([]Person, 0, len(users))
-	for _, user := range users {
-		people = append(people, personFromSocialUser(user))
+// ForceUnfollow removes the follow relationship the user identified by xuid
+// has towards the authenticated account. It is used to drop followers whose
+// privacy or enforcement restrictions prevent a friendship.
+func (c FriendClient) ForceUnfollow(ctx context.Context, xuid string) error {
+	return c.relationship(ctx, http.MethodDelete, fmt.Sprintf(followerURLFormat, xuid), http.StatusOK, http.StatusNoContent)
+}
+
+// relationship sends a relationship mutation and converts non-success
+// responses into social response errors.
+func (c FriendClient) relationship(ctx context.Context, method, url string, successCodes ...int) error {
+	resp, err := c.do(ctx, method, url, "3", nil)
+	if err != nil {
+		return err
 	}
-	return people
+	defer resp.Body.Close()
+	for _, code := range successCodes {
+		if resp.StatusCode == code {
+			return nil
+		}
+	}
+	return socialResponseError(resp)
+}
+
+// people fetches a PeopleHub or social people list.
+func (c FriendClient) people(ctx context.Context, url, contractVersion string) ([]Person, error) {
+	resp, err := c.do(ctx, http.MethodGet, url, contractVersion, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, socialResponseError(resp)
+	}
+	var result struct {
+		People []Person `json:"people"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	return result.People, nil
+}
+
+func (c FriendClient) do(ctx context.Context, method, url, contractVersion string, body io.Reader) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Xbl-Contract-Version", contractVersion)
+	req.Header.Set("Accept-Language", "en-GB")
+	req.Header.Set("Accept", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	return c.client().Do(req)
+}
+
+// socialResponseError converts a non-success social/PeopleHub response into an
+// *xblsocial.ResponseError so callers can match rate limits and restriction
+// codes with errors.Is/As.
+func socialResponseError(resp *http.Response) error {
+	responseErr := &xblsocial.ResponseError{
+		StatusCode: resp.StatusCode,
+		RetryAfter: retryAfterHeader(resp.Header.Get("Retry-After")),
+	}
+	if resp.Request != nil {
+		responseErr.Method = resp.Request.Method
+		if resp.Request.URL != nil {
+			responseErr.URL = resp.Request.URL.String()
+		}
+	}
+	var body struct {
+		Code        int    `json:"code"`
+		Description string `json:"description"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err == nil {
+		responseErr.Code = body.Code
+		responseErr.Description = body.Description
+	}
+	return responseErr
+}
+
+func retryAfterHeader(value string) time.Duration {
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if when, err := http.ParseTime(value); err == nil {
+		if delay := time.Until(when); delay > 0 {
+			return delay
+		}
+	}
+	return 0
 }
 
 func mergePeople(groups ...[]Person) []Person {
@@ -156,18 +302,6 @@ func mergePerson(existing, next Person) Person {
 		existing.UniqueModernGamertag = next.UniqueModernGamertag
 	}
 	return existing
-}
-
-func personFromSocialUser(user xblsocial.User) Person {
-	return Person{
-		XUID:                 user.XUID,
-		Gamertag:             user.GamerTag,
-		DisplayName:          user.DisplayName,
-		ModernGamertag:       user.ModernGamerTag,
-		IsFollowingCaller:    user.Followed,
-		IsFollowedByCaller:   user.Following,
-		UniqueModernGamertag: user.UniqueModernGamerTag,
-	}
 }
 
 func (c FriendClient) client() *http.Client {

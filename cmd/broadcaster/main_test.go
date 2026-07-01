@@ -61,7 +61,7 @@ func TestRunBroadcasterCommandRejectsDuplicateSubAccountCacheBeforeAuth(t *testi
 			}}
 			return cfg, nil
 		},
-		NewLiveTokenSource: func(context.Context, *oauth2.Token, io.Writer) oauth2.TokenSource {
+		NewLiveTokenSource: func(context.Context, *oauth2.Token, io.Writer, func(*oauth2.Token)) oauth2.TokenSource {
 			authenticated = true
 			return staticOAuthTokenSource{}
 		},
@@ -86,8 +86,8 @@ func TestRunBroadcasterCommandStartsAndClosesBroadcaster(t *testing.T) {
 		Stdout: io.Discard,
 		LoadConfig: func(string) (broadcaster.ConfigFile, error) {
 			cfg := broadcaster.DefaultConfigFile()
-			cfg.Session.RemoteAddress = "127.0.0.1"
-			cfg.Session.RemotePort = "19132"
+			cfg.Session.SessionInfo.IP = "127.0.0.1"
+			cfg.Session.SessionInfo.Port = 19132
 			cfg.Accounts.PrimaryCachePath = "cache/live_token.json"
 			cfg.Accounts.SubAccounts = []broadcaster.SubAccountFile{{
 				ID:      "alt",
@@ -98,13 +98,13 @@ func TestRunBroadcasterCommandStartsAndClosesBroadcaster(t *testing.T) {
 		LoadLiveToken: func(string) (*oauth2.Token, error) {
 			return nil, errors.ErrUnsupported
 		},
-		NewLiveTokenSource: func(context.Context, *oauth2.Token, io.Writer) oauth2.TokenSource {
+		NewLiveTokenSource: func(context.Context, *oauth2.Token, io.Writer, func(*oauth2.Token)) oauth2.TokenSource {
 			return staticOAuthTokenSource{}
 		},
 		SaveLiveToken: func(string, *oauth2.Token) error {
 			return nil
 		},
-		LoadAccountToken: func(context.Context, string, io.Writer) (oauth2.TokenSource, error) {
+		LoadAccountToken: func(context.Context, string, io.Writer, func(*oauth2.Token)) (oauth2.TokenSource, error) {
 			return staticOAuthTokenSource{}, nil
 		},
 		NewXBLTokenSource: func(context.Context, oauth2.TokenSource) xsapi.TokenSource {
@@ -152,8 +152,8 @@ func TestRunBroadcasterCommandClosesXSAPIClientsWhenStartFails(t *testing.T) {
 		Stdout: io.Discard,
 		LoadConfig: func(string) (broadcaster.ConfigFile, error) {
 			cfg := broadcaster.DefaultConfigFile()
-			cfg.Session.RemoteAddress = "127.0.0.1"
-			cfg.Session.RemotePort = "19132"
+			cfg.Session.SessionInfo.IP = "127.0.0.1"
+			cfg.Session.SessionInfo.Port = 19132
 			cfg.Accounts.SubAccounts = []broadcaster.SubAccountFile{{
 				ID:      "alt",
 				Enabled: true,
@@ -163,13 +163,13 @@ func TestRunBroadcasterCommandClosesXSAPIClientsWhenStartFails(t *testing.T) {
 		LoadLiveToken: func(string) (*oauth2.Token, error) {
 			return nil, errors.ErrUnsupported
 		},
-		NewLiveTokenSource: func(context.Context, *oauth2.Token, io.Writer) oauth2.TokenSource {
+		NewLiveTokenSource: func(context.Context, *oauth2.Token, io.Writer, func(*oauth2.Token)) oauth2.TokenSource {
 			return staticOAuthTokenSource{}
 		},
 		SaveLiveToken: func(string, *oauth2.Token) error {
 			return nil
 		},
-		LoadAccountToken: func(context.Context, string, io.Writer) (oauth2.TokenSource, error) {
+		LoadAccountToken: func(context.Context, string, io.Writer, func(*oauth2.Token)) (oauth2.TokenSource, error) {
 			return staticOAuthTokenSource{}, nil
 		},
 		NewXBLTokenSource: func(context.Context, oauth2.TokenSource) xsapi.TokenSource {
@@ -206,14 +206,14 @@ func TestRunBroadcasterCommandAppliesConfiguredHTTPProxy(t *testing.T) {
 		LoadConfig: func(string) (broadcaster.ConfigFile, error) {
 			cfg := broadcaster.DefaultConfigFile()
 			cfg.HTTP.Proxy = "http://127.0.0.1:8080"
-			cfg.Session.RemoteAddress = "127.0.0.1"
-			cfg.Session.RemotePort = "19132"
+			cfg.Session.SessionInfo.IP = "127.0.0.1"
+			cfg.Session.SessionInfo.Port = 19132
 			return cfg, nil
 		},
 		LoadLiveToken: func(string) (*oauth2.Token, error) {
 			return nil, errors.ErrUnsupported
 		},
-		NewLiveTokenSource: func(context.Context, *oauth2.Token, io.Writer) oauth2.TokenSource {
+		NewLiveTokenSource: func(context.Context, *oauth2.Token, io.Writer, func(*oauth2.Token)) oauth2.TokenSource {
 			return staticOAuthTokenSource{}
 		},
 		SaveLiveToken: func(string, *oauth2.Token) error {
@@ -270,14 +270,14 @@ func TestRunBroadcasterCommandAppliesConfiguredHTTPProxyToPrimaryLiveTokenSource
 		LoadConfig: func(string) (broadcaster.ConfigFile, error) {
 			cfg := broadcaster.DefaultConfigFile()
 			cfg.HTTP.Proxy = "http://127.0.0.1:8080"
-			cfg.Session.RemoteAddress = "127.0.0.1"
-			cfg.Session.RemotePort = "19132"
+			cfg.Session.SessionInfo.IP = "127.0.0.1"
+			cfg.Session.SessionInfo.Port = 19132
 			return cfg, nil
 		},
 		LoadLiveToken: func(string) (*oauth2.Token, error) {
 			return nil, errors.ErrUnsupported
 		},
-		NewLiveTokenSource: func(ctx context.Context, _ *oauth2.Token, _ io.Writer) oauth2.TokenSource {
+		NewLiveTokenSource: func(ctx context.Context, _ *oauth2.Token, _ io.Writer, _ func(*oauth2.Token)) oauth2.TokenSource {
 			gotLiveAuthClient, _ = ctx.Value(oauth2.HTTPClient).(*http.Client)
 			return staticOAuthTokenSource{}
 		},
@@ -323,8 +323,8 @@ func TestRunBroadcasterCommandAppliesConfiguredHTTPProxyToSubAccountTokenLoad(t 
 		LoadConfig: func(string) (broadcaster.ConfigFile, error) {
 			cfg := broadcaster.DefaultConfigFile()
 			cfg.HTTP.Proxy = "http://127.0.0.1:8080"
-			cfg.Session.RemoteAddress = "127.0.0.1"
-			cfg.Session.RemotePort = "19132"
+			cfg.Session.SessionInfo.IP = "127.0.0.1"
+			cfg.Session.SessionInfo.Port = 19132
 			cfg.Accounts.SubAccounts = []broadcaster.SubAccountFile{{
 				ID:      "alt",
 				Enabled: true,
@@ -334,13 +334,13 @@ func TestRunBroadcasterCommandAppliesConfiguredHTTPProxyToSubAccountTokenLoad(t 
 		LoadLiveToken: func(string) (*oauth2.Token, error) {
 			return nil, errors.ErrUnsupported
 		},
-		NewLiveTokenSource: func(context.Context, *oauth2.Token, io.Writer) oauth2.TokenSource {
+		NewLiveTokenSource: func(context.Context, *oauth2.Token, io.Writer, func(*oauth2.Token)) oauth2.TokenSource {
 			return staticOAuthTokenSource{}
 		},
 		SaveLiveToken: func(string, *oauth2.Token) error {
 			return nil
 		},
-		LoadAccountToken: func(ctx context.Context, _ string, _ io.Writer) (oauth2.TokenSource, error) {
+		LoadAccountToken: func(ctx context.Context, _ string, _ io.Writer, _ func(*oauth2.Token)) (oauth2.TokenSource, error) {
 			gotSubAccountAuthClient, _ = ctx.Value(oauth2.HTTPClient).(*http.Client)
 			return staticOAuthTokenSource{}, nil
 		},
@@ -384,14 +384,14 @@ func TestRunBroadcasterCommandPreservesHTTPClientWithoutConfiguredProxy(t *testi
 		HTTPClient: baseClient,
 		LoadConfig: func(string) (broadcaster.ConfigFile, error) {
 			cfg := broadcaster.DefaultConfigFile()
-			cfg.Session.RemoteAddress = "127.0.0.1"
-			cfg.Session.RemotePort = "19132"
+			cfg.Session.SessionInfo.IP = "127.0.0.1"
+			cfg.Session.SessionInfo.Port = 19132
 			return cfg, nil
 		},
 		LoadLiveToken: func(string) (*oauth2.Token, error) {
 			return nil, errors.ErrUnsupported
 		},
-		NewLiveTokenSource: func(ctx context.Context, _ *oauth2.Token, _ io.Writer) oauth2.TokenSource {
+		NewLiveTokenSource: func(ctx context.Context, _ *oauth2.Token, _ io.Writer, _ func(*oauth2.Token)) oauth2.TokenSource {
 			gotLiveAuthClient, _ = ctx.Value(oauth2.HTTPClient).(*http.Client)
 			return staticOAuthTokenSource{}
 		},

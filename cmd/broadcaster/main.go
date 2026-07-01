@@ -36,9 +36,9 @@ type commandDeps struct {
 	HTTPClient         *http.Client
 	LoadConfig         func(string) (broadcaster.ConfigFile, error)
 	LoadLiveToken      func(string) (*oauth2.Token, error)
-	NewLiveTokenSource func(context.Context, *oauth2.Token, io.Writer) oauth2.TokenSource
+	NewLiveTokenSource func(context.Context, *oauth2.Token, io.Writer, func(*oauth2.Token)) oauth2.TokenSource
 	SaveLiveToken      func(string, *oauth2.Token) error
-	LoadAccountToken   func(context.Context, string, io.Writer) (oauth2.TokenSource, error)
+	LoadAccountToken   func(context.Context, string, io.Writer, func(*oauth2.Token)) (oauth2.TokenSource, error)
 	NewXBLTokenSource  func(context.Context, oauth2.TokenSource) xsapi.TokenSource
 	NewXSAPIClient     func(context.Context, xsapi.TokenSource, *http.Client, *slog.Logger) (*xsapi.Client, error)
 	CloseXSAPIClients  func(*slog.Logger, []*xsapi.Client)
@@ -91,6 +91,9 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 	}
 	log := slog.New(slog.NewTextHandler(deps.Stdout, &slog.HandlerOptions{Level: level}))
 	log.Debug("debug logging enabled")
+	for _, note := range cfg.Notes {
+		log.Warn("config adjusted", "note", note)
+	}
 	var xblClients []*xsapi.Client
 	defer func() {
 		deps.CloseXSAPIClients(log, xblClients)
@@ -102,11 +105,19 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 		return err
 	}
 
+	var notifier broadcaster.Notifier
+	if cfg.Notifications.Enabled {
+		notifier = broadcaster.SlackNotifier{WebhookURL: cfg.Notifications.WebhookURL, Client: httpClient}
+	}
+	// Sign-in prompts (device-code URL and code) also go to the webhook so a
+	// headless instance whose token dies can still be recovered.
+	authOut := signInWriter(deps.Stdout, notifier, log)
+
 	tok, err := deps.LoadLiveToken(cachePath)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		log.Warn("could not load token cache", "err", err)
 	}
-	live := deps.NewLiveTokenSource(authCtx, tok, deps.Stdout)
+	live := deps.NewLiveTokenSource(authCtx, tok, authOut, savePersistedToken(log, deps.SaveLiveToken, cachePath))
 	tok, err = live.Token()
 	if err != nil {
 		return fmt.Errorf("authenticate: %w", err)
@@ -122,13 +133,12 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 	xblClients = append(xblClients, xblClient)
 
 	runtime, err := cfg.RuntimeConfig(broadcaster.RuntimeConfigInput{
-		XBLClient:       xblClient,
-		XBLTokenSource:  xblSource,
-		XUID:            xblClient.UserInfo().XUID,
-		LiveTokenSource: live,
-		HTTPClient:      httpClient,
-		Log:             log,
-		BaseDir:         baseDir,
+		XBLClient:      xblClient,
+		XBLTokenSource: xblSource,
+		XUID:           xblClient.UserInfo().XUID,
+		HTTPClient:     httpClient,
+		Log:            log,
+		BaseDir:        baseDir,
 	})
 	if err != nil {
 		return fmt.Errorf("configure: %w", err)
@@ -141,7 +151,7 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 		if err != nil {
 			return fmt.Errorf("configure sub-account %q: %w", account.ID, err)
 		}
-		subLive, err := deps.LoadAccountToken(authCtx, subCachePath, deps.Stdout)
+		subLive, err := deps.LoadAccountToken(authCtx, subCachePath, authOut, savePersistedToken(log, deps.SaveLiveToken, subCachePath))
 		if err != nil {
 			return fmt.Errorf("authenticate sub-account %q: %w", account.ID, err)
 		}
@@ -194,7 +204,7 @@ func (d commandDeps) withDefaults() commandDeps {
 		d.LoadLiveToken = broadcaster.LoadLiveToken
 	}
 	if d.NewLiveTokenSource == nil {
-		d.NewLiveTokenSource = broadcaster.NewLiveTokenSource
+		d.NewLiveTokenSource = broadcaster.NewLiveTokenSourceWithPersist
 	}
 	if d.SaveLiveToken == nil {
 		d.SaveLiveToken = broadcaster.SaveLiveToken
@@ -261,17 +271,56 @@ func defaultCachePath() string {
 	return filepath.Join(dir, "mcxboxbroadcast-go", "live_token.json")
 }
 
-func loadAccountToken(ctx context.Context, path string, out io.Writer) (oauth2.TokenSource, error) {
+func loadAccountToken(ctx context.Context, path string, out io.Writer, persist func(*oauth2.Token)) (oauth2.TokenSource, error) {
 	tok, err := broadcaster.LoadLiveToken(path)
 	if err != nil {
 		tok = nil
 	}
-	src := broadcaster.NewLiveTokenSource(ctx, tok, out)
+	src := broadcaster.NewLiveTokenSourceWithPersist(ctx, tok, out, persist)
 	tok, err = src.Token()
 	if err != nil {
 		return nil, err
 	}
 	return src, broadcaster.SaveLiveToken(path, tok)
+}
+
+// savePersistedToken saves rotated tokens to the cache path, logging failures.
+func savePersistedToken(log *slog.Logger, save func(string, *oauth2.Token) error, path string) func(*oauth2.Token) {
+	return func(tok *oauth2.Token) {
+		if save == nil {
+			return
+		}
+		if err := save(path, tok); err != nil && log != nil {
+			log.Warn("could not save rotated token cache", "path", path, "err", err)
+		}
+	}
+}
+
+// signInWriter tees device-code sign-in prompts to the notifier so headless
+// instances surface re-authentication requests.
+func signInWriter(out io.Writer, notifier broadcaster.Notifier, log *slog.Logger) io.Writer {
+	if notifier == nil {
+		return out
+	}
+	return &notifyingWriter{out: out, notifier: notifier, log: log}
+}
+
+type notifyingWriter struct {
+	out      io.Writer
+	notifier broadcaster.Notifier
+	log      *slog.Logger
+}
+
+func (w *notifyingWriter) Write(p []byte) (int, error) {
+	message := strings.TrimSpace(string(p))
+	if message != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		if err := w.notifier.Notify(ctx, message); err != nil && w.log != nil {
+			w.log.Warn("send sign-in notification", "err", err)
+		}
+		cancel()
+	}
+	return w.out.Write(p)
 }
 
 func subAccountCachePath(base string, account broadcaster.SubAccountFile) (string, error) {

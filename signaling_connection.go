@@ -20,8 +20,9 @@ type signalingConnectionAnnouncer struct {
 }
 
 func (a signalingConnectionAnnouncer) Announce(ctx context.Context, status room.Status) error {
-	// TODO: Remove this override once we use lac's p2p support for publishing
-	// JSON-RPC NetherNet connection metadata directly.
+	// The session document must advertise exactly the JSON-RPC signaling
+	// connection clients can join through; any caller-provided connections are
+	// deliberately replaced, matching MCXboxBroadcast's single-connection doc.
 	status.SupportedConnections = []room.Connection{a.connection}
 	return a.Announcer.Announce(ctx, status)
 }

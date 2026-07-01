@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -181,9 +182,12 @@ func TestFriendSyncerStopsAutoFollowPassWhenFriendListIsFull(t *testing.T) {
 		},
 		Log: slog.New(slog.NewTextHandler(&log, nil)),
 	}
-	err := syncer.Sync(context.Background())
-	if !errors.Is(err, fullErr) {
-		t.Fatalf("Sync() error = %v, want friend-list-full error", err)
+	result, err := syncer.syncWithOptions(context.Background(), friendSyncOptions{expire: true, autoFollow: true, autoUnfollow: true})
+	if err != nil {
+		t.Fatalf("syncWithOptions() error = %v, want nil", err)
+	}
+	if !result.friendListFull {
+		t.Fatal("expected friend-list-full result")
 	}
 	if client.followCalls != 1 {
 		t.Fatalf("follow calls = %d, want 1", client.followCalls)
@@ -193,14 +197,161 @@ func TestFriendSyncerStopsAutoFollowPassWhenFriendListIsFull(t *testing.T) {
 	}
 }
 
-func TestFriendSyncRunStateSuppressesMutationsDuringRetryAfter(t *testing.T) {
+func TestFriendSyncerContinuesPastSingleFollowFailure(t *testing.T) {
+	client := &syncFriendClient{
+		people: []Person{
+			{XUID: "1", IsFollowingCaller: true},
+			{XUID: "2", IsFollowingCaller: true},
+			{XUID: "3", IsFollowedByCaller: true},
+		},
+		follow: func(_ context.Context, xuid string) error {
+			if xuid == "1" {
+				return errors.New("transient failure")
+			}
+			return nil
+		},
+	}
+	syncer := FriendSyncer{
+		Client: client,
+		Config: FriendSyncConfig{AutoFollow: true, AutoUnfollow: true},
+	}
+	if err := syncer.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync() error = %v, want nil", err)
+	}
+	if client.followCalls != 2 {
+		t.Fatalf("follow calls = %d, want 2 (continue past failure)", client.followCalls)
+	}
+	if client.removeCalls != 1 {
+		t.Fatalf("remove calls = %d, want 1 (removals not aborted)", client.removeCalls)
+	}
+}
+
+func TestFriendSyncerContinuesRemovalsWhenAddsAreRateLimited(t *testing.T) {
+	limitErr := &xblsocial.ResponseError{StatusCode: 429, RetryAfter: 5 * time.Second}
+	client := &syncFriendClient{
+		people: []Person{
+			{XUID: "1", IsFollowingCaller: true},
+			{XUID: "2", IsFollowingCaller: true},
+			{XUID: "3", IsFollowedByCaller: true},
+		},
+		follow: func(context.Context, string) error {
+			return limitErr
+		},
+	}
+	syncer := FriendSyncer{
+		Client: client,
+		Config: FriendSyncConfig{AutoFollow: true, AutoUnfollow: true},
+	}
+	result, err := syncer.syncWithOptions(context.Background(), friendSyncOptions{autoFollow: true, autoUnfollow: true})
+	if err != nil {
+		t.Fatalf("syncWithOptions() error = %v, want nil", err)
+	}
+	if client.followCalls != 1 {
+		t.Fatalf("follow calls = %d, want 1 (stop adds after rate limit)", client.followCalls)
+	}
+	if client.removeCalls != 1 {
+		t.Fatalf("remove calls = %d, want 1 (removals use a separate limit)", client.removeCalls)
+	}
+	if result.followRetryAfter != 5*time.Second {
+		t.Fatalf("follow retry-after = %s, want 5s", result.followRetryAfter)
+	}
+	if result.unfollowRetryAfter != 0 {
+		t.Fatalf("unfollow retry-after = %s, want 0", result.unfollowRetryAfter)
+	}
+}
+
+func TestFriendSyncerForceUnfollowsRestrictedAccounts(t *testing.T) {
+	restrictedErr := &xblsocial.ResponseError{Code: 1049}
+	var notified []string
+	client := &syncFriendClient{
+		people: []Person{
+			{XUID: "1", Gamertag: "Restricted", IsFollowingCaller: true},
+			{XUID: "2", Gamertag: "Fine", IsFollowingCaller: true},
+		},
+		follow: func(_ context.Context, xuid string) error {
+			if xuid == "1" {
+				return restrictedErr
+			}
+			return nil
+		},
+	}
+	syncer := FriendSyncer{
+		Client: client,
+		Config: FriendSyncConfig{AutoFollow: true},
+		Notifier: notifierFunc(func(_ context.Context, message string) error {
+			notified = append(notified, message)
+			return nil
+		}),
+	}
+	if err := syncer.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync() error = %v, want nil", err)
+	}
+	if got := strings.Join(client.forceUnfollowed, ","); got != "1" {
+		t.Fatalf("force unfollowed = %q, want 1", got)
+	}
+	if client.followCalls != 2 {
+		t.Fatalf("follow calls = %d, want 2 (continue past restricted account)", client.followCalls)
+	}
+	if len(notified) != 1 || !strings.Contains(notified[0], "Restricted") {
+		t.Fatalf("notifications = %v, want restriction notification", notified)
+	}
+}
+
+func TestFriendSyncerSkipsGuestXUIDsUnconditionally(t *testing.T) {
+	guest := strconv.FormatUint(1<<52, 10)
+	client := &syncFriendClient{
+		people: []Person{{XUID: guest, IsFollowingCaller: true}},
+	}
+	syncer := FriendSyncer{
+		Client: client,
+		Config: FriendSyncConfig{AutoFollow: true},
+	}
+	if err := syncer.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if client.followCalls != 0 {
+		t.Fatalf("follow calls = %d, want 0 (guest XUIDs always skipped)", client.followCalls)
+	}
+}
+
+func TestFriendSyncerPrunesHistoryForExFriends(t *testing.T) {
+	history := &syncHistoryStore{
+		lastSeen: map[string]time.Time{
+			"1":    time.Now(),
+			"gone": time.Now(),
+		},
+	}
+	client := &syncFriendClient{
+		people: []Person{{XUID: "1", IsFollowingCaller: true, IsFollowedByCaller: true}},
+	}
+	syncer := FriendSyncer{
+		Client:       client,
+		Config:       FriendSyncConfig{ExpiryEnabled: true, ExpiryDays: 15},
+		History:      history,
+		PruneHistory: true,
+	}
+	if err := syncer.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := history.lastSeen["gone"]; ok {
+		t.Fatal("expected history entry for ex-friend to be pruned")
+	}
+	if _, ok := history.lastSeen["1"]; !ok {
+		t.Fatal("expected history entry for current friend to remain")
+	}
+}
+
+func TestFriendSyncRunStateTracksSeparateFollowAndUnfollowBackoff(t *testing.T) {
 	now := time.Unix(100, 0)
 	state := friendSyncRunState{}
-	state.recordError(now, &xblsocial.ResponseError{StatusCode: 429, RetryAfter: 2 * time.Minute})
+	state.record(now, friendSyncResult{followRetryAfter: 2 * time.Minute})
 
 	blocked := state.options(now.Add(time.Minute), true)
-	if blocked.autoFollow || blocked.autoUnfollow {
-		t.Fatalf("expected mutations suppressed during retry-after, got %#v", blocked)
+	if blocked.autoFollow {
+		t.Fatal("expected auto-follow suppressed during retry-after")
+	}
+	if !blocked.autoUnfollow {
+		t.Fatal("expected auto-unfollow to keep running (separate limit)")
 	}
 
 	allowed := state.options(now.Add(3*time.Minute), true)
@@ -209,24 +360,10 @@ func TestFriendSyncRunStateSuppressesMutationsDuringRetryAfter(t *testing.T) {
 	}
 }
 
-func TestFriendSyncRunStateSkipsReadsDuringRetryAfter(t *testing.T) {
-	now := time.Unix(100, 0)
-	state := friendSyncRunState{}
-	state.recordError(now, &xblsocial.ResponseError{StatusCode: 429, RetryAfter: 2 * time.Minute})
-
-	if !state.backingOff(now.Add(time.Minute)) {
-		t.Fatal("expected sync skipped during retry-after")
-	}
-
-	if state.backingOff(now.Add(3 * time.Minute)) {
-		t.Fatal("expected sync after retry-after")
-	}
-}
-
 func TestFriendSyncRunStateSuppressesAutoFollowWhenFriendListIsFull(t *testing.T) {
 	now := time.Unix(100, 0)
 	state := friendSyncRunState{}
-	state.recordError(now, &xblsocial.ResponseError{Code: 1028})
+	state.record(now, friendSyncResult{friendListFull: true})
 
 	opts := state.options(now.Add(time.Minute), true)
 	if opts.autoFollow {
@@ -238,12 +375,46 @@ func TestFriendSyncRunStateSuppressesAutoFollowWhenFriendListIsFull(t *testing.T
 }
 
 type syncFriendClient struct {
-	people      []Person
-	accept      func(context.Context) ([]Person, error)
-	follow      func(context.Context, string) error
-	unfollow    func(context.Context, string) error
-	followCalls int
-	removeCalls int
+	people          []Person
+	accept          func(context.Context) ([]Person, error)
+	follow          func(context.Context, string) error
+	unfollow        func(context.Context, string) error
+	followCalls     int
+	removeCalls     int
+	forceUnfollowed []string
+}
+
+func (c *syncFriendClient) ForceUnfollow(_ context.Context, xuid string) error {
+	c.forceUnfollowed = append(c.forceUnfollowed, xuid)
+	return nil
+}
+
+type notifierFunc func(context.Context, string) error
+
+func (f notifierFunc) Notify(ctx context.Context, message string) error {
+	return f(ctx, message)
+}
+
+type syncHistoryStore struct {
+	lastSeen map[string]time.Time
+}
+
+func (s *syncHistoryStore) LastSeen(_ context.Context, xuid string) (time.Time, bool, error) {
+	when, ok := s.lastSeen[xuid]
+	return when, ok, nil
+}
+
+func (s *syncHistoryStore) Clear(_ context.Context, xuid string) error {
+	delete(s.lastSeen, xuid)
+	return nil
+}
+
+func (s *syncHistoryStore) XUIDs(context.Context) ([]string, error) {
+	xuids := make([]string, 0, len(s.lastSeen))
+	for xuid := range s.lastSeen {
+		xuids = append(xuids, xuid)
+	}
+	return xuids, nil
 }
 
 func (c *syncFriendClient) Friends(context.Context) ([]Person, error) {

@@ -19,10 +19,16 @@ FROM alpine:3.22
 
 RUN apk add --no-cache ca-certificates && update-ca-certificates
 
+RUN addgroup -S app && adduser -S -G app -h /opt/app app
+
 WORKDIR /opt/app/config
 
 COPY --from=build /app/mcxboxbroadcast_bin /mcxboxbroadcast
 
 VOLUME ["/opt/app/config"]
+
+RUN chown -R app:app /opt/app
+
+USER app:app
 
 CMD ["/mcxboxbroadcast", "-config", "/opt/app/config/config.yml"]

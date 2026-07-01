@@ -16,7 +16,6 @@ import (
 	"github.com/sandertv/gophertunnel/minecraft/p2p"
 	"github.com/sandertv/gophertunnel/minecraft/room"
 	"github.com/sandertv/gophertunnel/minecraft/service"
-	"golang.org/x/oauth2"
 )
 
 // Config holds the dependencies and settings for a Broadcaster.
@@ -29,9 +28,6 @@ type Config struct {
 	// XUID is the primary account's Xbox user ID. If empty, it is read from
 	// XBLClient when available.
 	XUID string
-	// LiveTokenSource supplies Microsoft Live tokens for compatibility with
-	// callers that still need to manage the underlying Microsoft auth cache.
-	LiveTokenSource oauth2.TokenSource
 	// MinecraftTokenSource supplies Minecraft franchise service tokens for
 	// signaling and gallery/profile image requests.
 	MinecraftTokenSource service.TokenSource
@@ -81,6 +77,10 @@ type Config struct {
 	// UpdateInterval controls the background session refresh interval. Values
 	// lower than 20 seconds are raised to 20 seconds to avoid Xbox rate limits.
 	UpdateInterval time.Duration
+	// TransferCloseTimeout bounds how long transferred clients are held open
+	// waiting for their disconnect. Zero uses a 15-second default; negative
+	// values disable the wait.
+	TransferCloseTimeout time.Duration
 	// HTTPClient is used by auth/signaling/session requests where supported.
 	HTTPClient *http.Client
 	// SignalingDialTimeout bounds default signaling startup. If zero, a
@@ -166,23 +166,23 @@ type Notifier interface {
 }
 
 type FriendSyncConfig struct {
-	UpdateInterval  time.Duration
-	AutoFollow      bool
-	AutoUnfollow    bool
-	InitialInvite   bool
-	ExpiryEnabled   bool
-	ExpiryDays      int
-	ExpiryCheck     time.Duration
-	IgnoreGuestXUID bool
+	UpdateInterval time.Duration
+	AutoFollow     bool
+	AutoUnfollow   bool
+	InitialInvite  bool
+	ExpiryEnabled  bool
+	ExpiryDays     int
+	ExpiryCheck    time.Duration
 }
 
 type SubAccountConfig struct {
-	ID              string
-	Enabled         bool
-	XBLClient       *xsapi.Client
-	XBLTokenSource  xsapi.TokenSource
-	XUID            string
-	LiveTokenSource oauth2.TokenSource
-	PublishConfig   mpsd.PublishConfig
-	FriendSync      *FriendSyncConfig
+	ID             string
+	Enabled        bool
+	XBLClient      *xsapi.Client
+	XBLTokenSource xsapi.TokenSource
+	XUID           string
+	PublishConfig  mpsd.PublishConfig
+	// FriendSync overrides the primary account's friend sync configuration for
+	// this sub-account. If nil, the primary configuration is used.
+	FriendSync *FriendSyncConfig
 }
