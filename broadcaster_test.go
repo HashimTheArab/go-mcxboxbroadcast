@@ -18,6 +18,7 @@ import (
 	"github.com/df-mc/go-xsapi/v2"
 	"github.com/df-mc/go-xsapi/v2/mpsd"
 	"github.com/google/uuid"
+	"github.com/sandertv/gophertunnel/minecraft"
 	"github.com/sandertv/gophertunnel/minecraft/p2p"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/login"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
@@ -190,6 +191,47 @@ func TestBroadcasterWarnsForWebSocketSignaling(t *testing.T) {
 	b.warnWebSocketSignalingMode(SignalingModeJSONRPC)
 	if log.Len() != 0 {
 		t.Fatalf("unexpected warning for jsonrpc mode: %q", log.String())
+	}
+}
+
+func TestMinecraftListenConfigEnablesPacketDiagnosticsInDebugMode(t *testing.T) {
+	var log bytes.Buffer
+	b := &Broadcaster{
+		log: slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		conf: Config{
+			Status: Status{HostName: "Host", WorldName: "World"},
+		},
+	}
+
+	conf := b.minecraftListenConfig(room.Status{HostName: "Host", WorldName: "World"})
+	if conf.PacketFunc == nil {
+		t.Fatal("expected packet diagnostics in debug mode")
+	}
+	conf.PacketFunc(packet.Header{PacketID: packet.IDRequestNetworkSettings}, []byte{1, 2, 3}, nil, nil)
+
+	got := log.String()
+	if !strings.Contains(got, "minecraft packet") || !strings.Contains(got, "packet_id=193") {
+		t.Fatalf("packet diagnostic log missing: %q", got)
+	}
+}
+
+func TestMinecraftListenConfigKeepsCustomPacketFunc(t *testing.T) {
+	customCalled := false
+	custom := func(packet.Header, []byte, net.Addr, net.Addr) {
+		customCalled = true
+	}
+	b := &Broadcaster{
+		log: slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		conf: Config{
+			ListenConfig: minecraft.ListenConfig{PacketFunc: custom},
+			Status:       Status{HostName: "Host", WorldName: "World"},
+		},
+	}
+
+	conf := b.minecraftListenConfig(room.Status{HostName: "Host", WorldName: "World"})
+	conf.PacketFunc(packet.Header{}, nil, nil, nil)
+	if !customCalled {
+		t.Fatal("custom packet func was not preserved")
 	}
 }
 

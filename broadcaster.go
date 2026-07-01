@@ -181,10 +181,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 
 	b.registerNetherNetNetwork(sig, status)
 
-	listenConf := b.conf.ListenConfig
-	listenConf.ErrorLog = b.log
-	listenConf.StatusProvider = b.minecraftStatusProvider(status)
-	listenConf.AuthenticationDisabled = true
+	listenConf := b.minecraftListenConfig(status)
 	b.debug("starting nethernet listener",
 		"listen_network", "nethernet",
 		"auth_disabled", listenConf.AuthenticationDisabled,
@@ -289,6 +286,18 @@ func (b *Broadcaster) roomListenConfig(status room.Status) room.ListenConfig {
 		DisableServerStatusOverride: true,
 		Log:                         b.log,
 	}
+}
+
+// minecraftListenConfig applies broadcaster defaults to a Minecraft listener.
+func (b *Broadcaster) minecraftListenConfig(status room.Status) minecraft.ListenConfig {
+	conf := b.conf.ListenConfig
+	conf.ErrorLog = b.log
+	conf.StatusProvider = b.minecraftStatusProvider(status)
+	conf.AuthenticationDisabled = true
+	if b.debugEnabled() && conf.PacketFunc == nil {
+		conf.PacketFunc = b.logMinecraftPacket
+	}
+	return conf
 }
 
 // netherNetListenConfig returns the nethernet listen config with a default conn context applied.
@@ -845,6 +854,28 @@ func (b *Broadcaster) debug(msg string, args ...any) {
 	debugLog(b.log, msg, args...)
 }
 
+func (b *Broadcaster) debugEnabled() bool {
+	return b.log != nil && b.log.Enabled(context.Background(), slog.LevelDebug)
+}
+
+func (b *Broadcaster) logMinecraftPacket(header packet.Header, payload []byte, src, dst net.Addr) {
+	b.debug("minecraft packet",
+		"packet_id", header.PacketID,
+		"sender_sub_client", header.SenderSubClient,
+		"target_sub_client", header.TargetSubClient,
+		"payload_len", len(payload),
+		"src", addrString(src),
+		"dst", addrString(dst),
+	)
+}
+
+func addrString(addr net.Addr) string {
+	if addr == nil {
+		return ""
+	}
+	return addr.String()
+}
+
 // debugLog logs a message at debug level using the given logger if non-nil.
 func debugLog(log *slog.Logger, msg string, args ...any) {
 	if log != nil {
@@ -1298,10 +1329,7 @@ func (b *Broadcaster) recreateSession() error {
 
 	b.registerNetherNetNetwork(sig, status)
 
-	listenConf := b.conf.ListenConfig
-	listenConf.ErrorLog = b.log
-	listenConf.StatusProvider = b.minecraftStatusProvider(status)
-	listenConf.AuthenticationDisabled = true
+	listenConf := b.minecraftListenConfig(status)
 	l, err := listenConf.Listen("nethernet", "")
 	if err != nil {
 		_ = b.cleanupPublishedSessions(true)
