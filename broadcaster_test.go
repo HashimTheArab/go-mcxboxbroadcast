@@ -227,6 +227,9 @@ func TestMinecraftListenConfigKeepsFullLoginFlow(t *testing.T) {
 	if conf.DisablePacketHandling {
 		t.Fatal("expected listener to wait for resource-pack login flow")
 	}
+	if conf.CompressionThreshold != -1 {
+		t.Fatalf("CompressionThreshold = %d, want -1 for Java-compatible threshold 0", conf.CompressionThreshold)
+	}
 	if !conf.ForceDisableVibrantVisuals {
 		t.Fatal("expected listener to force-disable vibrant visuals")
 	}

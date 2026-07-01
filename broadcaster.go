@@ -294,6 +294,7 @@ func (b *Broadcaster) minecraftListenConfig(status room.Status) minecraft.Listen
 	conf.ErrorLog = b.log
 	conf.StatusProvider = b.minecraftStatusProvider(status)
 	conf.AuthenticationDisabled = true
+	conf.CompressionThreshold = -1
 	conf.ForceDisableVibrantVisuals = true
 	conf.ResourcePackWorldTemplateUUID = uuid.New()
 	conf.ResourcePackWorldTemplateVersion = "*"
