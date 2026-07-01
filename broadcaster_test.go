@@ -215,7 +215,7 @@ func TestMinecraftListenConfigEnablesPacketDiagnosticsInDebugMode(t *testing.T) 
 	}
 }
 
-func TestMinecraftListenConfigAcceptsAfterHandshake(t *testing.T) {
+func TestMinecraftListenConfigKeepsFullLoginFlow(t *testing.T) {
 	b := &Broadcaster{
 		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		conf: Config{
@@ -224,8 +224,8 @@ func TestMinecraftListenConfigAcceptsAfterHandshake(t *testing.T) {
 	}
 
 	conf := b.minecraftListenConfig(room.Status{HostName: "Host", WorldName: "World"})
-	if !conf.DisablePacketHandling {
-		t.Fatal("expected listener to accept redirect clients after handshake")
+	if conf.DisablePacketHandling {
+		t.Fatal("expected listener to wait for resource-pack login flow")
 	}
 }
 
@@ -504,6 +504,16 @@ func TestBroadcasterTransferSendsStartGameBeforeTransfer(t *testing.T) {
 	transfer := conn.packets[transferIndex].(*packet.Transfer)
 	if transfer.Address != "play.example.net" || transfer.Port != 19133 {
 		t.Fatalf("unexpected transfer target %#v", transfer)
+	}
+	startGame := conn.packets[startGameIndex].(*packet.StartGame)
+	if startGame.WorldName != "Redirect Lobby" || startGame.Dimension != 2 || startGame.PlayerGameMode != 1 || startGame.WorldGameMode != 1 {
+		t.Fatalf("unexpected StartGame redirect shape %#v", startGame)
+	}
+	if startGame.BaseGameVersion != "*" || startGame.GameVersion != "*" || startGame.ServerAuthoritativeInventory {
+		t.Fatalf("unexpected StartGame version/inventory fields %#v", startGame)
+	}
+	if startGame.PlayerMovementSettings.ServerAuthoritativeBlockBreaking {
+		t.Fatalf("unexpected StartGame movement settings %#v", startGame.PlayerMovementSettings)
 	}
 	if conn.flushes != 1 {
 		t.Fatalf("expected one flush, got %d", conn.flushes)
