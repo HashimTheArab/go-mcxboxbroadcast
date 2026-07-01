@@ -215,6 +215,20 @@ func TestMinecraftListenConfigEnablesPacketDiagnosticsInDebugMode(t *testing.T) 
 	}
 }
 
+func TestMinecraftListenConfigAcceptsAfterHandshake(t *testing.T) {
+	b := &Broadcaster{
+		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		conf: Config{
+			Status: Status{HostName: "Host", WorldName: "World"},
+		},
+	}
+
+	conf := b.minecraftListenConfig(room.Status{HostName: "Host", WorldName: "World"})
+	if !conf.DisablePacketHandling {
+		t.Fatal("expected listener to accept redirect clients after handshake")
+	}
+}
+
 func TestMinecraftListenConfigKeepsCustomPacketFunc(t *testing.T) {
 	customCalled := false
 	custom := func(packet.Header, []byte, net.Addr, net.Addr) {
