@@ -17,6 +17,7 @@ import (
 
 	"github.com/HashimTheArab/go-mcxboxbroadcast"
 	"github.com/df-mc/go-xsapi/v2"
+	"github.com/df-mc/go-xsapi/v2/xal/sisu"
 	"golang.org/x/oauth2"
 )
 
@@ -55,7 +56,11 @@ func main() {
 	defer stop()
 
 	if err := runBroadcasterCommand(ctx, commandOptions{ConfigPath: *configPath, Debug: *debug}, defaultCommandDeps()); err != nil {
-		slog.Error("broadcaster", "err", err)
+		if code, ok := errors.AsType[sisu.ErrorCode](err); ok && code == sisu.ErrorCodeAgeVerificationRequired {
+			fmt.Fprintln(os.Stderr, "broadcaster: authentication failed: complete Xbox/Microsoft age verification for this account, then retry")
+		} else {
+			slog.Error("broadcaster", "err", err)
+		}
 		os.Exit(1)
 	}
 }
