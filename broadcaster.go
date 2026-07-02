@@ -938,17 +938,9 @@ func (b *Broadcaster) joinSubAccount(ctx context.Context, account SubAccountConf
 	if err != nil {
 		return nil, fmt.Errorf("join handle %s: %w", handleID, err)
 	}
-	b.debug("sub-account joined mpsd session; publishing activity handle", "sub_account", account.ID)
-	// The sub-account needs its own activity handle: joining only adds the
-	// member, and without a handle the session is invisible to the
-	// sub-account's friends. MCXboxBroadcast creates one per sub-session too.
-	if err := s.SetActivity(ctx); err != nil {
-		err = fmt.Errorf("set activity handle: %w", err)
-		if err2 := s.Close(); err2 != nil {
-			err = errors.Join(err, fmt.Errorf("cleanup session: %w", err2))
-		}
-		return nil, err
-	}
+	// Join publishes the sub-account's own activity handle as part of session
+	// creation, which is what makes the session visible to the sub-account's
+	// friends; no extra handle write is needed here.
 	return s, nil
 }
 
