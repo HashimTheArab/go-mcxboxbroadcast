@@ -144,8 +144,10 @@ func normalizeStatus(status room.Status) room.Status {
 	if status.WorldType == "" {
 		status.WorldType = WorldTypeSurvival
 	}
-	if status.MemberCount < 0 {
-		status.MemberCount = 0
+	// The host always counts itself, like a real client hosting a world.
+	// Clients list zero-member worlds as online-only, never joinable.
+	if status.MemberCount < 1 {
+		status.MemberCount = 1
 	}
 	if status.MaxMemberCount <= status.MemberCount {
 		status.MaxMemberCount = status.MemberCount + 1

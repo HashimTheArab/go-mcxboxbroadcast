@@ -38,10 +38,10 @@ func TestStatusDefaults(t *testing.T) {
 	if status.WorldName != "Host" {
 		t.Fatalf("unexpected world name %q", status.WorldName)
 	}
-	if status.MemberCount != 0 {
-		t.Fatalf("unexpected member count %d (Java broadcasts 0 by default)", status.MemberCount)
+	if status.MemberCount != 1 {
+		t.Fatalf("unexpected member count %d (the host counts itself; clients list zero-member worlds as online-only)", status.MemberCount)
 	}
-	if status.MaxMemberCount != 1 {
+	if status.MaxMemberCount != 2 {
 		t.Fatalf("unexpected max member count %d", status.MaxMemberCount)
 	}
 	if status.OwnerID != "123" {
