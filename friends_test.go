@@ -13,6 +13,16 @@ import (
 	xblsocial "github.com/df-mc/go-xsapi/v2/social"
 )
 
+// Endpoint fixtures pinning the exact request URLs the social layer must hit
+// for MCXboxBroadcast parity.
+const (
+	peopleHubFollowersURL = "https://peoplehub.xboxlive.com/users/me/people/followers"
+	peopleHubSocialURL    = "https://peoplehub.xboxlive.com/users/me/people/social"
+	pendingRequestsURL    = "https://peoplehub.xboxlive.com/users/me/people/friendRequests(received)"
+	bulkAddFriendsURL     = "https://social.xboxlive.com/bulk/users/me/people/friends/v2?method=add"
+	socialSummaryURL      = "https://social.xboxlive.com/users/me/summary"
+)
+
 func followURL(xuid string) string {
 	return fmt.Sprintf("https://social.xboxlive.com/users/me/people/xuid(%s)", xuid)
 }
