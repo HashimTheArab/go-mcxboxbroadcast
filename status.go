@@ -3,8 +3,10 @@ package broadcaster
 import (
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"net"
 	"net/http"
 	"net/url"
@@ -72,7 +74,7 @@ func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 		LanGame:                 false,
 		OnlineCrossPlatformGame: true,
 		CrossPlayDisabled:       false,
-		LevelID:                 levelID(st.LevelID),
+		LevelID:                 defaultString(levelID(st.LevelID), accountLevelID(ownerID)),
 	}), nil
 }
 
@@ -203,6 +205,18 @@ func levelID(id string) string {
 		return ""
 	}
 	return base64.StdEncoding.EncodeToString([]byte(id))
+}
+
+// accountLevelID derives a stable level id from the account XUID, shaped like
+// a vanilla one (base64 of 8 bytes). It must be unique per account: friends
+// of multiple broadcaster accounts only get one joinable card per level id,
+// so sharing Java's literal "level" hides every world after the first.
+func accountLevelID(xuid string) string {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(xuid))
+	var buf [8]byte
+	binary.LittleEndian.PutUint64(buf[:], h.Sum64())
+	return base64.StdEncoding.EncodeToString(buf[:])
 }
 
 type QueryOptions struct {

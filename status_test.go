@@ -2,6 +2,7 @@ package broadcaster
 
 import (
 	"context"
+	"encoding/base64"
 	"testing"
 	"time"
 
@@ -50,6 +51,42 @@ func TestStatusDefaults(t *testing.T) {
 	}
 	if status.TitleID != 0 {
 		t.Fatalf("unexpected title id %d", status.TitleID)
+	}
+}
+
+func TestStatusLevelIDUniquePerAccount(t *testing.T) {
+	levelID := func(xuid string) string {
+		b, err := New(Config{
+			XBLTokenSource: staticTokenSource{},
+			XUID:           xuid,
+			Server:         ServerInfo{Host: "127.0.0.1", Port: 19132},
+			Status:         Status{HostName: "Host"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		status, err := b.status(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.LevelID == "" {
+			t.Fatal("level ID is empty")
+		}
+		// Vanilla level ids are base64 of 8 bytes (a random int64).
+		if raw, err := base64.StdEncoding.DecodeString(status.LevelID); err != nil || len(raw) != 8 {
+			t.Fatalf("level ID %q is not base64 of 8 bytes (err=%v)", status.LevelID, err)
+		}
+		again, err := b.status(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if again.LevelID != status.LevelID {
+			t.Fatalf("level ID not stable: %q != %q", again.LevelID, status.LevelID)
+		}
+		return status.LevelID
+	}
+	if levelID("123") == levelID("456") {
+		t.Fatal("accounts share a level ID; duplicate world identities collapse into one friend card")
 	}
 }
 
