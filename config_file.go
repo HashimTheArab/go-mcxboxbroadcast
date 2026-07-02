@@ -61,6 +61,11 @@ type SessionInfoFile struct {
 	MaxPlayers int    `yaml:"maxPlayers" toml:"maxPlayers"`
 	IP         string `yaml:"ip" toml:"ip"`
 	Port       uint16 `yaml:"port" toml:"port"`
+	// Version overrides the game version advertised in the session document.
+	// Empty uses the protocol library's version. Clients hide friend worlds
+	// older than their own game version, so set this when a client update
+	// ships before the protocol library catches up.
+	Version string `yaml:"version,omitempty" toml:"version,omitempty"`
 }
 
 type FriendFileConfig struct {
@@ -279,6 +284,7 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 			HostName:         c.Session.SessionInfo.HostName,
 			WorldName:        c.Session.SessionInfo.WorldName,
 			WorldType:        c.Session.WorldType,
+			Version:          c.Session.SessionInfo.Version,
 			Players:          c.Session.SessionInfo.Players,
 			MaxPlayers:       c.Session.SessionInfo.MaxPlayers,
 			Broadcast:        c.Session.BroadcastSetting,

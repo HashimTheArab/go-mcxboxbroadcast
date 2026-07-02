@@ -120,9 +120,14 @@ func (s ServerInfo) validate() error {
 
 // Status is the server metadata shown in the Xbox friend-list world.
 type Status struct {
-	HostName         string
-	WorldName        string
-	WorldType        string
+	HostName  string
+	WorldName string
+	WorldType string
+	// Version is the game version advertised in the session document.
+	// Clients hide friend worlds whose version is older than their own, so
+	// this may need to lead the compiled-in protocol.CurrentVersion when a
+	// client update ships before the protocol library catches up.
+	Version          string
 	Players          int
 	MaxPlayers       int
 	Broadcast        int32

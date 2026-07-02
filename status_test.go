@@ -9,6 +9,7 @@ import (
 	"github.com/sandertv/gophertunnel/minecraft"
 
 	"github.com/sandertv/gophertunnel/minecraft/p2p"
+	"github.com/sandertv/gophertunnel/minecraft/protocol"
 	"github.com/sandertv/gophertunnel/minecraft/room"
 )
 
@@ -51,6 +52,31 @@ func TestStatusDefaults(t *testing.T) {
 	}
 	if status.TitleID != 0 {
 		t.Fatalf("unexpected title id %d", status.TitleID)
+	}
+}
+
+func TestStatusVersionOverride(t *testing.T) {
+	status := func(version string) room.Status {
+		b, err := New(Config{
+			XBLTokenSource: staticTokenSource{},
+			XUID:           "123",
+			Server:         ServerInfo{Host: "127.0.0.1", Port: 19132},
+			Status:         Status{HostName: "Host", Version: version},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		st, err := b.status(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	if got := status("1.26.32").Version; got != "1.26.32" {
+		t.Fatalf("version override not applied: %q", got)
+	}
+	if got := status("").Version; got != protocol.CurrentVersion {
+		t.Fatalf("empty version should fall back to protocol.CurrentVersion, got %q", got)
 	}
 }
 

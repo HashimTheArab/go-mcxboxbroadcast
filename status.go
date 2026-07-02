@@ -69,7 +69,7 @@ func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 		// value makes clients hide the world from the friend list.
 		Joinability:             p2p.JoinabilityFriends,
 		Protocol:                protocol.CurrentProtocol,
-		Version:                 protocol.CurrentVersion,
+		Version:                 defaultString(st.Version, protocol.CurrentVersion),
 		TransportLayer:          p2p.TransportLayerNetherNet,
 		LanGame:                 false,
 		OnlineCrossPlatformGame: true,
