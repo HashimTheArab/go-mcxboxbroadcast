@@ -829,3 +829,37 @@ func TestSubAccountInviterRequiresJoinedSession(t *testing.T) {
 		t.Fatal("expected error inviting before the sub-account joined the session")
 	}
 }
+
+func TestStartSubAccountsTimeoutDoesNotBlockStartup(t *testing.T) {
+	b, err := New(Config{
+		XBLTokenSource: staticTokenSource{},
+		XUID:           "123",
+		Server:         ServerInfo{Host: "127.0.0.1", Port: 19132},
+		SubAccounts: []SubAccountConfig{{
+			ID:             "sub1",
+			Enabled:        true,
+			XBLTokenSource: staticTokenSource{},
+			XUID:           "456",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.ctx, b.cancel = context.WithCancel(context.Background())
+	defer b.cancel()
+	b.subAccountStartTimeout = 50 * time.Millisecond
+	b.subAccountPublisher = func(ctx context.Context, _ SubAccountConfig, _ mpsd.SessionReference, _ mpsd.PublishConfig) (*mpsd.Session, error) {
+		<-ctx.Done() // a hung join must be bounded by the per-account timeout
+		return nil, ctx.Err()
+	}
+	done := make(chan error, 1)
+	go func() { done <- b.startSubAccounts(b.ctx) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("hung sub-account should be skipped, not fail startup: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("startSubAccounts blocked on a hung sub-account join")
+	}
+}

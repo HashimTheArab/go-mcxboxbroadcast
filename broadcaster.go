@@ -66,6 +66,10 @@ type Broadcaster struct {
 	lastQuery *minecraft.ServerStatus
 
 	transferCloseTimeout time.Duration
+	// subAccountStartTimeout bounds each sub-account's session join so a hung
+	// directory or RTA call degrades to a skipped sub-account instead of
+	// blocking broadcaster startup. Zero uses the default.
+	subAccountStartTimeout time.Duration
 	// subAccountSettleDelay is the wait after establishing a new sub-account
 	// friendship before joining the session.
 	subAccountSettleDelay time.Duration
@@ -849,7 +853,7 @@ func (b *Broadcaster) startSubAccounts(ctx context.Context) error {
 			b.log.Warn("sub-account skipped because xbox live credentials are missing", "sub_account", account.ID)
 			continue
 		}
-		if err := b.startSubAccount(ctx, account); err != nil {
+		if err := b.startSubAccountBounded(ctx, account); err != nil {
 			// A canceled context means the broadcaster is shutting down, not
 			// that this or the remaining sub-accounts genuinely failed.
 			if ctx.Err() != nil {
@@ -863,6 +867,19 @@ func (b *Broadcaster) startSubAccounts(ctx context.Context) error {
 }
 
 // startSubAccount prepares one sub-account and joins it to the primary session.
+// startSubAccountBounded runs startSubAccount under the per-account timeout.
+// The context only scopes the join requests; the sub-account's RTA connection
+// and session outlive it.
+func (b *Broadcaster) startSubAccountBounded(ctx context.Context, account *SubAccountConfig) error {
+	timeout := b.subAccountStartTimeout
+	if timeout <= 0 {
+		timeout = 90 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return b.startSubAccount(ctx, account)
+}
+
 func (b *Broadcaster) startSubAccount(ctx context.Context, account *SubAccountConfig) error {
 	if _, err := b.subAccountXBLClient(ctx, account); err != nil {
 		return fmt.Errorf("prepare xbox live client: %w", err)
@@ -916,10 +933,12 @@ func (b *Broadcaster) joinSubAccount(ctx context.Context, account SubAccountConf
 	if err != nil {
 		return nil, err
 	}
+	b.debug("resolved primary activity handle", "sub_account", account.ID, "handle_id", handleID)
 	s, err := client.Join(ctx, handleID, mpsd.JoinConfig{})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("join handle %s: %w", handleID, err)
 	}
+	b.debug("sub-account joined mpsd session; publishing activity handle", "sub_account", account.ID)
 	// The sub-account needs its own activity handle: joining only adds the
 	// member, and without a handle the session is invisible to the
 	// sub-account's friends. MCXboxBroadcast creates one per sub-session too.
