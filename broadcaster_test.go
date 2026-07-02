@@ -814,3 +814,18 @@ func (c *recordingTransferConn) IdentityData() login.IdentityData {
 func (c *recordingTransferConn) readStarted() bool {
 	return c.readStartedValue
 }
+
+func TestSubAccountInviterRequiresJoinedSession(t *testing.T) {
+	b, err := New(Config{
+		XBLTokenSource: staticTokenSource{},
+		XUID:           "123",
+		Server:         ServerInfo{Host: "127.0.0.1", Port: 19132},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inviter := &subAccountInviter{b: b, id: "sub1"}
+	if err := inviter.Invite(context.Background(), "456", "1739947436"); err == nil {
+		t.Fatal("expected error inviting before the sub-account joined the session")
+	}
+}

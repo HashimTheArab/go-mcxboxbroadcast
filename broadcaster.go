@@ -46,6 +46,7 @@ type Broadcaster struct {
 	signaling           nethernet.Signaling
 	sessionRef          mpsd.SessionReference
 	subSessions         []*mpsd.Session
+	subSessionsByID     map[string]*mpsd.Session
 	announcerFactory    func(*Broadcaster) room.Announcer
 	subAccountPublisher func(context.Context, SubAccountConfig, mpsd.SessionReference, mpsd.PublishConfig) (*mpsd.Session, error)
 	xblClient           *xsapi.Client
@@ -286,6 +287,9 @@ func (b *Broadcaster) startSubAccountFriendSync() {
 			History:  b.conf.FriendHistory,
 			Notifier: b.conf.Notifier,
 			Log:      b.log.With("sub_account", account.ID),
+		}
+		if conf.InitialInvite {
+			syncer.Inviter = &subAccountInviter{b: b, id: account.ID}
 		}
 		b.debug("starting sub-account friend sync", "sub_account", account.ID)
 		go syncer.Run(b.ctx)
@@ -559,6 +563,24 @@ func (i *broadcasterInviter) Invite(ctx context.Context, xuid, titleID string) e
 	}
 	session := announcer.Session
 	i.b.mu.Unlock()
+	_, err := session.Invite(ctx, xuid, titleID)
+	return err
+}
+
+// subAccountInviter sends friend invites through a sub-account's joined
+// session, resolved dynamically so invites work as soon as the join lands.
+type subAccountInviter struct {
+	b  *Broadcaster
+	id string
+}
+
+func (i *subAccountInviter) Invite(ctx context.Context, xuid, titleID string) error {
+	i.b.mu.Lock()
+	session := i.b.subSessionsByID[i.id]
+	i.b.mu.Unlock()
+	if session == nil {
+		return errors.New("invite: sub-account has not joined the session")
+	}
 	_, err := session.Invite(ctx, xuid, titleID)
 	return err
 }
@@ -864,7 +886,13 @@ func (b *Broadcaster) startSubAccount(ctx context.Context, account *SubAccountCo
 	if err != nil {
 		return fmt.Errorf("join session: %w", err)
 	}
+	b.mu.Lock()
 	b.subSessions = append(b.subSessions, s)
+	if b.subSessionsByID == nil {
+		b.subSessionsByID = make(map[string]*mpsd.Session)
+	}
+	b.subSessionsByID[account.ID] = s
+	b.mu.Unlock()
 	b.debug("joined sub-account to session", "sub_account", account.ID, "xuid", account.XUID)
 	return nil
 }
@@ -888,7 +916,21 @@ func (b *Broadcaster) joinSubAccount(ctx context.Context, account SubAccountConf
 	if err != nil {
 		return nil, err
 	}
-	return client.Join(ctx, handleID, mpsd.JoinConfig{})
+	s, err := client.Join(ctx, handleID, mpsd.JoinConfig{})
+	if err != nil {
+		return nil, err
+	}
+	// The sub-account needs its own activity handle: joining only adds the
+	// member, and without a handle the session is invisible to the
+	// sub-account's friends. MCXboxBroadcast creates one per sub-session too.
+	if err := s.SetActivity(ctx); err != nil {
+		err = fmt.Errorf("set activity handle: %w", err)
+		if err2 := s.Close(); err2 != nil {
+			err = errors.Join(err, fmt.Errorf("cleanup session: %w", err2))
+		}
+		return nil, err
+	}
+	return s, nil
 }
 
 // primaryActivityHandleID finds the primary account's activity handle for the
