@@ -14,8 +14,6 @@ session:
   # true resets the displayed values back to sessionInfo instead.
   configFallback: false
   broadcastSetting: 3
-  # Wire value published to the session document: joinable_by_friends or invite_only.
-  joinability: joinable_by_friends
   worldType: Survival
   sessionInfo:
     hostName: Minecraft Server

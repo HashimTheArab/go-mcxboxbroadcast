@@ -68,7 +68,6 @@ session:
   web-query-fallback: true
   config-fallback: false
   broadcast-setting: 2
-  joinability: invite_only
   world-type: Creative
   session-info:
     host-name: Example Host
@@ -122,7 +121,7 @@ accounts:
 	if cfg.Session.UpdateInterval != 45 || cfg.Session.QueryServer || !cfg.Session.WebQueryFallback || cfg.Session.ConfigFallback {
 		t.Fatalf("session query aliases were not loaded: %#v", cfg.Session)
 	}
-	if cfg.Session.BroadcastSetting != 2 || cfg.Session.Joinability != JoinabilityInviteOnly || cfg.Session.WorldType != "Creative" {
+	if cfg.Session.BroadcastSetting != 2 || cfg.Session.WorldType != "Creative" {
 		t.Fatalf("session status aliases were not loaded: %#v", cfg.Session)
 	}
 	if cfg.Session.SessionInfo.HostName != "Example Host" || cfg.Session.SessionInfo.MaxPlayers != 32 {
@@ -204,7 +203,6 @@ func TestConfigFileToConfigMapsOperatorSettings(t *testing.T) {
 	cfg.Session.SessionInfo.HostName = "Host"
 	cfg.Session.SessionInfo.WorldName = "World"
 	cfg.Session.BroadcastSetting = int32(BroadcastSettingFriendsOnly)
-	cfg.Session.Joinability = JoinabilityInviteOnly
 	cfg.Session.WorldType = WorldTypeSurvival
 	cfg.Session.QueryServer = false
 	cfg.Gallery.Enabled = true
@@ -265,38 +263,6 @@ func TestConfigFileRejectsWebSocketSignalingMode(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "session.signalingMode websocket is not supported") {
 		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestConfigFileRejectsInvalidJoinability(t *testing.T) {
-	for _, value := range []string{"JoinableByFriends", "InviteOnly", "sometimes"} {
-		cfg := DefaultConfigFile()
-		cfg.Session.Joinability = value
-		_, err := cfg.RuntimeConfig(RuntimeConfigInput{
-			XBLTokenSource: staticTokenSource{},
-		})
-		if err == nil {
-			t.Fatalf("expected error for joinability %q", value)
-		}
-		if !strings.Contains(err.Error(), "session.joinability") {
-			t.Fatalf("unexpected error for joinability %q: %v", value, err)
-		}
-	}
-}
-
-func TestConfigFileAcceptsValidJoinability(t *testing.T) {
-	for _, value := range []string{"", JoinabilityJoinableByFriends, JoinabilityInviteOnly} {
-		cfg := DefaultConfigFile()
-		cfg.Session.Joinability = value
-		runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{
-			XBLTokenSource: staticTokenSource{},
-		})
-		if err != nil {
-			t.Fatalf("unexpected error for joinability %q: %v", value, err)
-		}
-		if runtime.Status.Joinability != value {
-			t.Fatalf("unexpected runtime joinability %q for %q", runtime.Status.Joinability, value)
-		}
 	}
 }
 

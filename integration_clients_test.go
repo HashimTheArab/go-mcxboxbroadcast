@@ -330,8 +330,11 @@ func TestRoomStatusProviderNormalizesConfiguredProvider(t *testing.T) {
 	if status.TitleID != 0 {
 		t.Fatalf("provider title id = %d", status.TitleID)
 	}
-	if status.BroadcastSetting == 0 || status.Joinability == "" {
+	if status.BroadcastSetting == 0 {
 		t.Fatalf("provider session controls were not normalized: %#v", status)
+	}
+	if status.Joinability != p2p.JoinabilityFriends {
+		t.Fatalf("provider joinability = %q, want %q", status.Joinability, p2p.JoinabilityFriends)
 	}
 	if !status.OnlineCrossPlatformGame {
 		t.Fatalf("provider status missing cross-platform default: %#v", status)

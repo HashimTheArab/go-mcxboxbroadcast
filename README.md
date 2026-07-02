@@ -44,7 +44,8 @@ counts for each sync pass.
 The config exposes the same operator-facing areas as MCXboxBroadcast:
 
 - session target, update interval, query options, broadcast setting,
-  joinability, world type, and displayed MOTD data
+  world type, and displayed MOTD data (joinability is always
+  `joinable_by_friends`, matching MCXboxBroadcast)
 - gallery showcase image upload through `gallery.imagePath`
 - friend sync automation and expiry settings, including last-seen history path
   (stored as JSON at `friendSync.expiry.historyPath`, not Java's SQLite

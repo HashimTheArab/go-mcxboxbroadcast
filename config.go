@@ -13,7 +13,6 @@ import (
 	"github.com/df-mc/go-xsapi/v2"
 	"github.com/df-mc/go-xsapi/v2/mpsd"
 	"github.com/sandertv/gophertunnel/minecraft"
-	"github.com/sandertv/gophertunnel/minecraft/p2p"
 	"github.com/sandertv/gophertunnel/minecraft/room"
 	"github.com/sandertv/gophertunnel/minecraft/service"
 )
@@ -127,7 +126,6 @@ type Status struct {
 	Players          int
 	MaxPlayers       int
 	Broadcast        int32
-	Joinability      string
 	LevelID          string
 	QueryTarget      bool
 	QueryTimeout     time.Duration
@@ -145,9 +143,6 @@ const (
 )
 
 const (
-	JoinabilityInviteOnly        = p2p.JoinabilityInviteOnly
-	JoinabilityJoinableByFriends = p2p.JoinabilityFriends
-
 	WorldTypeCreative  = room.WorldTypeCreative
 	WorldTypeSurvival  = "Survival"
 	WorldTypeAdventure = "Adventure"

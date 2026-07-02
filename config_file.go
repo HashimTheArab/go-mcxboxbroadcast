@@ -50,7 +50,6 @@ type SessionFileConfig struct {
 	WebQueryFallback bool            `yaml:"webQueryFallback" toml:"webQueryFallback"`
 	ConfigFallback   bool            `yaml:"configFallback" toml:"configFallback"`
 	BroadcastSetting int32           `yaml:"broadcastSetting" toml:"broadcastSetting"`
-	Joinability      string          `yaml:"joinability" toml:"joinability"`
 	WorldType        string          `yaml:"worldType" toml:"worldType"`
 	SessionInfo      SessionInfoFile `yaml:"sessionInfo" toml:"sessionInfo"`
 }
@@ -122,7 +121,6 @@ func DefaultConfigFile() ConfigFile {
 			WebQueryFallback: false,
 			ConfigFallback:   false,
 			BroadcastSetting: int32(BroadcastSettingFriendsOfFriends),
-			Joinability:      JoinabilityJoinableByFriends,
 			WorldType:        WorldTypeSurvival,
 			SessionInfo: SessionInfoFile{
 				HostName:   "Minecraft Server",
@@ -271,10 +269,6 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	joinability, err := configJoinability(c.Session.Joinability)
-	if err != nil {
-		return Config{}, err
-	}
 	cfg := Config{
 		XBLClient:            in.XBLClient,
 		XBLTokenSource:       in.XBLTokenSource,
@@ -288,7 +282,6 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 			Players:          c.Session.SessionInfo.Players,
 			MaxPlayers:       c.Session.SessionInfo.MaxPlayers,
 			Broadcast:        c.Session.BroadcastSetting,
-			Joinability:      joinability,
 			QueryTarget:      c.Session.QueryServer,
 			WebQueryFallback: c.Session.WebQueryFallback,
 			QueryFallback:    c.Session.ConfigFallback,
@@ -333,18 +326,6 @@ func configSignalingMode(mode string) (SignalingMode, error) {
 		return "", errors.New("session.signalingMode websocket is not supported for Minecraft friend-list publishing; set session.signalingMode: jsonrpc")
 	default:
 		return "", fmt.Errorf("unknown session.signalingMode %q", mode)
-	}
-}
-
-// configJoinability validates session.joinability against the exact wire
-// values the session document accepts. Anything else would be published
-// verbatim and make clients hide the world, so it is a hard error.
-func configJoinability(value string) (string, error) {
-	switch value {
-	case "", JoinabilityJoinableByFriends, JoinabilityInviteOnly:
-		return value, nil
-	default:
-		return "", fmt.Errorf("unknown session.joinability %q; valid values are %q or %q", value, JoinabilityJoinableByFriends, JoinabilityInviteOnly)
 	}
 }
 

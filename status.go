@@ -56,14 +56,16 @@ func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 	}
 
 	return normalizeStatus(room.Status{
-		HostName:                stripColour(defaultString(st.HostName, b.hostNameFallback())),
-		WorldName:               stripColour(defaultString(st.WorldName, defaultString(st.HostName, b.hostNameFallback()))),
-		OwnerID:                 ownerID,
-		WorldType:               defaultString(st.WorldType, WorldTypeSurvival),
-		MemberCount:             max(st.Players, 0),
-		MaxMemberCount:          max(st.MaxPlayers, max(st.Players, 0)+1),
-		BroadcastSetting:        defaultBroadcastSetting(p2p.BroadcastSetting(st.Broadcast), p2p.BroadcastSettingFriendsOfFriends),
-		Joinability:             defaultString(st.Joinability, p2p.JoinabilityFriends),
+		HostName:         stripColour(defaultString(st.HostName, b.hostNameFallback())),
+		WorldName:        stripColour(defaultString(st.WorldName, defaultString(st.HostName, b.hostNameFallback()))),
+		OwnerID:          ownerID,
+		WorldType:        defaultString(st.WorldType, WorldTypeSurvival),
+		MemberCount:      max(st.Players, 0),
+		MaxMemberCount:   max(st.MaxPlayers, max(st.Players, 0)+1),
+		BroadcastSetting: defaultBroadcastSetting(p2p.BroadcastSetting(st.Broadcast), p2p.BroadcastSettingFriendsOfFriends),
+		// Always joinable_by_friends, matching MCXboxBroadcast; any other
+		// value makes clients hide the world from the friend list.
+		Joinability:             p2p.JoinabilityFriends,
 		Protocol:                protocol.CurrentProtocol,
 		Version:                 protocol.CurrentVersion,
 		TransportLayer:          p2p.TransportLayerNetherNet,
