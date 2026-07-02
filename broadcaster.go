@@ -903,13 +903,13 @@ func (b *Broadcaster) startSubAccount(ctx context.Context, account *SubAccountCo
 	if err != nil {
 		return fmt.Errorf("join session: %w", err)
 	}
-	b.mu.Lock()
+	// b.mu is held by Start for the whole startup sequence, so the session
+	// bookkeeping mutates directly; locking here would self-deadlock.
 	b.subSessions = append(b.subSessions, s)
 	if b.subSessionsByID == nil {
 		b.subSessionsByID = make(map[string]*mpsd.Session)
 	}
 	b.subSessionsByID[account.ID] = s
-	b.mu.Unlock()
 	b.debug("joined sub-account to session", "sub_account", account.ID, "xuid", account.XUID)
 	return nil
 }

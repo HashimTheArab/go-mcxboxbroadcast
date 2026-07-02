@@ -853,7 +853,13 @@ func TestStartSubAccountsTimeoutDoesNotBlockStartup(t *testing.T) {
 		return nil, ctx.Err()
 	}
 	done := make(chan error, 1)
-	go func() { done <- b.startSubAccounts(b.ctx) }()
+	go func() {
+		// Start holds b.mu for the whole startup sequence; mirror that so
+		// re-locking inside the sub-account path deadlocks the test too.
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		done <- b.startSubAccounts(b.ctx)
+	}()
 	select {
 	case err := <-done:
 		if err != nil {
