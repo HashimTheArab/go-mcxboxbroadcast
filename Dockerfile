@@ -25,9 +25,11 @@ WORKDIR /opt/app/config
 
 COPY --from=build /app/mcxboxbroadcast_bin /mcxboxbroadcast
 
-VOLUME ["/opt/app/config"]
-
+# chown must precede VOLUME: build steps that modify a path after it is
+# declared a volume are discarded, leaving the mount root-owned at runtime.
 RUN chown -R app:app /opt/app
+
+VOLUME ["/opt/app/config"]
 
 USER app:app
 

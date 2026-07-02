@@ -251,6 +251,20 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	return nil
 }
 
+// subAccountFriendSyncActive reports whether any enabled sub-account runs a
+// friend syncer sharing the primary's history store.
+func (b *Broadcaster) subAccountFriendSyncActive() bool {
+	for _, account := range b.conf.SubAccounts {
+		if !account.Enabled || !subAccountHasXBLCredentials(account) {
+			continue
+		}
+		if account.FriendSync != nil || b.conf.FriendSync != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // startSubAccountFriendSync runs a friend syncer per enabled sub-account so
 // people who friend a sub-account are followed back. Sub-accounts without an
 // explicit FriendSync configuration inherit the primary account's.
@@ -327,8 +341,11 @@ func (b *Broadcaster) friendSyncer() FriendSyncer {
 		Config:   *b.conf.FriendSync,
 		History:  b.conf.FriendHistory,
 		Notifier: b.conf.Notifier,
-		// Only the primary account prunes the shared history store.
-		PruneHistory: true,
+		// Pruning compares the store against the primary's friend list only,
+		// so it must stay off while sub-account syncers share the store:
+		// people who only friended a sub-account would be pruned and re-seeded
+		// with a fresh expiry clock every pass.
+		PruneHistory: !b.subAccountFriendSyncActive(),
 		Log:          b.log,
 	}
 	if b.conf.FriendSync.InitialInvite {
@@ -809,6 +826,11 @@ func (b *Broadcaster) startSubAccounts(ctx context.Context) error {
 			continue
 		}
 		if err := b.startSubAccount(ctx, account); err != nil {
+			// A canceled context means the broadcaster is shutting down, not
+			// that this or the remaining sub-accounts genuinely failed.
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			b.log.Error("start sub-account; continuing without it", "sub_account", account.ID, "err", err)
 			b.notify(ctx, "Sub-account "+account.ID+" failed to start: "+err.Error())
 		}

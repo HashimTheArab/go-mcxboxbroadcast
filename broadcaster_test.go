@@ -105,6 +105,58 @@ func TestBroadcasterStartSubAccountsSkipsExistingMutualFollow(t *testing.T) {
 	}
 }
 
+func TestBroadcasterStartSubAccountsStopsQuietlyOnContextCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var notified []string
+	var started []string
+	b := &Broadcaster{log: testBroadcasterLogger(), conf: Config{
+		XBLClient: &xsapi.Client{},
+		XUID:      "100",
+		Notifier: fakeNotifier{notify: func(_ context.Context, message string) {
+			notified = append(notified, message)
+		}},
+		SubAccounts: []SubAccountConfig{
+			{ID: "first", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "100"},
+			{ID: "second", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "100"},
+		},
+	}}
+	b.subAccountPublisher = func(_ context.Context, account SubAccountConfig, _ mpsd.SessionReference, _ mpsd.PublishConfig) (*mpsd.Session, error) {
+		started = append(started, account.ID)
+		cancel()
+		return nil, ctx.Err()
+	}
+
+	err := b.startSubAccounts(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("startSubAccounts() error = %v, want context.Canceled", err)
+	}
+	if fmt.Sprint(started) != "[first]" {
+		t.Fatalf("started = %v, want [first] (stop after cancellation)", started)
+	}
+	if len(notified) != 0 {
+		t.Fatalf("notifications = %v, want none during shutdown", notified)
+	}
+}
+
+func TestBroadcasterPrimarySyncerDisablesPruningWithSubAccountSyncers(t *testing.T) {
+	conf := Config{
+		XBLClient:  &xsapi.Client{},
+		XUID:       "100",
+		FriendSync: &FriendSyncConfig{AutoFollow: true, ExpiryEnabled: true},
+	}
+
+	solo := &Broadcaster{log: testBroadcasterLogger(), conf: conf}
+	if !solo.friendSyncer().PruneHistory {
+		t.Fatal("primary syncer should prune when it owns the history store alone")
+	}
+
+	conf.SubAccounts = []SubAccountConfig{{ID: "sub", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "200"}}
+	shared := &Broadcaster{log: testBroadcasterLogger(), conf: conf}
+	if shared.friendSyncer().PruneHistory {
+		t.Fatal("primary syncer must not prune a history store shared with sub-account syncers")
+	}
+}
+
 func TestBroadcasterStartSubAccountsContinuesPastFailingAccount(t *testing.T) {
 	var published []string
 	b := &Broadcaster{log: testBroadcasterLogger(), conf: Config{

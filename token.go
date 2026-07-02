@@ -195,10 +195,10 @@ func (s *liveTokenSource) Token() (*oauth2.Token, error) {
 			return s.store(tok), nil
 		}
 		// Only fall back to device-code login when the server rejected the
-		// refresh token; transient transport failures should surface instead
-		// of prompting a needless re-login.
+		// refresh token itself; transport failures and transient server
+		// errors should surface instead of prompting a needless re-login.
 		var refreshErr *liveRefreshError
-		if !errors.As(err, &refreshErr) {
+		if !errors.As(err, &refreshErr) || !refreshErr.requiresReauth() {
 			return nil, err
 		}
 	}
@@ -259,6 +259,13 @@ type liveRefreshError struct {
 
 func (e *liveRefreshError) Error() string {
 	return fmt.Sprintf("POST %s: refresh error: %v: %v", microsoft.LiveConnectEndpoint.TokenURL, e.Code, e.Description)
+}
+
+// requiresReauth reports whether the rejection means the refresh token is no
+// longer usable and a fresh login is required. Other OAuth error codes (such
+// as server_error or temporarily_unavailable) may succeed on retry.
+func (e *liveRefreshError) requiresReauth() bool {
+	return e.Code == "invalid_grant"
 }
 
 func postLiveForm(ctx context.Context, endpoint string, form url.Values) (*http.Response, error) {

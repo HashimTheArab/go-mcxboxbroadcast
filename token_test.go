@@ -180,6 +180,26 @@ func TestLiveTokenSourceDoesNotFallBackToDeviceCodeOnTransientRefreshError(t *te
 	}
 }
 
+func TestLiveTokenSourceDoesNotFallBackToDeviceCodeOnTransientServerError(t *testing.T) {
+	// A non-200 with an OAuth error other than invalid_grant (or none at all)
+	// means the refresh token may still be usable; no re-login should start.
+	client := &http.Client{Transport: tokenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return tokenTestResponse(http.StatusServiceUnavailable, `{"error":"server_error","error_description":"try again"}`), nil
+	})}
+	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, client)
+	src := NewLiveTokenSource(ctx, &oauth2.Token{
+		AccessToken:  "old-access",
+		RefreshToken: "old-refresh",
+		Expiry:       time.Now().Add(-time.Hour),
+	}, io.Discard)
+
+	_, err := src.Token()
+	var refreshErr *liveRefreshError
+	if !errors.As(err, &refreshErr) || refreshErr.Code != "server_error" {
+		t.Fatalf("Token() error = %v, want surfaced refresh error", err)
+	}
+}
+
 func TestLiveTokenSourceFallsBackToDeviceCodeWhenRefreshRejected(t *testing.T) {
 	// The device-code flow starts with a POST to the device-code endpoint; the
 	// fallback is detected by observing that request after a refresh rejection.
