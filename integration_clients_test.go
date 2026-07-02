@@ -167,33 +167,6 @@ func TestGalleryClientUploadsImageWhenConfigured(t *testing.T) {
 	}
 }
 
-func TestGalleryClientDoesNotSendAuthToImageURL(t *testing.T) {
-	imagePath := testGalleryImageFile(t)
-	imageBytes := testGalleryImageBytes(t)
-	g := GalleryClient{
-		TokenSource: staticMinecraftTokenSource{},
-		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			switch {
-			case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/xuid/1"):
-				return response(http.StatusOK, `{"result":{"showcasedImages":[{"id":"img","url":"https://cdn.example.test/image.jpg"}]}}`), nil
-			case req.Method == http.MethodGet && req.URL.Host == "cdn.example.test":
-				if req.Header.Get("Authorization") != "" {
-					t.Fatal("authorization header sent to gallery image URL")
-				}
-				return responseBytes(http.StatusOK, imageBytes), nil
-			case req.Method == http.MethodPost && req.URL.Path == "/api/v1.0/gallery":
-				t.Fatal("image should have been reused instead of uploaded")
-			default:
-				t.Fatalf("unexpected request %s %s", req.Method, req.URL)
-			}
-			return nil, nil
-		})},
-	}
-	if err := g.SetShowcase(context.Background(), "1", imagePath, true); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestGalleryClientReportsDeleteFailures(t *testing.T) {
 	imagePath := testGalleryImageFile(t)
 	imageBytes := testGalleryImageBytes(t)

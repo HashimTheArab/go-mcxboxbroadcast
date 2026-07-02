@@ -186,10 +186,9 @@ func (g GalleryClient) Delete(ctx context.Context, imageID string) error {
 }
 
 func (g GalleryClient) remoteImageHash(ctx context.Context, url string) (uint32, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	// The gallery image endpoint requires the Minecraft service token even for
+	// reads; an unauthenticated fetch returns 401 and forces a re-upload.
+	req, err := g.request(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return 0, err
 	}
