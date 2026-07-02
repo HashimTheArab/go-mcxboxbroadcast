@@ -119,7 +119,7 @@ accounts:
 	if cfg.Session.UpdateInterval != 45 || cfg.Session.QueryServer || !cfg.Session.WebQueryFallback || cfg.Session.ConfigFallback {
 		t.Fatalf("session query aliases were not loaded: %#v", cfg.Session)
 	}
-	if cfg.Session.BroadcastSetting != 2 || cfg.Session.Joinability != "InviteOnly" || cfg.Session.WorldType != "Creative" {
+	if cfg.Session.BroadcastSetting != 2 || cfg.Session.Joinability != JoinabilityInviteOnly || cfg.Session.WorldType != "Creative" {
 		t.Fatalf("session status aliases were not loaded: %#v", cfg.Session)
 	}
 	if cfg.Session.SessionInfo.HostName != "Example Host" || cfg.Session.SessionInfo.MaxPlayers != 32 {
@@ -233,6 +233,38 @@ func TestConfigFileToConfigMapsOperatorSettings(t *testing.T) {
 	}
 	if runtime.FriendHistory == nil {
 		t.Fatal("friend history store not mapped")
+	}
+}
+
+// TestConfigFileNormalizesJoinability guards against friendly-cased config
+// values reaching the session document verbatim: a "JoinableByFriends" doc is
+// filtered out by clients expecting the wire value, so the bot shows as an
+// online friend without a joinable world.
+func TestConfigFileNormalizesJoinability(t *testing.T) {
+	for input, want := range map[string]string{
+		"JoinableByFriends":   JoinabilityJoinableByFriends,
+		"joinable_by_friends": JoinabilityJoinableByFriends,
+		"InviteOnly":          JoinabilityInviteOnly,
+		"invite_only":         JoinabilityInviteOnly,
+		"":                    "",
+	} {
+		cfg := DefaultConfigFile()
+		cfg.Session.Joinability = input
+		cfg.migrate()
+		runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{XBLTokenSource: staticTokenSource{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if runtime.Status.Joinability != want {
+			t.Errorf("joinability %q = %q, want %q", input, runtime.Status.Joinability, want)
+		}
+	}
+
+	cfg := DefaultConfigFile()
+	cfg.Session.Joinability = "sometimes"
+	cfg.migrate()
+	if len(cfg.Notes) == 0 {
+		t.Error("expected a migration note for an unrecognised joinability value")
 	}
 }
 

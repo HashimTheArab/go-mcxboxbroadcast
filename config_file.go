@@ -256,6 +256,26 @@ func (c *ConfigFile) migrate() {
 	if c.Gallery.ImagePath == "" {
 		c.Gallery.ImagePath = "screenshot.jpg"
 	}
+	c.Session.Joinability = c.normalizeJoinability(c.Session.Joinability)
+}
+
+// normalizeJoinability maps friendly-cased joinability names to the wire
+// values the session document must carry. Clients drop worlds whose
+// Joinability is not exactly "joinable_by_friends", leaving the account
+// visible only as an online friend.
+func (c *ConfigFile) normalizeJoinability(value string) string {
+	switch strings.ToLower(strings.ReplaceAll(value, "_", "")) {
+	case "", "joinablebyfriends":
+		if value == "" {
+			return ""
+		}
+		return JoinabilityJoinableByFriends
+	case "inviteonly":
+		return JoinabilityInviteOnly
+	default:
+		c.note("session.joinability %q is not a known value; using %q", value, JoinabilityJoinableByFriends)
+		return JoinabilityJoinableByFriends
+	}
 }
 
 func (c *ConfigFile) note(format string, args ...any) {
