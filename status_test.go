@@ -3,6 +3,9 @@ package broadcaster
 import (
 	"context"
 	"testing"
+	"time"
+
+	"github.com/sandertv/gophertunnel/minecraft"
 
 	"github.com/sandertv/gophertunnel/minecraft/p2p"
 	"github.com/sandertv/gophertunnel/minecraft/room"
@@ -10,10 +13,9 @@ import (
 
 func TestStatusDefaults(t *testing.T) {
 	b, err := New(Config{
-		XBLTokenSource:  staticTokenSource{},
-		LiveTokenSource: staticOAuthSource{},
-		XUID:            "123",
-		Server:          ServerInfo{Host: "127.0.0.1", Port: 19132},
+		XBLTokenSource: staticTokenSource{},
+		XUID:           "123",
+		Server:         ServerInfo{Host: "127.0.0.1", Port: 19132},
 		Status: Status{
 			HostName:   "§aHost",
 			WorldName:  "",
@@ -34,10 +36,10 @@ func TestStatusDefaults(t *testing.T) {
 	if status.WorldName != "Host" {
 		t.Fatalf("unexpected world name %q", status.WorldName)
 	}
-	if status.MemberCount != 1 {
-		t.Fatalf("unexpected member count %d", status.MemberCount)
+	if status.MemberCount != 0 {
+		t.Fatalf("unexpected member count %d (Java broadcasts 0 by default)", status.MemberCount)
 	}
-	if status.MaxMemberCount != 2 {
+	if status.MaxMemberCount != 1 {
 		t.Fatalf("unexpected max member count %d", status.MaxMemberCount)
 	}
 	if status.OwnerID != "123" {
@@ -54,10 +56,70 @@ func TestStatusDefaults(t *testing.T) {
 func TestNormalizeStatusKeepsDefaultLevelIDStable(t *testing.T) {
 	first := normalizeStatus(room.Status{HostName: "Host", WorldName: "World"})
 	second := normalizeStatus(room.Status{HostName: "Host", WorldName: "World"})
-	if first.LevelID == "" {
-		t.Fatal("expected default level ID")
+	if first.LevelID != "level" {
+		t.Fatalf("default level ID = %q, want Java's literal \"level\"", first.LevelID)
 	}
 	if first.LevelID != second.LevelID {
 		t.Fatalf("default level ID changed: %q != %q", first.LevelID, second.LevelID)
+	}
+}
+
+func TestStatusKeepsLastQueryResultWhenQueryFails(t *testing.T) {
+	b, err := New(Config{
+		XBLTokenSource: staticTokenSource{},
+		XUID:           "123",
+		// Port 1 on localhost is closed, so the query fails quickly.
+		Server: ServerInfo{Host: "127.0.0.1", Port: 1},
+		Status: Status{
+			HostName:     "Config Host",
+			WorldName:    "Config World",
+			QueryTarget:  true,
+			QueryTimeout: 50 * time.Millisecond,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.lastQuery = &minecraft.ServerStatus{
+		ServerName:    "Queried World",
+		ServerSubName: "Queried Host",
+		PlayerCount:   7,
+		MaxPlayers:    30,
+	}
+	status, err := b.status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.WorldName != "Queried World" || status.HostName != "Queried Host" {
+		t.Fatalf("expected last query result to be kept, got %q/%q", status.WorldName, status.HostName)
+	}
+	if status.MemberCount != 7 || status.MaxMemberCount != 30 {
+		t.Fatalf("expected last query counts, got %d/%d", status.MemberCount, status.MaxMemberCount)
+	}
+}
+
+func TestStatusResetsToConfigWhenQueryFailsWithConfigFallback(t *testing.T) {
+	b, err := New(Config{
+		XBLTokenSource: staticTokenSource{},
+		XUID:           "123",
+		Server:         ServerInfo{Host: "127.0.0.1", Port: 1},
+		Status: Status{
+			HostName:      "Config Host",
+			WorldName:     "Config World",
+			QueryTarget:   true,
+			QueryFallback: true,
+			QueryTimeout:  50 * time.Millisecond,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.lastQuery = &minecraft.ServerStatus{ServerName: "Queried World", ServerSubName: "Queried Host"}
+	status, err := b.status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.WorldName != "Config World" || status.HostName != "Config Host" {
+		t.Fatalf("expected config fallback values, got %q/%q", status.WorldName, status.HostName)
 	}
 }

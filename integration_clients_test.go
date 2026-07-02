@@ -87,7 +87,9 @@ func TestSlackNotifierErrorDoesNotLeakWebhookURL(t *testing.T) {
 	}
 }
 
-func TestSessionUpdateFailureNotificationCanBeSuppressed(t *testing.T) {
+func TestSessionUpdateFailureNotificationIgnoresSuppressFlag(t *testing.T) {
+	// Matching MCXboxBroadcast, suppressSessionUpdateMessage only demotes the
+	// periodic success log; failure notifications always fire.
 	var notified bool
 	b := &Broadcaster{
 		conf: Config{
@@ -98,8 +100,8 @@ func TestSessionUpdateFailureNotificationCanBeSuppressed(t *testing.T) {
 		},
 	}
 	b.notifySessionUpdateFailure(context.Background(), errors.New("boom"))
-	if notified {
-		t.Fatal("session update notification was not suppressed")
+	if !notified {
+		t.Fatal("session update failure notification should not be suppressed")
 	}
 }
 
@@ -314,11 +316,10 @@ func TestFileHistoryStoreRecordsAndClearsLastSeen(t *testing.T) {
 
 func TestStatusUsesConfiguredProvider(t *testing.T) {
 	b, err := New(Config{
-		XBLTokenSource:  staticTokenSource{},
-		LiveTokenSource: staticOAuthSource{},
-		XUID:            "123",
-		Server:          ServerInfo{Host: "127.0.0.1", Port: 19132},
-		StatusProvider:  staticStatusProvider{host: "Provider Host", world: "Provider World", titleID: TitleID},
+		XBLTokenSource: staticTokenSource{},
+		XUID:           "123",
+		Server:         ServerInfo{Host: "127.0.0.1", Port: 19132},
+		StatusProvider: staticStatusProvider{host: "Provider Host", world: "Provider World", titleID: TitleID},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -668,7 +669,14 @@ func TestStartCleansUpWhenPrimaryAnnounceFails(t *testing.T) {
 		conf: Config{
 			Server:    ServerInfo{Host: "127.0.0.1", Port: 19132},
 			Signaling: sig,
-			Status:    Status{HostName: "Host", WorldName: "World"},
+			StatusProvider: room.NewStatusProvider(room.Status{
+				HostName:  "Host",
+				WorldName: "World",
+				SupportedConnections: []room.Connection{{
+					ConnectionType: p2p.ConnectionTypeSignalingOverWebSocket,
+					NetherNetID:    p2p.NetherNetID("123"),
+				}},
+			}),
 		},
 		announcerFactory: func(*Broadcaster) room.Announcer {
 			return announcer
@@ -680,6 +688,27 @@ func TestStartCleansUpWhenPrimaryAnnounceFails(t *testing.T) {
 	}
 	if !announcer.Closed() {
 		t.Fatal("announcer was not closed")
+	}
+	if !sig.closed {
+		t.Fatal("signaling was not closed")
+	}
+}
+
+func TestStartFailsWhenSessionWouldPublishNoConnections(t *testing.T) {
+	sig := &fakeSignaling{}
+	b := &Broadcaster{
+		conf: Config{
+			Server:    ServerInfo{Host: "127.0.0.1", Port: 19132},
+			Signaling: sig,
+			Status:    Status{HostName: "Host", WorldName: "World"},
+		},
+		announcerFactory: func(*Broadcaster) room.Announcer {
+			return &fakeAnnouncer{}
+		},
+	}
+	err := b.Start(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "unjoinable") {
+		t.Fatalf("Start() error = %v, want unjoinable session error", err)
 	}
 	if !sig.closed {
 		t.Fatal("signaling was not closed")

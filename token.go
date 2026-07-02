@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -31,6 +32,14 @@ var minecraftServiceErrorPattern = regexp.MustCompile(`minecraft/service:\s*([^:
 // outbound authentication requests. If ctx carries oauth2.HTTPClient, that
 // client is used for device auth and refresh requests.
 func NewLiveTokenSource(ctx context.Context, tok *oauth2.Token, out io.Writer) oauth2.TokenSource {
+	return NewLiveTokenSourceWithPersist(ctx, tok, out, nil)
+}
+
+// NewLiveTokenSourceWithPersist is like NewLiveTokenSource but calls persist
+// with every newly issued token so rotated refresh tokens survive restarts.
+// When a cached refresh token is rejected by the server, the source falls back
+// to a fresh device-code login instead of failing until the cache is deleted.
+func NewLiveTokenSourceWithPersist(ctx context.Context, tok *oauth2.Token, out io.Writer, persist func(*oauth2.Token)) oauth2.TokenSource {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -38,10 +47,11 @@ func NewLiveTokenSource(ctx context.Context, tok *oauth2.Token, out io.Writer) o
 		out = io.Discard
 	}
 	return oauth2.ReuseTokenSource(tok, &liveTokenSource{
-		ctx:    ctx,
-		tok:    tok,
-		out:    out,
-		config: auth.AndroidConfig,
+		ctx:     ctx,
+		tok:     tok,
+		out:     out,
+		config:  auth.AndroidConfig,
+		persist: persist,
 	})
 }
 
@@ -168,10 +178,11 @@ func withDefaultXBLTokenCache(ctx context.Context) context.Context {
 }
 
 type liveTokenSource struct {
-	ctx    context.Context
-	tok    *oauth2.Token
-	out    io.Writer
-	config auth.Config
+	ctx     context.Context
+	tok     *oauth2.Token
+	out     io.Writer
+	config  auth.Config
+	persist func(*oauth2.Token)
 }
 
 func (s *liveTokenSource) Token() (*oauth2.Token, error) {
@@ -180,18 +191,31 @@ func (s *liveTokenSource) Token() (*oauth2.Token, error) {
 		defer cancel()
 
 		tok, err := refreshLiveToken(ctx, s.config.ClientID, s.tok.RefreshToken)
-		if err != nil {
+		if err == nil {
+			return s.store(tok), nil
+		}
+		// Only fall back to device-code login when the server rejected the
+		// refresh token itself; transport failures and transient server
+		// errors should surface instead of prompting a needless re-login.
+		var refreshErr *liveRefreshError
+		if !errors.As(err, &refreshErr) || !refreshErr.requiresReauth() {
 			return nil, err
 		}
-		s.tok = tok
-		return tok, nil
 	}
 	tok, err := requestLiveTokenWriter(s.ctx, s.config, s.out)
 	if err != nil {
 		return nil, err
 	}
+	return s.store(tok), nil
+}
+
+// store records the newly issued token in memory and through the persist hook.
+func (s *liveTokenSource) store(tok *oauth2.Token) *oauth2.Token {
 	s.tok = tok
-	return tok, nil
+	if s.persist != nil {
+		s.persist(tok)
+	}
+	return tok
 }
 
 func requestLiveTokenWriter(ctx context.Context, conf auth.Config, out io.Writer) (*oauth2.Token, error) {
@@ -221,9 +245,27 @@ func refreshLiveToken(ctx context.Context, clientID, refreshToken string) (*oaut
 		return nil, fmt.Errorf("POST %s: json decode: %w", microsoft.LiveConnectEndpoint.TokenURL, err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("POST %s: refresh error: %v: %v", microsoft.LiveConnectEndpoint.TokenURL, body.Error, body.ErrorDescription)
+		return nil, &liveRefreshError{Code: body.Error, Description: body.ErrorDescription}
 	}
 	return body.token(), nil
+}
+
+// liveRefreshError is a Microsoft Live token endpoint rejection of a refresh
+// token, such as invalid_grant for an expired or revoked token.
+type liveRefreshError struct {
+	Code        string
+	Description string
+}
+
+func (e *liveRefreshError) Error() string {
+	return fmt.Sprintf("POST %s: refresh error: %v: %v", microsoft.LiveConnectEndpoint.TokenURL, e.Code, e.Description)
+}
+
+// requiresReauth reports whether the rejection means the refresh token is no
+// longer usable and a fresh login is required. Other OAuth error codes (such
+// as server_error or temporarily_unavailable) may succeed on retry.
+func (e *liveRefreshError) requiresReauth() bool {
+	return e.Code == "invalid_grant"
 }
 
 func postLiveForm(ctx context.Context, endpoint string, form url.Values) (*http.Response, error) {

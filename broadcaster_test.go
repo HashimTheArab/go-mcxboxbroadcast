@@ -51,12 +51,135 @@ func TestBroadcasterStartSubAccountsMutuallyFollowsBeforePublish(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
+		// The follow state is checked first so restarts do not re-PUT
+		// existing friendships; the 204 here fails decoding, so both follows
+		// proceed.
+		"GET https://peoplehub.xboxlive.com/users/me/people/followers auth=",
 		"PUT https://social.xboxlive.com/users/me/people/xuid(200) auth=",
 		"PUT https://social.xboxlive.com/users/me/people/xuid(100) auth=",
 		"publish",
 	}
 	if fmt.Sprint(calls) != fmt.Sprint(want) {
 		t.Fatalf("unexpected call order\n got: %v\nwant: %v", calls, want)
+	}
+}
+
+func TestBroadcasterStartSubAccountsSkipsExistingMutualFollow(t *testing.T) {
+	var calls []string
+	client := &http.Client{Transport: broadcasterRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls = append(calls, req.Method+" "+req.URL.Path)
+		switch req.URL.Host {
+		case "peoplehub.xboxlive.com":
+			return broadcasterResponse(http.StatusOK, `{"people":[{"xuid":"100","isFollowingCaller":true,"isFollowedByCaller":true}]}`), nil
+		default:
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL)
+			return nil, nil
+		}
+	})}
+	b := &Broadcaster{log: testBroadcasterLogger(), conf: Config{
+		XBLClient:  &xsapi.Client{},
+		XUID:       "100",
+		HTTPClient: client,
+		SubAccounts: []SubAccountConfig{{
+			ID:        "sub",
+			Enabled:   true,
+			XBLClient: &xsapi.Client{},
+			XUID:      "200",
+		}},
+	}}
+	b.subAccountPublisher = func(context.Context, SubAccountConfig, mpsd.SessionReference, mpsd.PublishConfig) (*mpsd.Session, error) {
+		calls = append(calls, "publish")
+		return &mpsd.Session{}, nil
+	}
+
+	if err := b.startSubAccounts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range calls {
+		if strings.HasPrefix(call, "PUT ") {
+			t.Fatalf("existing mutual follow should not be re-PUT, got calls %v", calls)
+		}
+	}
+	if calls[len(calls)-1] != "publish" {
+		t.Fatalf("expected publish after follow check, got %v", calls)
+	}
+}
+
+func TestBroadcasterStartSubAccountsStopsQuietlyOnContextCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var notified []string
+	var started []string
+	b := &Broadcaster{log: testBroadcasterLogger(), conf: Config{
+		XBLClient: &xsapi.Client{},
+		XUID:      "100",
+		Notifier: fakeNotifier{notify: func(_ context.Context, message string) {
+			notified = append(notified, message)
+		}},
+		SubAccounts: []SubAccountConfig{
+			{ID: "first", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "100"},
+			{ID: "second", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "100"},
+		},
+	}}
+	b.subAccountPublisher = func(_ context.Context, account SubAccountConfig, _ mpsd.SessionReference, _ mpsd.PublishConfig) (*mpsd.Session, error) {
+		started = append(started, account.ID)
+		cancel()
+		return nil, ctx.Err()
+	}
+
+	err := b.startSubAccounts(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("startSubAccounts() error = %v, want context.Canceled", err)
+	}
+	if fmt.Sprint(started) != "[first]" {
+		t.Fatalf("started = %v, want [first] (stop after cancellation)", started)
+	}
+	if len(notified) != 0 {
+		t.Fatalf("notifications = %v, want none during shutdown", notified)
+	}
+}
+
+func TestBroadcasterPrimarySyncerDisablesPruningWithSubAccountSyncers(t *testing.T) {
+	conf := Config{
+		XBLClient:  &xsapi.Client{},
+		XUID:       "100",
+		FriendSync: &FriendSyncConfig{AutoFollow: true, ExpiryEnabled: true},
+	}
+
+	solo := &Broadcaster{log: testBroadcasterLogger(), conf: conf}
+	if !solo.friendSyncer().PruneHistory {
+		t.Fatal("primary syncer should prune when it owns the history store alone")
+	}
+
+	conf.SubAccounts = []SubAccountConfig{{ID: "sub", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "200"}}
+	shared := &Broadcaster{log: testBroadcasterLogger(), conf: conf}
+	if shared.friendSyncer().PruneHistory {
+		t.Fatal("primary syncer must not prune a history store shared with sub-account syncers")
+	}
+}
+
+func TestBroadcasterStartSubAccountsContinuesPastFailingAccount(t *testing.T) {
+	var published []string
+	b := &Broadcaster{log: testBroadcasterLogger(), conf: Config{
+		XBLClient: &xsapi.Client{},
+		XUID:      "100",
+		SubAccounts: []SubAccountConfig{
+			{ID: "bad", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "100"},
+			{ID: "good", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "100"},
+		},
+	}}
+	b.subAccountPublisher = func(_ context.Context, account SubAccountConfig, _ mpsd.SessionReference, _ mpsd.PublishConfig) (*mpsd.Session, error) {
+		if account.ID == "bad" {
+			return nil, errors.New("boom")
+		}
+		published = append(published, account.ID)
+		return &mpsd.Session{}, nil
+	}
+
+	if err := b.startSubAccounts(context.Background()); err != nil {
+		t.Fatalf("startSubAccounts() error = %v, want nil (bad account skipped)", err)
+	}
+	if fmt.Sprint(published) != "[good]" {
+		t.Fatalf("published = %v, want [good]", published)
 	}
 }
 
@@ -226,6 +349,9 @@ func TestMinecraftListenConfigKeepsFullLoginFlow(t *testing.T) {
 	conf := b.minecraftListenConfig(room.Status{HostName: "Host", WorldName: "World"})
 	if conf.DisablePacketHandling {
 		t.Fatal("expected listener to wait for resource-pack login flow")
+	}
+	if conf.AuthenticationDisabled {
+		t.Fatal("client authentication should be enabled by default so recorded XUIDs are verified")
 	}
 	if conf.CompressionThreshold != -1 {
 		t.Fatalf("CompressionThreshold = %d, want -1 for Java-compatible threshold 0", conf.CompressionThreshold)

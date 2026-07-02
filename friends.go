@@ -2,7 +2,6 @@ package broadcaster
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 
@@ -10,7 +9,9 @@ import (
 	"github.com/df-mc/go-xsapi/v2/xal/xsts"
 )
 
-// FriendClient adapts go-xsapi/v2's Xbox social client to the FriendSyncer API.
+// FriendClient adapts go-xsapi/v2's Xbox social client to the FriendSyncer
+// API, using the same endpoints, contract versions, and request shapes as
+// MCXboxBroadcast.
 type FriendClient struct {
 	Client *http.Client
 	Social *xblsocial.Client
@@ -25,6 +26,10 @@ type Person struct {
 	IsFollowedByCaller   bool   `json:"isFollowedByCaller"`
 	UniqueModernGamertag string `json:"uniqueModernGamertag"`
 }
+
+// friendListConfig fetches people lists undecorated with contract version 5,
+// keeping the periodic response small at large friend counts.
+var friendListConfig = xblsocial.PeopleListConfig{Undecorated: true, ContractVersion: 5}
 
 // AcceptFriendRequestsError reports a successful bulk accept response that
 // still failed to update one or more pending friend requests.
@@ -43,58 +48,67 @@ func (e *AcceptFriendRequestsError) FailedXUIDs() []string {
 // Friends returns a merged view of people following the authenticated account
 // and people the authenticated account follows.
 func (c FriendClient) Friends(ctx context.Context) ([]Person, error) {
-	// go-xsapi/social.Friends only returns accepted friends; sync needs both
-	// sides of the relationship so pending inbound followers can be accepted.
 	socialClient := c.social()
-	followers, err := socialClient.Followers(ctx)
+	followers, err := socialClient.People(ctx, xblsocial.PeopleListFollowers, friendListConfig)
 	if err != nil {
 		return nil, err
 	}
-	following, err := socialClient.Following(ctx)
+	following, err := socialClient.People(ctx, xblsocial.PeopleListFollowing, friendListConfig)
 	if err != nil {
 		return nil, err
 	}
 	return mergePeople(peopleFromSocialUsers(followers), peopleFromSocialUsers(following)), nil
 }
 
-// AcceptPendingFriendRequests accepts incoming Xbox friend requests and returns
-// the people that Xbox reported as updated.
+// Summary returns the caller's social summary, including the total number of
+// people the account follows.
+func (c FriendClient) Summary(ctx context.Context) (xblsocial.Summary, error) {
+	return c.social().Summary(ctx)
+}
+
+// AcceptPendingFriendRequests accepts incoming Xbox friend requests with a
+// single bulk add call and returns the people that Xbox reported as updated.
 func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]Person, error) {
 	socialClient := c.social()
-	pending, err := socialClient.IncomingFriendRequests(ctx)
+	pending, err := socialClient.People(ctx, xblsocial.PeopleListIncomingFriendRequests, xblsocial.PeopleListConfig{Undecorated: true})
 	if err != nil {
 		return nil, err
 	}
-	if len(pending) == 0 {
-		return nil, nil
-	}
-
-	accepted := make([]Person, 0, len(pending))
-	var failed []string
+	xuids := make([]string, 0, len(pending))
+	byXUID := make(map[string]Person, len(pending))
 	for _, user := range pending {
 		if user.XUID == "" {
 			continue
 		}
-		if err := socialClient.AddFriend(ctx, user.XUID); err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || retryDelay(err) > 0 {
-				return accepted, err
-			}
-			failed = append(failed, user.XUID)
-			continue
+		xuids = append(xuids, user.XUID)
+		byXUID[user.XUID] = personFromSocialUser(user)
+	}
+	if len(xuids) == 0 {
+		return nil, nil
+	}
+
+	updatedXUIDs, err := socialClient.BulkAddFriends(ctx, xuids)
+	if err != nil {
+		return nil, err
+	}
+	updated := make(map[string]struct{}, len(updatedXUIDs))
+	accepted := make([]Person, 0, len(updatedXUIDs))
+	for _, xuid := range updatedXUIDs {
+		if person, ok := byXUID[xuid]; ok {
+			updated[xuid] = struct{}{}
+			accepted = append(accepted, person)
 		}
-		accepted = append(accepted, personFromSocialUser(user))
+	}
+	var failed []string
+	for _, xuid := range xuids {
+		if _, ok := updated[xuid]; !ok {
+			failed = append(failed, xuid)
+		}
 	}
 	if len(failed) > 0 {
 		return accepted, &AcceptFriendRequestsError{Failed: failed}
 	}
 	return accepted, nil
-}
-
-func (c FriendClient) social() *xblsocial.Client {
-	if c.Social != nil {
-		return c.Social
-	}
-	return xblsocial.New(c.client(), nil, xsts.UserInfo{}, nil)
 }
 
 // Follow follows the XUID, which makes the user a friend when they also follow
@@ -108,12 +122,38 @@ func (c FriendClient) Unfollow(ctx context.Context, xuid string) error {
 	return c.social().Unfollow(ctx, xuid)
 }
 
+// ForceUnfollow removes the follow relationship the user identified by xuid
+// has towards the authenticated account. It is used to drop followers whose
+// privacy or enforcement restrictions prevent a friendship.
+func (c FriendClient) ForceUnfollow(ctx context.Context, xuid string) error {
+	return c.social().RemoveFollower(ctx, xuid)
+}
+
+func (c FriendClient) social() *xblsocial.Client {
+	if c.Social != nil {
+		return c.Social
+	}
+	return xblsocial.New(c.client(), nil, xsts.UserInfo{}, nil)
+}
+
 func peopleFromSocialUsers(users []xblsocial.User) []Person {
 	people := make([]Person, 0, len(users))
 	for _, user := range users {
 		people = append(people, personFromSocialUser(user))
 	}
 	return people
+}
+
+func personFromSocialUser(user xblsocial.User) Person {
+	return Person{
+		XUID:                 user.XUID,
+		Gamertag:             user.GamerTag,
+		DisplayName:          user.DisplayName,
+		ModernGamertag:       user.ModernGamerTag,
+		IsFollowingCaller:    user.Followed,
+		IsFollowedByCaller:   user.Following,
+		UniqueModernGamertag: user.UniqueModernGamerTag,
+	}
 }
 
 func mergePeople(groups ...[]Person) []Person {
@@ -156,18 +196,6 @@ func mergePerson(existing, next Person) Person {
 		existing.UniqueModernGamertag = next.UniqueModernGamertag
 	}
 	return existing
-}
-
-func personFromSocialUser(user xblsocial.User) Person {
-	return Person{
-		XUID:                 user.XUID,
-		Gamertag:             user.GamerTag,
-		DisplayName:          user.DisplayName,
-		ModernGamertag:       user.ModernGamerTag,
-		IsFollowingCaller:    user.Followed,
-		IsFollowedByCaller:   user.Following,
-		UniqueModernGamertag: user.UniqueModernGamerTag,
-	}
 }
 
 func (c FriendClient) client() *http.Client {

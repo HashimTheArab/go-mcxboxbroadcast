@@ -58,6 +58,35 @@ func TestMarshalStatusWithNoncesIncludesJavaSessionFields(t *testing.T) {
 	if connection["PmsgId"] != pmsgID.String() {
 		t.Fatalf("unexpected pmsg id: %#v", connection)
 	}
+	// Java serializes NetherNetId as a number and always sends isHardcore.
+	if connection["NetherNetId"] != float64(123456789) {
+		t.Fatalf("NetherNetId should be a JSON number: %#v", connection)
+	}
+	hardcore, ok := got["isHardcore"].(bool)
+	if !ok || hardcore {
+		t.Fatalf("isHardcore missing or true in custom properties: %s", custom)
+	}
+}
+
+func TestMarshalStatusWithNoncesKeepsOpaqueNetherNetIDAsString(t *testing.T) {
+	custom, err := marshalStatusWithNonces(room.Status{
+		WorldName: "World",
+		SupportedConnections: []room.Connection{{
+			NetherNetID: p2p.NetherNetID("opaque-id"),
+		}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		SupportedConnections []map[string]any `json:"SupportedConnections"`
+	}
+	if err := json.Unmarshal(custom, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.SupportedConnections[0]["NetherNetId"] != "opaque-id" {
+		t.Fatalf("opaque NetherNetId should stay a string: %s", custom)
+	}
 }
 
 func TestMarshalStatusWithNoncesWritesEmptyObject(t *testing.T) {

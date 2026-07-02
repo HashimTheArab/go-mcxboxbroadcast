@@ -1,16 +1,13 @@
 package broadcaster
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -18,7 +15,6 @@ import (
 	"github.com/pelletier/go-toml/v2"
 	"github.com/sandertv/gophertunnel/minecraft"
 	"github.com/sandertv/gophertunnel/minecraft/service"
-	"golang.org/x/oauth2"
 	"gopkg.in/yaml.v3"
 )
 
@@ -34,15 +30,20 @@ type ConfigFile struct {
 	Notifications                NotificationConfig `yaml:"notifications" toml:"notifications"`
 	Gallery                      GalleryFileConfig  `yaml:"gallery" toml:"gallery"`
 	Accounts                     AccountsConfig     `yaml:"accounts" toml:"accounts"`
+
+	// Notes lists adjustments applied while loading, such as out-of-range
+	// values that were clamped. Callers should surface them as warnings.
+	Notes []string `yaml:"-" toml:"-"`
 }
 
 type HTTPFileConfig struct {
 	Proxy string `yaml:"proxy" toml:"proxy"`
 }
 
+// SessionFileConfig mirrors MCXboxBroadcast's standalone session settings.
+// The Geyser-extension-only remoteAddress/remotePort keys are intentionally
+// absent; the broadcast target always comes from sessionInfo.
 type SessionFileConfig struct {
-	RemoteAddress    string          `yaml:"remoteAddress" toml:"remoteAddress"`
-	RemotePort       string          `yaml:"remotePort" toml:"remotePort"`
 	UpdateInterval   int             `yaml:"updateInterval" toml:"updateInterval"`
 	SignalingMode    string          `yaml:"signalingMode" toml:"signalingMode"`
 	QueryServer      bool            `yaml:"queryServer" toml:"queryServer"`
@@ -104,35 +105,29 @@ type RuntimeConfigInput struct {
 	XBLClient            *xsapi.Client
 	XBLTokenSource       xsapi.TokenSource
 	XUID                 string
-	LiveTokenSource      oauth2.TokenSource
 	MinecraftTokenSource service.TokenSource
 	HTTPClient           *http.Client
 	Log                  *slog.Logger
 	BaseDir              string
-	RemoteAddress        string
-	RemotePort           uint16
-	PublicIPResolver     func(context.Context) (string, error)
 }
 
 func DefaultConfigFile() ConfigFile {
 	return ConfigFile{
 		ConfigVersion: CurrentConfigVersion,
-		DebugMode:     true,
+		DebugMode:     false,
 		Session: SessionFileConfig{
-			RemoteAddress:    "auto",
-			RemotePort:       "auto",
 			UpdateInterval:   30,
 			SignalingMode:    string(SignalingModeJSONRPC),
 			QueryServer:      true,
 			WebQueryFallback: false,
-			ConfigFallback:   true,
+			ConfigFallback:   false,
 			BroadcastSetting: int32(BroadcastSettingFriendsOfFriends),
 			Joinability:      JoinabilityJoinableByFriends,
 			WorldType:        WorldTypeSurvival,
 			SessionInfo: SessionInfoFile{
 				HostName:   "Minecraft Server",
 				WorldName:  "Minecraft World",
-				Players:    1,
+				Players:    0,
 				MaxPlayers: 20,
 				IP:         "play.example.net",
 				Port:       19132,
@@ -214,7 +209,13 @@ func LoadConfigFile(path string) (ConfigFile, error) {
 	if err := decodeConfig(path, data, &cfg); err != nil {
 		return ConfigFile{}, err
 	}
+	loadedVersion := cfg.ConfigVersion
 	cfg.migrate()
+	if loadedVersion != cfg.ConfigVersion {
+		if err := SaveConfigFile(path, cfg); err != nil {
+			cfg.Notes = append(cfg.Notes, fmt.Sprintf("could not persist migrated config: %v", err))
+		}
+	}
 	return cfg, nil
 }
 
@@ -234,15 +235,19 @@ func (c *ConfigFile) migrate() {
 		c.ConfigVersion = CurrentConfigVersion
 	}
 	if c.Session.UpdateInterval < 20 {
+		c.note("session.updateInterval %d is below the 20 second minimum; using 20", c.Session.UpdateInterval)
 		c.Session.UpdateInterval = 20
 	}
 	if c.FriendSync.UpdateInterval < 20 {
+		c.note("friendSync.updateInterval %d is below the 20 second minimum; using 20", c.FriendSync.UpdateInterval)
 		c.FriendSync.UpdateInterval = 20
 	}
 	if c.FriendSync.Expiry.Days <= 0 {
+		c.note("friendSync.expiry.days %d is invalid; using 15", c.FriendSync.Expiry.Days)
 		c.FriendSync.Expiry.Days = 15
 	}
 	if c.FriendSync.Expiry.Check <= 0 {
+		c.note("friendSync.expiry.check %d is invalid; using 1800", c.FriendSync.Expiry.Check)
 		c.FriendSync.Expiry.Check = 1800
 	}
 	if c.FriendSync.Expiry.HistoryPath == "" {
@@ -253,14 +258,15 @@ func (c *ConfigFile) migrate() {
 	}
 }
 
+func (c *ConfigFile) note(format string, args ...any) {
+	c.Notes = append(c.Notes, fmt.Sprintf(format, args...))
+}
+
 func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 	if in.BaseDir == "" {
 		in.BaseDir = "."
 	}
-	server, err := c.serverInfo(context.Background(), in)
-	if err != nil {
-		return Config{}, err
-	}
+	server := ServerInfo{Host: c.Session.SessionInfo.IP, Port: c.Session.SessionInfo.Port}
 	signalingMode, err := configSignalingMode(c.Session.SignalingMode)
 	if err != nil {
 		return Config{}, err
@@ -269,7 +275,6 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 		XBLClient:            in.XBLClient,
 		XBLTokenSource:       in.XBLTokenSource,
 		XUID:                 in.XUID,
-		LiveTokenSource:      in.LiveTokenSource,
 		MinecraftTokenSource: in.MinecraftTokenSource,
 		Server:               server,
 		Status: Status{
@@ -327,44 +332,18 @@ func configSignalingMode(mode string) (SignalingMode, error) {
 	}
 }
 
-func (c ConfigFile) serverInfo(ctx context.Context, in RuntimeConfigInput) (ServerInfo, error) {
-	host := c.Session.SessionInfo.IP
-	if c.Session.RemoteAddress != "" && c.Session.RemoteAddress != "auto" {
-		host = c.Session.RemoteAddress
-	} else if c.Session.RemoteAddress == "auto" && in.RemoteAddress != "" {
-		host = in.RemoteAddress
-		if in.PublicIPResolver != nil && isPrivateHost(host) {
-			if public, err := in.PublicIPResolver(ctx); err == nil && public != "" {
-				host = public
-			}
-		}
-	}
-	port := c.Session.SessionInfo.Port
-	if c.Session.RemotePort != "" && c.Session.RemotePort != "auto" {
-		n, err := strconv.ParseUint(c.Session.RemotePort, 10, 16)
-		if err != nil {
-			return ServerInfo{}, fmt.Errorf("parse remote port: %w", err)
-		}
-		port = uint16(n)
-	} else if c.Session.RemotePort == "auto" && in.RemotePort != 0 {
-		port = in.RemotePort
-	}
-	return ServerInfo{Host: host, Port: port}, nil
-}
-
 func (f FriendFileConfig) runtime() *FriendSyncConfig {
 	if !f.AutoFollow && !f.AutoUnfollow && !f.Expiry.Enabled {
 		return nil
 	}
 	return &FriendSyncConfig{
-		UpdateInterval:  time.Duration(f.UpdateInterval) * time.Second,
-		AutoFollow:      f.AutoFollow,
-		AutoUnfollow:    f.AutoUnfollow,
-		InitialInvite:   f.InitialInvite,
-		ExpiryEnabled:   f.Expiry.Enabled,
-		ExpiryDays:      f.Expiry.Days,
-		ExpiryCheck:     time.Duration(f.Expiry.Check) * time.Second,
-		IgnoreGuestXUID: true,
+		UpdateInterval: time.Duration(f.UpdateInterval) * time.Second,
+		AutoFollow:     f.AutoFollow,
+		AutoUnfollow:   f.AutoUnfollow,
+		InitialInvite:  f.InitialInvite,
+		ExpiryEnabled:  f.Expiry.Enabled,
+		ExpiryDays:     f.Expiry.Days,
+		ExpiryCheck:    time.Duration(f.Expiry.Check) * time.Second,
 	}
 }
 
@@ -579,12 +558,4 @@ func resolvePath(base, path string) string {
 		return path
 	}
 	return filepath.Join(base, path)
-}
-
-func isPrivateHost(host string) bool {
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return false
-	}
-	return ip.IsPrivate() || ip.IsLoopback() || ip.IsUnspecified()
 }

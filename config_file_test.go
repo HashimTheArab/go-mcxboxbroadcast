@@ -116,9 +116,6 @@ accounts:
 	if !cfg.DebugMode || !cfg.SuppressSessionUpdateMessage {
 		t.Fatalf("top-level kebab-case aliases were not loaded: %#v", cfg)
 	}
-	if cfg.Session.RemoteAddress != "bedrock.example.net" || cfg.Session.RemotePort != "19133" {
-		t.Fatalf("session remote aliases were not loaded: %#v", cfg.Session)
-	}
 	if cfg.Session.UpdateInterval != 45 || cfg.Session.QueryServer || !cfg.Session.WebQueryFallback || cfg.Session.ConfigFallback {
 		t.Fatalf("session query aliases were not loaded: %#v", cfg.Session)
 	}
@@ -171,7 +168,7 @@ friend-sync:
 	if !cfg.DebugMode || !cfg.SuppressSessionUpdateMessage {
 		t.Fatalf("legacy top-level aliases were not migrated: %#v", cfg)
 	}
-	if cfg.Session.RemoteAddress != "legacy.example.net" || cfg.Session.RemotePort != "19135" || cfg.Session.UpdateInterval != 55 {
+	if cfg.Session.UpdateInterval != 55 {
 		t.Fatalf("legacy session keys were not moved: %#v", cfg.Session)
 	}
 	if cfg.FriendSync.Expiry.Enabled || cfg.FriendSync.Expiry.Days != 30 || cfg.FriendSync.Expiry.Check != 3600 {
@@ -211,8 +208,7 @@ func TestConfigFileToConfigMapsOperatorSettings(t *testing.T) {
 	cfg.Gallery.ImagePath = "images/showcase.jpg"
 
 	runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{
-		XBLTokenSource:  staticTokenSource{},
-		LiveTokenSource: staticOAuthSource{},
+		XBLTokenSource: staticTokenSource{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -245,8 +241,7 @@ func TestConfigFileMapsSuppressSessionUpdateMessage(t *testing.T) {
 	cfg.SuppressSessionUpdateMessage = true
 
 	runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{
-		XBLTokenSource:  staticTokenSource{},
-		LiveTokenSource: staticOAuthSource{},
+		XBLTokenSource: staticTokenSource{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -260,8 +255,7 @@ func TestConfigFileRejectsWebSocketSignalingMode(t *testing.T) {
 	cfg := DefaultConfigFile()
 	cfg.Session.SignalingMode = "websocket"
 	_, err := cfg.RuntimeConfig(RuntimeConfigInput{
-		XBLTokenSource:  staticTokenSource{},
-		LiveTokenSource: staticOAuthSource{},
+		XBLTokenSource: staticTokenSource{},
 	})
 	if err == nil {
 		t.Fatal("expected websocket signaling mode error")
@@ -278,8 +272,7 @@ func TestConfigFileDisablesFriendSyncWhenNoActionsConfigured(t *testing.T) {
 	cfg.FriendSync.Expiry.Enabled = false
 
 	runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{
-		XBLTokenSource:  staticTokenSource{},
-		LiveTokenSource: staticOAuthSource{},
+		XBLTokenSource: staticTokenSource{},
 	})
 	if err != nil {
 		t.Fatal(err)

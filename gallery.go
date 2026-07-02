@@ -16,7 +16,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"time"
 
 	"github.com/sandertv/gophertunnel/minecraft/service"
 )
@@ -152,7 +151,8 @@ func (g GalleryClient) Upload(ctx context.Context, imagePath string, featured bo
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("X-Ms-Showcased-Featured", fmt.Sprint(featured))
 	if stat, err := f.Stat(); err == nil {
-		req.Header.Set("X-Ms-Showcased-Timetaken", stat.ModTime().Format(time.RFC3339))
+		// UTC with milliseconds, matching Java's Instant.toString().
+		req.Header.Set("X-Ms-Showcased-Timetaken", stat.ModTime().UTC().Format("2006-01-02T15:04:05.000Z"))
 	}
 	resp, err := g.client().Do(req)
 	if err != nil {

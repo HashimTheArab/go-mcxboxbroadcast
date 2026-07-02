@@ -19,10 +19,18 @@ FROM alpine:3.22
 
 RUN apk add --no-cache ca-certificates && update-ca-certificates
 
+RUN addgroup -S app && adduser -S -G app -h /opt/app app
+
 WORKDIR /opt/app/config
 
 COPY --from=build /app/mcxboxbroadcast_bin /mcxboxbroadcast
 
+# chown must precede VOLUME: build steps that modify a path after it is
+# declared a volume are discarded, leaving the mount root-owned at runtime.
+RUN chown -R app:app /opt/app
+
 VOLUME ["/opt/app/config"]
+
+USER app:app
 
 CMD ["/mcxboxbroadcast", "-config", "/opt/app/config/config.yml"]

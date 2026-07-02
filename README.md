@@ -1,6 +1,6 @@
-# broadcaster-go
+# go-mcxboxbroadcast
 
-`broadcaster-go` publishes a Minecraft: Bedrock Edition server as an Xbox Live
+`go-mcxboxbroadcast` publishes a Minecraft: Bedrock Edition server as an Xbox Live
 friend-list world and transfers clients that join the published NetherNet
 session to the configured Bedrock server.
 
@@ -8,12 +8,15 @@ The library is modelled after
 [MCXboxBroadcast](https://github.com/rtm516/MCXboxBroadcast) while using
 Go-first building blocks:
 
-- `github.com/df-mc/go-xsapi/v2` for Xbox Live MPSD/RTA session publishing.
+- `github.com/df-mc/go-xsapi/v2` for Xbox Live MPSD/RTA session publishing,
+  replaced in `go.mod` with the `HashimTheArab/go-xsapi` fork.
 - `github.com/df-mc/go-nethernet` for NetherNet/WebRTC listener support.
 - `hashimthearab/gophertunnel` Lunar P2P branch for NetherNet, signaling,
   room announcements, and `minecraft/p2p`-compatible session metadata. This
   should be updated to the official `sandertv/gophertunnel` once it supports
   Xbox friend-list NetherNet signaling.
+- `sandertv/go-raknet`, replaced in `go.mod` with the `hashimthearab/go-raknet`
+  fork for RakNet ping compatibility.
 
 ## Acknowledgements
 
@@ -40,10 +43,13 @@ counts for each sync pass.
 
 The config exposes the same operator-facing areas as MCXboxBroadcast:
 
-- session target, remote address/port auto behavior, update interval, query
-  options, broadcast setting, joinability, world type, and displayed MOTD data
+- session target, update interval, query options, broadcast setting,
+  joinability, world type, and displayed MOTD data
 - gallery showcase image upload through `gallery.imagePath`
 - friend sync automation and expiry settings, including last-seen history path
+  (stored as JSON at `friendSync.expiry.historyPath`, not Java's SQLite
+  database — operators migrating from MCXboxBroadcast start with a fresh
+  expiry history)
 - Slack/Discord-compatible webhook notifications
 - primary and sub-account token cache paths
 - optional HTTP proxy URL through `http.proxy`
@@ -83,8 +89,7 @@ if err != nil {
 b, err := broadcaster.New(broadcaster.Config{
     XBLClient:           xblClient,
     XBLTokenSource:      xblSource,
-    XUID:                xblClient.UserInfo().XUID,
-    LiveTokenSource:     live,
+    XUID:                 xblClient.UserInfo().XUID,
     MinecraftTokenSource: minecraftTokens,
     Server: broadcaster.ServerInfo{
         Host: "play.example.net",

@@ -6,20 +6,20 @@ http:
   proxy: ""
 
 session:
-  remoteAddress: auto
-  remotePort: auto
   updateInterval: 30
   signalingMode: jsonrpc
   queryServer: true
   webQueryFallback: false
-  configFallback: true
+  # false keeps the last successful query result when a query fails;
+  # true resets the displayed values back to sessionInfo instead.
+  configFallback: false
   broadcastSetting: 3
   joinability: JoinableByFriends
   worldType: Survival
   sessionInfo:
     hostName: Minecraft Server
     worldName: Minecraft World
-    players: 1
+    players: 0
     maxPlayers: 20
     ip: play.example.net
     port: 19132

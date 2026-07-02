@@ -11,25 +11,20 @@ import (
 	"time"
 
 	xblsocial "github.com/df-mc/go-xsapi/v2/social"
-	"golang.org/x/oauth2"
 )
 
-const socialDecorations = "bio,detail,multiplayerSummary,preferredColor,presenceDetail"
-
-func peopleHubURL(group string) string {
-	return "https://peoplehub.xboxlive.com/users/me/people/" + group + "/decoration/" + socialDecorations
-}
+// Endpoint fixtures pinning the exact request URLs the social layer must hit
+// for MCXboxBroadcast parity.
+const (
+	peopleHubFollowersURL = "https://peoplehub.xboxlive.com/users/me/people/followers"
+	peopleHubSocialURL    = "https://peoplehub.xboxlive.com/users/me/people/social"
+	pendingRequestsURL    = "https://peoplehub.xboxlive.com/users/me/people/friendRequests(received)"
+	bulkAddFriendsURL     = "https://social.xboxlive.com/bulk/users/me/people/friends/v2?method=add"
+	socialSummaryURL      = "https://social.xboxlive.com/users/me/summary"
+)
 
 func followURL(xuid string) string {
 	return fmt.Sprintf("https://social.xboxlive.com/users/me/people/xuid(%s)", xuid)
-}
-
-func addFriendURL(xuid string) string {
-	return fmt.Sprintf("https://social.xboxlive.com/users/me/people/friends/v2/xuid(%s)", xuid)
-}
-
-func unfollowURL(xuid string) string {
-	return addFriendURL(xuid) + "?deleteRelationships=follows"
 }
 
 func TestFriendClientFriendsMergesFollowersAndSocial(t *testing.T) {
@@ -38,12 +33,14 @@ func TestFriendClientFriendsMergesFollowersAndSocial(t *testing.T) {
 		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			requests = append(requests, req.URL.String())
 			switch req.URL.String() {
-			case peopleHubURL("followers"):
-				if req.Header.Get("X-Xbl-Contract-Version") != "7" {
-					t.Fatalf("contract version = %q, want 7", req.Header.Get("X-Xbl-Contract-Version"))
+			case peopleHubFollowersURL:
+				// Undecorated contract 5 matches MCXboxBroadcast and keeps
+				// the periodic response small at large friend counts.
+				if req.Header.Get("X-Xbl-Contract-Version") != "5" {
+					t.Fatalf("contract version = %q, want 5", req.Header.Get("X-Xbl-Contract-Version"))
 				}
 				return response(http.StatusOK, `{"people":[{"xuid":"1","gamertag":"Follower","displayName":"Display","modernGamertag":"Modern","uniqueModernGamertag":"Modern#1234","isFollowingCaller":true}]}`), nil
-			case peopleHubURL("social"):
+			case peopleHubSocialURL:
 				return response(http.StatusOK, `{"people":[{"xuid":"1","isFollowedByCaller":true},{"xuid":"2","gamertag":"Followed","isFollowedByCaller":true}]}`), nil
 			default:
 				t.Fatalf("unexpected URL %s", req.URL)
@@ -55,7 +52,7 @@ func TestFriendClientFriendsMergesFollowersAndSocial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantRequests := strings.Join([]string{peopleHubURL("followers"), peopleHubURL("social")}, ",")
+	wantRequests := strings.Join([]string{peopleHubFollowersURL, peopleHubSocialURL}, ",")
 	if got := strings.Join(requests, ","); got != wantRequests {
 		t.Fatalf("requests = %s, want %s", got, wantRequests)
 	}
@@ -128,7 +125,7 @@ func TestFriendClientUnfollowReturnsRetryAfterError(t *testing.T) {
 			if req.Method != http.MethodDelete {
 				t.Fatalf("unexpected method %s", req.Method)
 			}
-			if req.URL.String() != unfollowURL("123") {
+			if req.URL.String() != followURL("123") {
 				t.Fatalf("unexpected URL %s", req.URL)
 			}
 			resp := response(http.StatusTooManyRequests, "")
@@ -200,7 +197,7 @@ func TestFriendClientFollowReturnsSocialResponseErrors(t *testing.T) {
 	}
 }
 
-func TestFriendClientAcceptPendingFriendRequests(t *testing.T) {
+func TestFriendClientAcceptPendingFriendRequestsUsesBulkAdd(t *testing.T) {
 	var requests []string
 	client := FriendClient{
 		Client: testAuthenticatedClient("XBL3.0 x=user;token", roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -209,62 +206,36 @@ func TestFriendClientAcceptPendingFriendRequests(t *testing.T) {
 				t.Fatal("missing authorization header")
 			}
 			switch {
-			case req.Method == http.MethodGet && req.URL.String() == peopleHubURL("friendRequests(received)"):
+			case req.Method == http.MethodGet && req.URL.String() == pendingRequestsURL:
 				if req.Header.Get("X-Xbl-Contract-Version") != "7" {
 					t.Fatalf("contract version = %q, want 7", req.Header.Get("X-Xbl-Contract-Version"))
 				}
 				return response(http.StatusOK, `{"people":[{"xuid":"1","gamertag":"One"},{"xuid":"2","gamertag":"Two"}]}`), nil
-			case req.Method == http.MethodPut && req.URL.String() == addFriendURL("1"):
-				return response(http.StatusOK, ""), nil
-			case req.Method == http.MethodPut && req.URL.String() == addFriendURL("2"):
-				return response(http.StatusOK, ""), nil
+			case req.Method == http.MethodPost && req.URL.String() == bulkAddFriendsURL:
+				body, err := io.ReadAll(req.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if want := `{"xuids":["1","2"]}`; string(body) != want {
+					t.Fatalf("bulk body = %s, want %s", body, want)
+				}
+				return response(http.StatusOK, `{"updatedPeople":["1","2"]}`), nil
 			default:
 				t.Fatalf("unexpected request %s %s", req.Method, req.URL)
 			}
 			return nil, nil
 		})),
 	}
-	accepter, ok := any(client).(interface {
-		AcceptPendingFriendRequests(context.Context) ([]Person, error)
-	})
-	if !ok {
-		t.Fatal("FriendClient does not accept pending friend requests")
-	}
-	accepted, err := accepter.AcceptPendingFriendRequests(context.Background())
+	accepted, err := client.AcceptPendingFriendRequests(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	wantRequests := strings.Join([]string{
-		http.MethodGet + " " + peopleHubURL("friendRequests(received)"),
-		http.MethodPut + " " + addFriendURL("1"),
-		http.MethodPut + " " + addFriendURL("2"),
+		http.MethodGet + " " + pendingRequestsURL,
+		http.MethodPost + " " + bulkAddFriendsURL,
 	}, ",")
 	if got := strings.Join(requests, ","); got != wantRequests {
 		t.Fatalf("requests = %s, want %s", got, wantRequests)
-	}
-	if len(accepted) != 2 || accepted[0].XUID != "1" || accepted[1].XUID != "2" {
-		t.Fatalf("accepted people = %#v", accepted)
-	}
-}
-
-func TestFriendClientAcceptPendingFriendRequestsReturnsAcceptedPeople(t *testing.T) {
-	client := FriendClient{
-		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			switch req.Method {
-			case http.MethodGet:
-				return response(http.StatusOK, `{"people":[{"xuid":"1","gamertag":"One"},{"xuid":"2","gamertag":"Two"}]}`), nil
-			case http.MethodPut:
-				return response(http.StatusOK, ""), nil
-			default:
-				t.Fatalf("unexpected request %s %s", req.Method, req.URL)
-			}
-			return nil, nil
-		})},
-	}
-
-	accepted, err := client.AcceptPendingFriendRequests(context.Background())
-	if err != nil {
-		t.Fatal(err)
 	}
 	if len(accepted) != 2 || accepted[0].XUID != "1" || accepted[1].XUID != "2" {
 		t.Fatalf("accepted people = %#v", accepted)
@@ -277,7 +248,7 @@ func TestFriendClientAcceptPendingFriendRequestsReturnsRetryAfterError(t *testin
 			switch req.Method {
 			case http.MethodGet:
 				return response(http.StatusOK, `{"people":[{"xuid":"1","gamertag":"One"}]}`), nil
-			case http.MethodPut:
+			case http.MethodPost:
 				resp := response(http.StatusTooManyRequests, "")
 				resp.Header.Set("Retry-After", "11")
 				return resp, nil
@@ -287,13 +258,7 @@ func TestFriendClientAcceptPendingFriendRequestsReturnsRetryAfterError(t *testin
 			return nil, nil
 		})},
 	}
-	accepter, ok := any(client).(interface {
-		AcceptPendingFriendRequests(context.Context) ([]Person, error)
-	})
-	if !ok {
-		t.Fatal("FriendClient does not accept pending friend requests")
-	}
-	_, err := accepter.AcceptPendingFriendRequests(context.Background())
+	_, err := client.AcceptPendingFriendRequests(context.Background())
 	if err == nil {
 		t.Fatal("expected retry-after error")
 	}
@@ -309,13 +274,11 @@ func TestFriendClientAcceptPendingFriendRequestsReturnsRetryAfterError(t *testin
 func TestFriendClientAcceptPendingFriendRequestsReportsFailedUpdates(t *testing.T) {
 	client := FriendClient{
 		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			switch {
-			case req.Method == http.MethodGet:
+			switch req.Method {
+			case http.MethodGet:
 				return response(http.StatusOK, `{"people":[{"xuid":"1","gamertag":"One"},{"xuid":"2","gamertag":"Two"}]}`), nil
-			case req.Method == http.MethodPut && req.URL.String() == addFriendURL("1"):
-				return response(http.StatusOK, ""), nil
-			case req.Method == http.MethodPut && req.URL.String() == addFriendURL("2"):
-				return response(http.StatusBadRequest, `{"code":1049,"description":"restricted"}`), nil
+			case http.MethodPost:
+				return response(http.StatusOK, `{"updatedPeople":["1"]}`), nil
 			default:
 				t.Fatalf("unexpected request %s %s", req.Method, req.URL)
 			}
@@ -338,6 +301,46 @@ func TestFriendClientAcceptPendingFriendRequestsReportsFailedUpdates(t *testing.
 	}
 	if got := strings.Join(acceptErr.FailedXUIDs(), ","); got != "2" {
 		t.Fatalf("failed xuids = %s, want 2", got)
+	}
+}
+
+func TestFriendClientForceUnfollowDeletesFollowerRelationship(t *testing.T) {
+	called := false
+	client := FriendClient{
+		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			called = true
+			if req.Method != http.MethodDelete {
+				t.Fatalf("unexpected method %s", req.Method)
+			}
+			if want := "https://social.xboxlive.com/users/me/people/follower/xuid(123)"; req.URL.String() != want {
+				t.Fatalf("unexpected URL %s, want %s", req.URL, want)
+			}
+			return response(http.StatusNoContent, ""), nil
+		})},
+	}
+	if err := client.ForceUnfollow(context.Background(), "123"); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("client was not called")
+	}
+}
+
+func TestFriendClientSummaryReturnsFollowingCount(t *testing.T) {
+	client := FriendClient{
+		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.String() != socialSummaryURL {
+				t.Fatalf("unexpected URL %s", req.URL)
+			}
+			return response(http.StatusOK, `{"targetFollowingCount":1337,"targetFollowerCount":42}`), nil
+		})},
+	}
+	summary, err := client.Summary(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.TargetFollowingCount != 1337 || summary.TargetFollowerCount != 42 {
+		t.Fatalf("summary = %#v", summary)
 	}
 }
 
@@ -369,10 +372,4 @@ func response(code int, body string) *http.Response {
 		Body:       io.NopCloser(strings.NewReader(body)),
 		Header:     make(http.Header),
 	}
-}
-
-type staticOAuthSource struct{}
-
-func (staticOAuthSource) Token() (*oauth2.Token, error) {
-	return &oauth2.Token{AccessToken: "live"}, nil
 }

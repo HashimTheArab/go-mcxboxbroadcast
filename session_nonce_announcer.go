@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -274,15 +275,62 @@ func generateSessionNonce() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
+// statusWithNonces shadows room.Status fields whose wire shape diverges from
+// MCXboxBroadcast: isHardcore is added (Java always sends false) and
+// SupportedConnections re-encodes NetherNetId as a JSON number.
 type statusWithNonces struct {
 	room.Status
-	Nonces map[string]string `json:"nonces"`
+	IsHardcore           bool                `json:"isHardcore"`
+	SupportedConnections []sessionConnection `json:"SupportedConnections"`
+	Nonces               map[string]string   `json:"nonces"`
+}
+
+// sessionConnection mirrors room.Connection with a numeric NetherNetId,
+// matching the Java session document.
+type sessionConnection struct {
+	ConnectionType int             `json:"ConnectionType"`
+	HostIPAddress  string          `json:"HostIpAddress"`
+	HostPort       uint16          `json:"HostPort"`
+	NetherNetID    json.RawMessage `json:"NetherNetId"`
+	RakNetGUID     string          `json:"RakNetGUID,omitempty"`
+	PmsgID         uuid.UUID       `json:"PmsgId,omitempty"`
+}
+
+func sessionConnections(connections []room.Connection) []sessionConnection {
+	out := make([]sessionConnection, 0, len(connections))
+	for _, connection := range connections {
+		out = append(out, sessionConnection{
+			ConnectionType: connection.ConnectionType,
+			HostIPAddress:  connection.HostIPAddress,
+			HostPort:       connection.HostPort,
+			NetherNetID:    netherNetIDValue(connection.NetherNetID),
+			RakNetGUID:     connection.RakNetGUID,
+			PmsgID:         connection.PmsgID,
+		})
+	}
+	return out
+}
+
+// netherNetIDValue encodes a NetherNet ID as a JSON number when it is one,
+// falling back to a string for non-numeric values.
+func netherNetIDValue(id p2p.NetherNetID) json.RawMessage {
+	if _, err := strconv.ParseUint(string(id), 10, 64); err == nil {
+		return json.RawMessage(id)
+	}
+	quoted, err := json.Marshal(string(id))
+	if err != nil {
+		return json.RawMessage(`"0"`)
+	}
+	return quoted
 }
 
 func marshalStatusWithNonces(status room.Status, nonces map[string]string) ([]byte, error) {
+	connections := sessionConnections(status.SupportedConnections)
+	status.SupportedConnections = nil
 	return json.Marshal(statusWithNonces{
-		Status: status,
-		Nonces: copyStringMap(nonces),
+		Status:               status,
+		SupportedConnections: connections,
+		Nonces:               copyStringMap(nonces),
 	})
 }
 
