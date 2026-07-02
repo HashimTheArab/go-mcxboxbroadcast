@@ -55,6 +55,44 @@ func TestGalleryClientReusesReencodedEquivalentImage(t *testing.T) {
 	}
 }
 
+func TestGalleryClientAuthenticatesRemoteImageFetch(t *testing.T) {
+	remoteImage := testPNG(t, png.NoCompression)
+	imagePath := filepath.Join(t.TempDir(), "image.png")
+	if err := os.WriteFile(imagePath, remoteImage, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	g := GalleryClient{
+		TokenSource: galleryMinecraftTokenSource{},
+		Client: &http.Client{Transport: galleryRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch {
+			case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/xuid/1"):
+				return galleryHTTPResponse(http.StatusOK, `{"result":{"showcasedImages":[{"id":"img","url":"https://cdn.example.test/image.png"}]}}`), nil
+			case req.Method == http.MethodGet && req.URL.Host == "cdn.example.test":
+				// The image endpoint rejects unauthenticated requests with 401,
+				// which used to force a needless re-upload on every start.
+				if req.Header.Get("Authorization") != "Bearer minecraft" {
+					return galleryHTTPResponse(http.StatusUnauthorized, ""), nil
+				}
+				return responseBytes(http.StatusOK, remoteImage), nil
+			case req.Method == http.MethodPost && req.URL.Path == "/api/v1.0/gallery":
+				t.Fatal("image should have been reused instead of uploaded")
+			default:
+				t.Fatalf("unexpected request %s %s", req.Method, req.URL)
+			}
+			return nil, nil
+		})},
+	}
+
+	result, err := g.SetShowcaseResult(context.Background(), "1", imagePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.AlreadySet {
+		t.Fatal("expected authenticated image fetch to recognise the existing showcase image")
+	}
+}
+
 func TestGalleryClientSetShowcaseResultReportsExistingImage(t *testing.T) {
 	localImage := testPNG(t, png.BestCompression)
 	remoteImage := testPNG(t, png.NoCompression)

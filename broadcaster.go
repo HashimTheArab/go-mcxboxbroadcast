@@ -293,19 +293,21 @@ func (b *Broadcaster) startSubAccountFriendSync() {
 }
 
 // logSocialSummary logs the authenticated account and its friend usage at
-// startup, mirroring MCXboxBroadcast's "N/2000 friends" line.
+// startup, mirroring MCXboxBroadcast's "N/2000 friends" line. The count comes
+// from the friend list like MCXboxBroadcast; the social summary's
+// targetFollowingCount is unreliable for the caller's own profile.
 func (b *Broadcaster) logSocialSummary() {
 	ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
 	defer cancel()
-	summary, err := b.friendClientFor(b.conf.XBLClient).Summary(ctx)
+	friends, err := b.friendClientFor(b.conf.XBLClient).Friends(ctx)
 	if err != nil {
-		b.debug("fetch social summary", "err", err)
+		b.debug("fetch friend list for summary", "err", err)
 		return
 	}
 	b.info("authenticated to xbox live",
 		"gamertag", b.hostNameFallback(),
 		"xuid", b.primaryXUID(),
-		"friends", fmt.Sprintf("%d/2000", summary.TargetFollowingCount),
+		"friends", fmt.Sprintf("%d/2000", len(friends)),
 	)
 }
 
