@@ -1,0 +1,152 @@
+{
+    "_comment": "Pterodactyl egg for go-mcxboxbroadcast.",
+    "meta": {
+        "version": "PTDL_v2",
+        "update_url": null
+    },
+    "exported_at": "2026-07-04T00:00:00+00:00",
+    "name": "go-mcxboxbroadcast",
+    "author": "hashim@lunarbedrock.com",
+    "description": "Publishes a Minecraft: Bedrock Edition server as an Xbox Live friend-list world and transfers joining clients to the configured Bedrock server.",
+    "features": null,
+    "docker_images": {
+        "go-mcxboxbroadcast (Pterodactyl)": "ghcr.io/hashimthearab/go-mcxboxbroadcast:pterodactyl"
+    },
+    "file_denylist": [],
+    "startup": "/mcxboxbroadcast -config /home/container/config.yml",
+    "config": {
+        "files": "{\n    \"config.yml\": {\n        \"parser\": \"yaml\",\n        \"find\": {\n            \"debugMode\": \"{{server.build.env.DEBUG_MODE}}\",\n            \"session.queryServer\": \"{{server.build.env.QUERY_SERVER}}\",\n            \"session.configFallback\": \"{{server.build.env.CONFIG_FALLBACK}}\",\n            \"session.sessionInfo.hostName\": \"{{server.build.env.HOST_NAME}}\",\n            \"session.sessionInfo.worldName\": \"{{server.build.env.WORLD_NAME}}\",\n            \"session.sessionInfo.maxPlayers\": \"{{server.build.env.MAX_PLAYERS}}\",\n            \"session.sessionInfo.ip\": \"{{server.build.env.TARGET_SERVER_HOST}}\",\n            \"session.sessionInfo.port\": \"{{server.build.env.TARGET_SERVER_PORT}}\",\n            \"notifications.enabled\": \"{{server.build.env.NOTIFICATIONS_ENABLED}}\",\n            \"notifications.webhookUrl\": \"{{server.build.env.WEBHOOK_URL}}\",\n            \"gallery.enabled\": \"{{server.build.env.GALLERY_ENABLED}}\",\n            \"gallery.imagePath\": \"{{server.build.env.GALLERY_IMAGE_PATH}}\"\n        }\n    }\n}",
+        "startup": "{\n    \"done\": \"broadcasting\"\n}",
+        "logs": "{}",
+        "stop": "^C"
+    },
+    "scripts": {
+        "installation": {
+            "script": "#!/bin/ash\nset -eu\n\ncd /mnt/server\nmkdir -p cache\n\nif [ ! -f config.yml ]; then\n    cat > config.yml <<EOF\nconfigVersion: 3\ndebugMode: ${DEBUG_MODE}\nsuppressSessionUpdateMessage: false\n\nhttp:\n  proxy: \"\"\n\nsession:\n  updateInterval: 30\n  signalingMode: jsonrpc\n  queryServer: ${QUERY_SERVER}\n  webQueryFallback: false\n  configFallback: ${CONFIG_FALLBACK}\n  broadcastSetting: 3\n  worldType: Survival\n  sessionInfo:\n    hostName: \"${HOST_NAME}\"\n    worldName: \"${WORLD_NAME}\"\n    players: 0\n    maxPlayers: ${MAX_PLAYERS}\n    ip: \"${TARGET_SERVER_HOST}\"\n    port: ${TARGET_SERVER_PORT}\n\nfriendSync:\n  updateInterval: 60\n  autoFollow: true\n  autoUnfollow: true\n  initialInvite: true\n  expiry:\n    enabled: true\n    days: 15\n    check: 1800\n    historyPath: cache/player_history.json\n\nnotifications:\n  enabled: ${NOTIFICATIONS_ENABLED}\n  webhookUrl: \"${WEBHOOK_URL}\"\n\ngallery:\n  enabled: ${GALLERY_ENABLED}\n  imagePath: \"${GALLERY_IMAGE_PATH}\"\n  deleteOtherImages: true\n\naccounts:\n  primaryCachePath: cache/live_token.json\n  subAccounts: []\nEOF\nfi\n\necho \"go-mcxboxbroadcast configuration is ready. Start the server and complete the Microsoft device-code sign-in shown in the console.\"\n",
+            "container": "ghcr.io/pterodactyl/installers:alpine",
+            "entrypoint": "ash"
+        }
+    },
+    "variables": [
+        {
+            "name": "Target Server Host",
+            "description": "Hostname or IP address of the Bedrock server players should be transferred to.",
+            "env_variable": "TARGET_SERVER_HOST",
+            "default_value": "play.example.net",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|regex:/^[a-zA-Z0-9_.:-]+$/|max:255",
+            "field_type": "text"
+        },
+        {
+            "name": "Target Server Port",
+            "description": "UDP port of the Bedrock server players should be transferred to.",
+            "env_variable": "TARGET_SERVER_PORT",
+            "default_value": "19132",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|integer|between:1,65535",
+            "field_type": "text"
+        },
+        {
+            "name": "Host Name",
+            "description": "Server name shown in the Minecraft friend-list world.",
+            "env_variable": "HOST_NAME",
+            "default_value": "Minecraft Server",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|max:80",
+            "field_type": "text"
+        },
+        {
+            "name": "World Name",
+            "description": "World name shown in the Minecraft friend-list world.",
+            "env_variable": "WORLD_NAME",
+            "default_value": "Minecraft World",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|max:80",
+            "field_type": "text"
+        },
+        {
+            "name": "Max Players",
+            "description": "Displayed max player count when the target server is not queried.",
+            "env_variable": "MAX_PLAYERS",
+            "default_value": "20",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|integer|between:1,100000",
+            "field_type": "text"
+        },
+        {
+            "name": "Query Target Server",
+            "description": "Whether to query the target Bedrock server for live displayed status.",
+            "env_variable": "QUERY_SERVER",
+            "default_value": "true",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|boolean",
+            "field_type": "text"
+        },
+        {
+            "name": "Use Config Fallback",
+            "description": "Whether failed target queries should reset displayed status to configured values.",
+            "env_variable": "CONFIG_FALLBACK",
+            "default_value": "false",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|boolean",
+            "field_type": "text"
+        },
+        {
+            "name": "Debug Mode",
+            "description": "Enable verbose runtime logging.",
+            "env_variable": "DEBUG_MODE",
+            "default_value": "false",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|boolean",
+            "field_type": "text"
+        },
+        {
+            "name": "Notifications Enabled",
+            "description": "Enable Slack or Discord-compatible webhook notifications.",
+            "env_variable": "NOTIFICATIONS_ENABLED",
+            "default_value": "false",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|boolean",
+            "field_type": "text"
+        },
+        {
+            "name": "Webhook URL",
+            "description": "Slack or Discord-compatible webhook URL for notifications and headless sign-in prompts.",
+            "env_variable": "WEBHOOK_URL",
+            "default_value": "",
+            "user_viewable": false,
+            "user_editable": true,
+            "rules": "nullable|string|max:1000",
+            "field_type": "text"
+        },
+        {
+            "name": "Gallery Enabled",
+            "description": "Enable Minecraft profile showcase image upload.",
+            "env_variable": "GALLERY_ENABLED",
+            "default_value": "true",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|boolean",
+            "field_type": "text"
+        },
+        {
+            "name": "Gallery Image Path",
+            "description": "Path to the showcase image inside the server files.",
+            "env_variable": "GALLERY_IMAGE_PATH",
+            "default_value": "screenshot.jpg",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|max:255",
+            "field_type": "text"
+        }
+    ]
+}

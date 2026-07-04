@@ -73,6 +73,20 @@ stores token cache, player history, and gallery assets. With the default
 configuration, putting `screenshot.jpg` in that directory makes it the showcased
 image.
 
+## Pterodactyl
+
+Import `deployments/pterodactyl/egg-go-mcxboxbroadcast.json` into a Pterodactyl
+nest to run the broadcaster from the panel. The egg uses the Pterodactyl-specific
+image published at `ghcr.io/hashimthearab/go-mcxboxbroadcast:pterodactyl`,
+which runs as the required `container` user from `/home/container`.
+
+The egg creates `config.yml` on install and exposes the target Bedrock
+host/port, displayed server names, query behavior, notifications, and gallery
+settings as panel variables. Account tokens, friend history, and other runtime
+state are stored under `/home/container/cache`. On first start, complete the
+Microsoft device-code sign-in shown in the console; if notifications are
+enabled, the sign-in prompt is also sent to the configured webhook.
+
 ## Library
 
 ```go

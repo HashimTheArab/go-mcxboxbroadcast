@@ -15,15 +15,32 @@ COPY . .
 
 RUN --mount=type=cache,target="/home/.cache/go-build" CGO_ENABLED=0 go build -ldflags="-s -w" -o /app/mcxboxbroadcast_bin ./cmd/broadcaster
 
-FROM alpine:3.22
+FROM alpine:3.22 AS runtime-base
 
 RUN apk add --no-cache ca-certificates && update-ca-certificates
+
+COPY --from=build /app/mcxboxbroadcast_bin /mcxboxbroadcast
+
+FROM runtime-base AS pterodactyl
+
+RUN addgroup -S container && adduser -S -G container -h /home/container container
+
+ENV USER=container HOME=/home/container
+
+WORKDIR /home/container
+
+COPY deployments/pterodactyl/entrypoint.sh /entrypoint.sh
+RUN chmod 755 /entrypoint.sh
+
+USER container:container
+
+CMD ["/bin/sh", "/entrypoint.sh"]
+
+FROM runtime-base AS standalone
 
 RUN addgroup -S app && adduser -S -G app -h /opt/app app
 
 WORKDIR /opt/app/config
-
-COPY --from=build /app/mcxboxbroadcast_bin /mcxboxbroadcast
 
 # chown must precede VOLUME: build steps that modify a path after it is
 # declared a volume are discarded, leaving the mount root-owned at runtime.

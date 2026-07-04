@@ -35,9 +35,23 @@ jobs:
         with:
           context: .
           file: Dockerfile
+          target: standalone
           push: true
           tags: |
             ${{ env.DOCKER_IMAGE }}:${{ github.sha }}
             ${{ env.DOCKER_IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push Pterodactyl image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          target: pterodactyl
+          push: true
+          tags: |
+            ${{ env.DOCKER_IMAGE }}:${{ github.sha }}-pterodactyl
+            ${{ env.DOCKER_IMAGE }}:pterodactyl
           cache-from: type=gha
           cache-to: type=gha,mode=max
