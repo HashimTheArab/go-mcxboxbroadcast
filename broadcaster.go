@@ -1569,7 +1569,7 @@ func (b *Broadcaster) watchSignaling() {
 		}
 		b.warn("connection to signaling lost, re-creating session...",
 			"cause", context.Cause(sig.Context()))
-		if err := b.reconnectSignaling(); err != nil {
+		if err := b.reconnectSignaling(sig); err != nil {
 			// The broadcaster was shut down while retrying; stop watching.
 			return
 		}
@@ -1585,13 +1585,23 @@ const (
 	reconnectBackoffMax  = 2 * time.Minute
 )
 
-// reconnectSignaling rebuilds the session after signaling loss, retrying with
-// backoff until it succeeds or the broadcaster is shut down. A transient
+// reconnectSignaling rebuilds the session after the lost signaling sig, retrying
+// with backoff until it succeeds or the broadcaster is shut down. A transient
 // failure (an expired token, a brief network outage) no longer tears the
-// broadcaster down on the first attempt. It returns a non-nil error only when
-// the broadcaster's context is canceled.
-func (b *Broadcaster) reconnectSignaling() error {
-	return retryWithBackoff(b.ctx, reconnectBackoffBase, reconnectBackoffMax, b.recreateSession, func(err error, next time.Duration) {
+// broadcaster down on the first attempt. It stops early, without rebuilding, if
+// another path (such as the health check) has already replaced the signaling, so
+// a delayed retry never tears down a newer session. It returns a non-nil error
+// only when the broadcaster's context is canceled.
+func (b *Broadcaster) reconnectSignaling(sig nethernet.Signaling) error {
+	return retryWithBackoff(b.ctx, reconnectBackoffBase, reconnectBackoffMax, func() error {
+		b.mu.Lock()
+		superseded := b.signaling != nil && b.signaling != sig
+		b.mu.Unlock()
+		if superseded {
+			return nil
+		}
+		return b.recreateSession()
+	}, func(err error, next time.Duration) {
 		b.log.Error("re-create session failed, retrying", "err", err, "retry_in", next)
 		b.notify(b.ctx, "Signaling reconnection failed, retrying in "+next.String()+": "+err.Error())
 	})
@@ -1607,7 +1617,9 @@ func retryWithBackoff(ctx context.Context, base, max time.Duration, attempt func
 	for {
 		if err := attempt(); err == nil {
 			return nil
-		} else if onError != nil {
+		} else if ctx.Err() == nil && onError != nil {
+			// Skip the failure callback when the context is already canceled:
+			// a graceful shutdown is not a reconnect failure worth alerting on.
 			onError(err, delay)
 		}
 		select {

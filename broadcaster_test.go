@@ -508,6 +508,25 @@ func TestBroadcasterWatchSignalingRetriesInsteadOfShuttingDown(t *testing.T) {
 	}
 }
 
+func TestRetryWithBackoffSkipsOnErrorAfterContextCanceled(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var onErrCalls int
+	err := retryWithBackoff(ctx, time.Millisecond, time.Millisecond, func() error {
+		return errors.New("broadcaster is shut down")
+	}, func(error, time.Duration) {
+		onErrCalls++
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("retryWithBackoff error = %v, want context.Canceled", err)
+	}
+	if onErrCalls != 0 {
+		t.Fatalf("onError called %d times after context cancel, want 0", onErrCalls)
+	}
+}
+
 func TestBroadcasterWatchSignalingSkipsStaticSignaling(t *testing.T) {
 	sigCtx, sigCancel := context.WithCancel(context.Background())
 	defer sigCancel()
