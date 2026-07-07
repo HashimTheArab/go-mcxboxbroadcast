@@ -1,10 +1,21 @@
 package broadcaster
 
 import (
+	"context"
 	"log/slog"
+	"time"
 
 	"github.com/df-mc/go-xsapi/v2"
+	xblsocial "github.com/df-mc/go-xsapi/v2/social"
 )
+
+// socialSubscriber is the part of go-xsapi's social client the broadcaster uses
+// to receive and release RTA relationship events. It is satisfied by
+// [*xblsocial.Client].
+type socialSubscriber interface {
+	Subscribe(context.Context, xblsocial.SubscriptionHandler) error
+	CloseContext(context.Context) error
+}
 
 // reactiveFriendSyncApplicable reports whether an account with the given friend
 // sync configuration benefits from a reactive social subscription. Only
@@ -19,25 +30,45 @@ func reactiveFriendSyncApplicable(conf *FriendSyncConfig) bool {
 // than only on the sync interval. It returns a channel the account's friend
 // syncer should select on to run an immediate pass, or nil when a reactive
 // subscription is not applicable.
-//
-// The subscription is best-effort: on a subscribe failure or a lost
-// subscription the periodic syncer remains the backstop, and the RTA connection
-// re-subscribes automatically after a transient drop.
 func (b *Broadcaster) startSocialSubscription(client *xsapi.Client, conf *FriendSyncConfig, log *slog.Logger) <-chan struct{} {
 	if client == nil || !reactiveFriendSyncApplicable(conf) {
 		return nil
 	}
+	return b.subscribeSocial(client.Social(), log)
+}
+
+// subscribeSocial subscribes sub to the social RTA feed and returns a trigger
+// channel that fires on each event. The subscription's lifetime is bound to the
+// broadcaster: a dedicated goroutine unsubscribes once the broadcaster's context
+// is canceled, and [Broadcaster.Close] waits for it via socialWg. This keeps a
+// caller-provided client (which the broadcaster does not close) from
+// accumulating stale handlers across broadcaster restarts.
+//
+// The subscription is best-effort: on a subscribe failure or a lost subscription
+// the periodic syncer remains the backstop, and the RTA connection re-subscribes
+// automatically after a transient drop.
+func (b *Broadcaster) subscribeSocial(sub socialSubscriber, log *slog.Logger) <-chan struct{} {
 	// Buffered by one so bursts of events collapse into a single pending pass.
 	trigger := make(chan struct{}, 1)
 	handler := friendRequestSubscriptionHandler{trigger: trigger, log: log}
+	b.socialWg.Add(1)
 	go func() {
-		// Subscribe dials RTA lazily; run it off the start path so a slow or
-		// failing dial cannot delay broadcasting.
-		if err := client.Social().Subscribe(b.ctx, handler); err != nil {
+		defer b.socialWg.Done()
+		// Subscribe dials RTA lazily; running it here keeps a slow or failing
+		// dial off the start path.
+		if err := sub.Subscribe(b.ctx, handler); err != nil {
 			log.Warn("subscribe to social rta feed; friend requests will be accepted on the sync interval", "err", err)
 			return
 		}
 		log.Debug("subscribed to social rta feed for reactive friend sync")
+
+		<-b.ctx.Done()
+		// b.ctx is done, so use a fresh context to release the subscription.
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := sub.CloseContext(ctx); err != nil {
+			log.Debug("unsubscribe social rta feed", "err", err)
+		}
 	}()
 	return trigger
 }

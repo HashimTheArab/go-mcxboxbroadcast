@@ -60,6 +60,10 @@ type Broadcaster struct {
 	mu       sync.Mutex
 	started  bool
 	acceptWg sync.WaitGroup
+	// socialWg tracks the goroutines that own each account's social RTA
+	// subscription; Close waits on it so subscriptions are undone before it
+	// returns, even on a caller-provided client the broadcaster does not close.
+	socialWg sync.WaitGroup
 
 	// lastQuery is the most recent successful target-server query, kept so
 	// query failures fall back to real data instead of failing the update.
@@ -1854,6 +1858,9 @@ func (b *Broadcaster) Close() error {
 		return nil
 	}
 	b.cancel()
+	// Undo social RTA subscriptions before closing clients so a caller-provided
+	// client does not retain stale handlers after the broadcaster stops.
+	b.socialWg.Wait()
 	err := b.listener.Close()
 	err = errors.Join(err, b.cleanupPublishedSessions(false))
 	if b.signaling != nil {

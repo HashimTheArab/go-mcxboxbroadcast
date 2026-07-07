@@ -70,6 +70,61 @@ func TestFriendRequestSubscriptionHandlerCoalescesEvents(t *testing.T) {
 	}
 }
 
+type fakeSocialSubscriber struct {
+	subscribed chan xblsocial.SubscriptionHandler
+	closed     chan struct{}
+}
+
+func (f *fakeSocialSubscriber) Subscribe(_ context.Context, h xblsocial.SubscriptionHandler) error {
+	f.subscribed <- h
+	return nil
+}
+
+func (f *fakeSocialSubscriber) CloseContext(context.Context) error {
+	close(f.closed)
+	return nil
+}
+
+// TestSubscribeSocialUnsubscribesOnShutdown verifies that a social subscription
+// is undone when the broadcaster shuts down and that the shutdown waits for it,
+// so a reused xsapi client does not accumulate stale handlers across restarts.
+func TestSubscribeSocialUnsubscribesOnShutdown(t *testing.T) {
+	b := &Broadcaster{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	b.ctx, b.cancel = context.WithCancel(context.Background())
+	fake := &fakeSocialSubscriber{
+		subscribed: make(chan xblsocial.SubscriptionHandler, 1),
+		closed:     make(chan struct{}),
+	}
+
+	trigger := b.subscribeSocial(fake, b.log)
+	if trigger == nil {
+		t.Fatal("subscribeSocial returned a nil trigger")
+	}
+	// The registered handler drives the returned trigger channel.
+	h := <-fake.subscribed
+	h.HandleIncomingFriendRequestCountChange(1)
+	select {
+	case <-trigger:
+	case <-time.After(2 * time.Second):
+		t.Fatal("social event did not reach the trigger")
+	}
+
+	// Shutdown unsubscribes, and the broadcaster's wait group tracks it.
+	b.cancel()
+	done := make(chan struct{})
+	go func() { b.socialWg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("socialWg.Wait did not return after shutdown")
+	}
+	select {
+	case <-fake.closed:
+	default:
+		t.Fatal("subscription was not unsubscribed on shutdown")
+	}
+}
+
 // TestReactiveFriendSyncApplicable verifies which configurations warrant a
 // reactive social subscription.
 func TestReactiveFriendSyncApplicable(t *testing.T) {
