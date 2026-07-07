@@ -461,7 +461,7 @@ func TestBroadcasterSignalingFactoryIsUsedOnceForSharedSignaling(t *testing.T) {
 	}
 }
 
-func TestBroadcasterWatchSignalingDetectsDeadSignaling(t *testing.T) {
+func TestBroadcasterWatchSignalingRetriesInsteadOfShuttingDown(t *testing.T) {
 	sigCtx, sigCancel := context.WithCancel(context.Background())
 	defer sigCancel()
 	var log bytes.Buffer
@@ -488,17 +488,23 @@ func TestBroadcasterWatchSignalingDetectsDeadSignaling(t *testing.T) {
 		close(done)
 	}()
 
+	// A failing reconnect must not shut the broadcaster down: watchSignaling
+	// keeps retrying with backoff rather than returning and cancelling.
 	select {
 	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("watchSignaling did not return after signaling context was canceled")
+		t.Fatal("watchSignaling returned after a failed reconnect; want it to keep retrying")
+	case <-time.After(200 * time.Millisecond):
 	}
-	got := log.String()
-	if !strings.Contains(got, "connection to signaling lost") {
-		t.Fatalf("expected signaling lost warning, got: %q", got)
+	if b.ctx.Err() != nil {
+		t.Fatal("broadcaster was shut down after a failed reconnect")
 	}
-	if !strings.Contains(got, "re-create session failed") {
-		t.Fatalf("expected re-create error log, got: %q", got)
+
+	// Shutting the broadcaster down stops the retry loop.
+	b.cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watchSignaling did not return after broadcaster shutdown")
 	}
 }
 

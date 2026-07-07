@@ -1569,15 +1569,55 @@ func (b *Broadcaster) watchSignaling() {
 		}
 		b.warn("connection to signaling lost, re-creating session...",
 			"cause", context.Cause(sig.Context()))
-		if err := b.recreateSession(); err != nil {
-			b.log.Error("re-create session failed, shutting down", "err", err)
-			b.notify(b.ctx, "Signaling reconnection failed, shutting down: "+err.Error())
-			b.cancel()
+		if err := b.reconnectSignaling(); err != nil {
+			// The broadcaster was shut down while retrying; stop watching.
 			return
 		}
 		b.info("signaling session reconnected")
 		go b.watchSignaling()
 	case <-b.ctx.Done():
+	}
+}
+
+// reconnect backoff bounds for rebuilding the session after signaling loss.
+const (
+	reconnectBackoffBase = 5 * time.Second
+	reconnectBackoffMax  = 2 * time.Minute
+)
+
+// reconnectSignaling rebuilds the session after signaling loss, retrying with
+// backoff until it succeeds or the broadcaster is shut down. A transient
+// failure (an expired token, a brief network outage) no longer tears the
+// broadcaster down on the first attempt. It returns a non-nil error only when
+// the broadcaster's context is canceled.
+func (b *Broadcaster) reconnectSignaling() error {
+	return retryWithBackoff(b.ctx, reconnectBackoffBase, reconnectBackoffMax, b.recreateSession, func(err error, next time.Duration) {
+		b.log.Error("re-create session failed, retrying", "err", err, "retry_in", next)
+		b.notify(b.ctx, "Signaling reconnection failed, retrying in "+next.String()+": "+err.Error())
+	})
+}
+
+// retryWithBackoff calls attempt until it returns nil or ctx is done, waiting
+// between attempts starting at base and doubling up to max. onError, when
+// non-nil, is called with each failed attempt's error and the delay before the
+// next try. It returns nil once an attempt succeeds, or ctx.Err() if ctx is
+// done first.
+func retryWithBackoff(ctx context.Context, base, max time.Duration, attempt func() error, onError func(err error, next time.Duration)) error {
+	delay := base
+	for {
+		if err := attempt(); err == nil {
+			return nil
+		} else if onError != nil {
+			onError(err, delay)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+		if delay *= 2; delay > max {
+			delay = max
+		}
 	}
 }
 
