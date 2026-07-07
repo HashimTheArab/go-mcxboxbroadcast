@@ -106,8 +106,8 @@ func TestFriendRequestSubscriptionHandlerCoalescesEvents(t *testing.T) {
 }
 
 type fakeSocialSubscriber struct {
-	subscribed chan xblsocial.SubscriptionHandler
-	closed     chan struct{}
+	subscribed   chan xblsocial.SubscriptionHandler
+	unsubscribed chan xblsocial.SubscriptionHandler
 }
 
 func (f *fakeSocialSubscriber) Subscribe(_ context.Context, h xblsocial.SubscriptionHandler) error {
@@ -115,8 +115,8 @@ func (f *fakeSocialSubscriber) Subscribe(_ context.Context, h xblsocial.Subscrip
 	return nil
 }
 
-func (f *fakeSocialSubscriber) CloseContext(context.Context) error {
-	close(f.closed)
+func (f *fakeSocialSubscriber) Unsubscribe(_ context.Context, h xblsocial.SubscriptionHandler) error {
+	f.unsubscribed <- h
 	return nil
 }
 
@@ -127,8 +127,8 @@ func TestSubscribeSocialUnsubscribesOnShutdown(t *testing.T) {
 	b := &Broadcaster{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	fake := &fakeSocialSubscriber{
-		subscribed: make(chan xblsocial.SubscriptionHandler, 1),
-		closed:     make(chan struct{}),
+		subscribed:   make(chan xblsocial.SubscriptionHandler, 1),
+		unsubscribed: make(chan xblsocial.SubscriptionHandler, 1),
 	}
 
 	trigger := b.subscribeSocial(fake, b.log)
@@ -144,7 +144,8 @@ func TestSubscribeSocialUnsubscribesOnShutdown(t *testing.T) {
 		t.Fatal("social event did not reach the trigger")
 	}
 
-	// Shutdown unsubscribes, and the broadcaster's wait group tracks it.
+	// Shutdown unsubscribes exactly the handler it registered, and the
+	// broadcaster's wait group tracks that cleanup.
 	b.cancel()
 	done := make(chan struct{})
 	go func() { b.socialWg.Wait(); close(done) }()
@@ -154,7 +155,10 @@ func TestSubscribeSocialUnsubscribesOnShutdown(t *testing.T) {
 		t.Fatal("socialWg.Wait did not return after shutdown")
 	}
 	select {
-	case <-fake.closed:
+	case got := <-fake.unsubscribed:
+		if got != h {
+			t.Fatal("unsubscribed a different handler than was registered")
+		}
 	default:
 		t.Fatal("subscription was not unsubscribed on shutdown")
 	}

@@ -11,10 +11,11 @@ import (
 
 // socialSubscriber is the part of go-xsapi's social client the broadcaster uses
 // to receive and release RTA relationship events. It is satisfied by
-// [*xblsocial.Client].
+// [*xblsocial.Client]. Unsubscribe removes only the broadcaster's own handler,
+// leaving any other subscribers on a shared client untouched.
 type socialSubscriber interface {
 	Subscribe(context.Context, xblsocial.SubscriptionHandler) error
-	CloseContext(context.Context) error
+	Unsubscribe(context.Context, xblsocial.SubscriptionHandler) error
 }
 
 // reactiveFriendSyncApplicable reports whether an account with the given friend
@@ -64,9 +65,11 @@ func (b *Broadcaster) subscribeSocial(sub socialSubscriber, log *slog.Logger) <-
 
 		<-b.ctx.Done()
 		// b.ctx is done, so use a fresh context to release the subscription.
+		// Unsubscribe removes only this handler, so a shared client's other
+		// subscribers keep working.
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		if err := sub.CloseContext(ctx); err != nil {
+		if err := sub.Unsubscribe(ctx, handler); err != nil {
 			log.Debug("unsubscribe social rta feed", "err", err)
 		}
 	}()
