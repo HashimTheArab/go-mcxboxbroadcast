@@ -46,6 +46,41 @@ func TestFriendSyncerRunSyncsOnTrigger(t *testing.T) {
 	}
 }
 
+// TestFriendSyncerRunHandlesClosedTrigger verifies that a closed Trigger channel
+// does not make Run busy-loop over runSync (a closed channel receives forever).
+func TestFriendSyncerRunHandlesClosedTrigger(t *testing.T) {
+	accepted := make(chan struct{}, 16)
+	client := &syncFriendClient{
+		accept: func(context.Context) ([]Person, error) {
+			accepted <- struct{}{}
+			return nil, nil
+		},
+	}
+	trigger := make(chan struct{})
+	syncer := FriendSyncer{
+		Client:  client,
+		Config:  FriendSyncConfig{AutoFollow: true, UpdateInterval: time.Hour},
+		Trigger: trigger,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go syncer.Run(ctx)
+
+	// Initial sync on startup.
+	select {
+	case <-accepted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no initial sync pass")
+	}
+	// Closing the trigger must not spin Run into repeated sync passes.
+	close(trigger)
+	select {
+	case <-accepted:
+		t.Fatal("closed trigger caused an extra sync pass (busy loop)")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 // TestFriendRequestSubscriptionHandlerCoalescesEvents verifies that rapid social
 // events collapse into a single pending sync (non-blocking), and that a lost
 // subscription does not enqueue work.

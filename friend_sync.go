@@ -471,7 +471,13 @@ func (s FriendSyncer) Run(ctx context.Context) {
 			s.runSync(ctx, &state, false)
 		case <-expiryC:
 			s.runSync(ctx, &state, true)
-		case <-s.Trigger:
+		case _, ok := <-s.Trigger:
+			if !ok {
+				// A closed Trigger receives forever; disable it so Run does
+				// not spin and bypass the interval.
+				s.Trigger = nil
+				continue
+			}
 			s.runSync(ctx, &state, false)
 		case <-ctx.Done():
 			return
