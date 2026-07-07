@@ -58,7 +58,12 @@ type FriendSyncer struct {
 	// syncer's friend list. Enable it on exactly one syncer per shared
 	// HistoryStore, or entries maintained by other accounts get dropped.
 	PruneHistory bool
-	Log          *slog.Logger
+	// Trigger, when non-nil, requests an immediate sync pass whenever it
+	// receives a signal. It lets an RTA social subscription accept incoming
+	// friend requests promptly instead of waiting for the next tick. A nil
+	// Trigger leaves the syncer purely periodic.
+	Trigger <-chan struct{}
+	Log     *slog.Logger
 }
 
 const friendListFullBackoff = time.Hour
@@ -466,6 +471,8 @@ func (s FriendSyncer) Run(ctx context.Context) {
 			s.runSync(ctx, &state, false)
 		case <-expiryC:
 			s.runSync(ctx, &state, true)
+		case <-s.Trigger:
+			s.runSync(ctx, &state, false)
 		case <-ctx.Done():
 			return
 		}

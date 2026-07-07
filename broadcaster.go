@@ -249,7 +249,9 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 			"initial_invite", b.conf.FriendSync.InitialInvite,
 			"expiry_enabled", b.conf.FriendSync.ExpiryEnabled,
 		)
-		go b.friendSyncer().Run(b.ctx)
+		syncer := b.friendSyncer()
+		syncer.Trigger = b.startSocialSubscription(b.conf.XBLClient, b.conf.FriendSync, b.log)
+		go syncer.Run(b.ctx)
 	}
 	b.startSubAccountFriendSync()
 	go b.logSocialSummary()
@@ -285,12 +287,14 @@ func (b *Broadcaster) startSubAccountFriendSync() {
 		if conf == nil {
 			continue
 		}
+		syncLog := b.log.With("sub_account", account.ID)
 		syncer := FriendSyncer{
 			Client:   b.friendClientFor(account.XBLClient),
 			Config:   *conf,
 			History:  b.conf.FriendHistory,
 			Notifier: b.conf.Notifier,
-			Log:      b.log.With("sub_account", account.ID),
+			Trigger:  b.startSocialSubscription(account.XBLClient, conf, syncLog),
+			Log:      syncLog,
 		}
 		if conf.InitialInvite {
 			syncer.Inviter = &subAccountInviter{b: b, id: account.ID}
