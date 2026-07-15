@@ -60,6 +60,10 @@ type Broadcaster struct {
 	mu       sync.Mutex
 	started  bool
 	acceptWg sync.WaitGroup
+	// socialWg tracks the goroutines that own each account's social RTA
+	// subscription; Close waits on it so subscriptions are undone before it
+	// returns, even on a caller-provided client the broadcaster does not close.
+	socialWg sync.WaitGroup
 
 	// lastQuery is the most recent successful target-server query, kept so
 	// query failures fall back to real data instead of failing the update.
@@ -248,7 +252,9 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 			"initial_invite", b.conf.FriendSync.InitialInvite,
 			"expiry_enabled", b.conf.FriendSync.ExpiryEnabled,
 		)
-		go b.friendSyncer().Run(b.ctx)
+		syncer := b.friendSyncer()
+		syncer.Trigger = b.startSocialSubscription(b.conf.XBLClient, b.conf.FriendSync, b.log)
+		go syncer.Run(b.ctx)
 	}
 	b.startSubAccountFriendSync()
 	go b.logSocialSummary()
@@ -284,12 +290,14 @@ func (b *Broadcaster) startSubAccountFriendSync() {
 		if conf == nil {
 			continue
 		}
+		syncLog := b.log.With("sub_account", account.ID)
 		syncer := FriendSyncer{
 			Client:   b.friendClientFor(account.XBLClient),
 			Config:   *conf,
 			History:  b.conf.FriendHistory,
 			Notifier: b.conf.Notifier,
-			Log:      b.log.With("sub_account", account.ID),
+			Trigger:  b.startSocialSubscription(account.XBLClient, conf, syncLog),
+			Log:      syncLog,
 		}
 		if conf.InitialInvite {
 			syncer.Inviter = &subAccountInviter{b: b, id: account.ID}
@@ -1848,6 +1856,9 @@ func (b *Broadcaster) Close() error {
 		return nil
 	}
 	b.cancel()
+	// Undo social RTA subscriptions before closing clients so a caller-provided
+	// client does not retain stale handlers after the broadcaster stops.
+	b.socialWg.Wait()
 	err := b.listener.Close()
 	err = errors.Join(err, b.cleanupPublishedSessions(false))
 	if b.signaling != nil {
