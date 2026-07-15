@@ -76,6 +76,7 @@ func TestRunBroadcasterCommandRejectsDuplicateSubAccountCacheBeforeAuth(t *testi
 
 func TestRunBroadcasterCommandStartsAndClosesBroadcaster(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
+	var output strings.Builder
 	started := false
 	closed := false
 	var gotSubAccounts int
@@ -83,7 +84,7 @@ func TestRunBroadcasterCommandStartsAndClosesBroadcaster(t *testing.T) {
 	err := runBroadcasterCommand(ctx, commandOptions{
 		ConfigPath: "/base/config.yml",
 	}, commandDeps{
-		Stdout: io.Discard,
+		Stdout: &output,
 		LoadConfig: func(string) (broadcaster.ConfigFile, error) {
 			cfg := broadcaster.DefaultConfigFile()
 			cfg.Session.SessionInfo.IP = "127.0.0.1"
@@ -140,6 +141,9 @@ func TestRunBroadcasterCommandStartsAndClosesBroadcaster(t *testing.T) {
 	}
 	if closedClients != 2 {
 		t.Fatalf("expected primary and sub-account clients to be closed, got %d", closedClients)
+	}
+	if got := output.String(); !strings.Contains(got, "starting go-mcxboxbroadcast") || strings.Contains(got, "msg=broadcasting") {
+		t.Fatalf("unexpected lifecycle logs: %q", got)
 	}
 }
 
