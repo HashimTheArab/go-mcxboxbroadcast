@@ -8,10 +8,12 @@ require (
 	github.com/df-mc/go-xsapi/v2 v2.0.2
 	github.com/go-gl/mathgl v1.2.0
 	github.com/google/uuid v1.6.0
+	github.com/lmittmann/tint v1.2.0
 	github.com/pelletier/go-toml/v2 v2.2.4
 	github.com/sandertv/go-raknet v1.15.1
 	github.com/sandertv/gophertunnel v0.0.0-00010101000000-000000000000
 	golang.org/x/oauth2 v0.36.0
+	golang.org/x/term v0.40.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 

@@ -68,6 +68,10 @@ The standalone container is published at
 docker run --rm -it -v /path/to/config:/opt/app/config ghcr.io/hashimthearab/go-mcxboxbroadcast:latest
 ```
 
+Interactive terminals use colored, human-readable logs. Redirected output and
+container log streams use plain structured text. Set `NO_COLOR=1` to disable
+color or `FORCE_COLOR=1` to enable it for consoles that do not expose a TTY.
+
 The mounted config directory is where the app reads or creates `config.yml` and
 stores token cache, player history, and gallery assets. With the default
 configuration, putting `screenshot.jpg` in that directory makes it the showcased

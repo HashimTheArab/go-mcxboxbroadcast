@@ -220,8 +220,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	}
 	b.listener = l
 	b.started = true
-	b.info("nethernet broadcaster started", "network_id", signalingNetworkID(sig), "signaling_mode", mode)
-	b.debug("started nethernet listener")
+	b.info("nethernet broadcaster started", "network_id", signalingNetworkID(sig), "signaling_mode", mode, "target", b.conf.Server.Address())
 
 	startListener := b.listener
 	b.acceptWg.Add(1)
@@ -1452,7 +1451,6 @@ func (b *Broadcaster) updateLoop() {
 			ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
 			if err := b.Update(ctx); err == nil {
 				consecutiveFailures = 0
-				b.debug("updated xbox live session")
 			} else if !errors.Is(err, context.Canceled) {
 				consecutiveFailures++
 				b.log.Error("update session", "err", err)
@@ -1724,7 +1722,7 @@ func (b *Broadcaster) recreateSession() error {
 		return fmt.Errorf("re-listen nethernet: %w", err)
 	}
 	b.listener = l
-	b.info("nethernet broadcaster started", "network_id", signalingNetworkID(sig), "signaling_mode", mode)
+	b.debug("nethernet listener restarted", "network_id", signalingNetworkID(sig), "signaling_mode", mode, "target", b.conf.Server.Address())
 
 	reconnectDone = true
 	go func() {
