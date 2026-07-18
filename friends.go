@@ -81,7 +81,7 @@ func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]Person
 		return nil, nil
 	}
 
-	updatedXUIDs, err := socialClient.AddFriends(ctx, xuids)
+	updatedXUIDs, err := socialClient.BulkAddFriends(ctx, xuids)
 	if err != nil {
 		return nil, err
 	}
