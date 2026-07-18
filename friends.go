@@ -60,12 +60,6 @@ func (c FriendClient) Friends(ctx context.Context) ([]Person, error) {
 	return mergePeople(peopleFromSocialUsers(followers), peopleFromSocialUsers(following)), nil
 }
 
-// Summary returns the caller's social summary, including the total number of
-// people the account follows.
-func (c FriendClient) Summary(ctx context.Context) (xblsocial.Summary, error) {
-	return c.social().Summary(ctx)
-}
-
 // AcceptPendingFriendRequests accepts incoming Xbox friend requests with a
 // single bulk add call and returns the people that Xbox reported as updated.
 func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]Person, error) {
@@ -87,7 +81,7 @@ func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]Person
 		return nil, nil
 	}
 
-	updatedXUIDs, err := socialClient.BulkAddFriends(ctx, xuids)
+	updatedXUIDs, err := socialClient.AddFriends(ctx, xuids)
 	if err != nil {
 		return nil, err
 	}
