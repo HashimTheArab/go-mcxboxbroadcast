@@ -19,7 +19,7 @@ const (
 	peopleHubFollowersURL = "https://peoplehub.xboxlive.com/users/me/people/followers"
 	peopleHubSocialURL    = "https://peoplehub.xboxlive.com/users/me/people/social"
 	pendingRequestsURL    = "https://peoplehub.xboxlive.com/users/me/people/friendRequests(received)"
-	bulkAddFriendsURL     = "https://social.xboxlive.com/bulk/users/me/people/friends/v2?method=add"
+	addFriendsURL         = "https://social.xboxlive.com/bulk/users/me/people/friends/v2?method=add"
 )
 
 func followURL(xuid string) string {
@@ -200,7 +200,7 @@ func TestFriendClientFollowReturnsSocialResponseErrors(t *testing.T) {
 	}
 }
 
-func TestFriendClientAcceptPendingFriendRequestsUsesBulkAdd(t *testing.T) {
+func TestFriendClientAcceptPendingFriendRequestsUsesAddFriends(t *testing.T) {
 	var requests []string
 	client := FriendClient{
 		Client: testAuthenticatedClient("XBL3.0 x=user;token", roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -214,7 +214,7 @@ func TestFriendClientAcceptPendingFriendRequestsUsesBulkAdd(t *testing.T) {
 					t.Fatalf("contract version = %q, want 7", req.Header.Get("X-Xbl-Contract-Version"))
 				}
 				return response(http.StatusOK, `{"people":[{"xuid":"1","gamertag":"One"},{"xuid":"2","gamertag":"Two"}]}`), nil
-			case req.Method == http.MethodPost && req.URL.String() == bulkAddFriendsURL:
+			case req.Method == http.MethodPost && req.URL.String() == addFriendsURL:
 				body, err := io.ReadAll(req.Body)
 				if err != nil {
 					t.Fatal(err)
@@ -235,7 +235,7 @@ func TestFriendClientAcceptPendingFriendRequestsUsesBulkAdd(t *testing.T) {
 	}
 	wantRequests := strings.Join([]string{
 		http.MethodGet + " " + pendingRequestsURL,
-		http.MethodPost + " " + bulkAddFriendsURL,
+		http.MethodPost + " " + addFriendsURL,
 	}, ",")
 	if got := strings.Join(requests, ","); got != wantRequests {
 		t.Fatalf("requests = %s, want %s", got, wantRequests)
