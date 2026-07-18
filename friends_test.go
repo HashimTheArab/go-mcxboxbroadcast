@@ -200,7 +200,7 @@ func TestFriendClientFollowReturnsSocialResponseErrors(t *testing.T) {
 	}
 }
 
-func TestFriendClientAcceptPendingFriendRequestsUsesAddFriends(t *testing.T) {
+func TestFriendClientAcceptPendingFriendRequestsUsesBulkAddFriends(t *testing.T) {
 	var requests []string
 	client := FriendClient{
 		Client: testAuthenticatedClient("XBL3.0 x=user;token", roundTripFunc(func(req *http.Request) (*http.Response, error) {
