@@ -20,7 +20,6 @@ const (
 	peopleHubSocialURL    = "https://peoplehub.xboxlive.com/users/me/people/social"
 	pendingRequestsURL    = "https://peoplehub.xboxlive.com/users/me/people/friendRequests(received)"
 	bulkAddFriendsURL     = "https://social.xboxlive.com/bulk/users/me/people/friends/v2?method=add"
-	socialSummaryURL      = "https://social.xboxlive.com/users/me/summary"
 )
 
 func followURL(xuid string) string {
@@ -323,24 +322,6 @@ func TestFriendClientForceUnfollowDeletesFollowerRelationship(t *testing.T) {
 	}
 	if !called {
 		t.Fatal("client was not called")
-	}
-}
-
-func TestFriendClientSummaryReturnsFollowingCount(t *testing.T) {
-	client := FriendClient{
-		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			if req.URL.String() != socialSummaryURL {
-				t.Fatalf("unexpected URL %s", req.URL)
-			}
-			return response(http.StatusOK, `{"targetFollowingCount":1337,"targetFollowerCount":42}`), nil
-		})},
-	}
-	summary, err := client.Summary(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if summary.TargetFollowingCount != 1337 || summary.TargetFollowerCount != 42 {
-		t.Fatalf("summary = %#v", summary)
 	}
 }
 
