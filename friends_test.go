@@ -26,6 +26,10 @@ func followURL(xuid string) string {
 	return fmt.Sprintf("https://social.xboxlive.com/users/me/people/xuid(%s)", xuid)
 }
 
+func unfollowURL(xuid string) string {
+	return fmt.Sprintf("https://social.xboxlive.com/users/me/people/friends/v2/xuid(%s)?deleteRelationships=follows", xuid)
+}
+
 func TestFriendClientFriendsMergesFollowersAndSocial(t *testing.T) {
 	var requests []string
 	client := FriendClient{
@@ -124,7 +128,7 @@ func TestFriendClientUnfollowReturnsRetryAfterError(t *testing.T) {
 			if req.Method != http.MethodDelete {
 				t.Fatalf("unexpected method %s", req.Method)
 			}
-			if req.URL.String() != followURL("123") {
+			if req.URL.String() != unfollowURL("123") {
 				t.Fatalf("unexpected URL %s", req.URL)
 			}
 			resp := response(http.StatusTooManyRequests, "")
