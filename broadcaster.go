@@ -588,6 +588,20 @@ func (i *subAccountInviter) Invite(ctx context.Context, xuid, titleID string) er
 	return err
 }
 
+// Invite sends a game invite to xuid through the broadcaster's active MPSD session.
+func (b *Broadcaster) Invite(ctx context.Context, xuid, titleID string) error {
+	b.mu.Lock()
+	announcer, ok := xblAnnouncer(b.announcer)
+	if !ok || announcer.Session == nil {
+		b.mu.Unlock()
+		return errors.New("invite: no active MPSD session")
+	}
+	session := announcer.Session
+	b.mu.Unlock()
+	_, err := session.Invite(ctx, xuid, titleID)
+	return err
+}
+
 // loggingAnnouncer wraps an announcer with debug-level status logging.
 type loggingAnnouncer struct {
 	room.Announcer
