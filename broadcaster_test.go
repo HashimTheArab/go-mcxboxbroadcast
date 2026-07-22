@@ -299,6 +299,20 @@ func TestXBLAnnouncerUnwrapsDiagnosticsWrappers(t *testing.T) {
 	}
 }
 
+func TestBroadcasterInviteRequiresActiveBroadcaster(t *testing.T) {
+	// Keep the public API Minecraft-specific: callers provide only the XUID,
+	// while Broadcaster supplies the package's title ID.
+	var invite func(*Broadcaster, context.Context, string) error = (*Broadcaster).Invite
+
+	b := &Broadcaster{
+		announcer: &room.XBLAnnouncer{Session: &mpsd.Session{}},
+	}
+	err := invite(b, context.Background(), "456")
+	if err == nil || !strings.Contains(err.Error(), "broadcaster not started") {
+		t.Fatalf("Invite error = %v, want broadcaster-not-started error", err)
+	}
+}
+
 func TestBroadcasterWarnsForWebSocketSignaling(t *testing.T) {
 	var log bytes.Buffer
 	b := &Broadcaster{log: slog.New(slog.NewTextHandler(&log, nil))}
