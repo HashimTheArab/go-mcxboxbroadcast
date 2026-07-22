@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -559,13 +560,22 @@ type broadcasterInviter struct {
 // Invite snapshots the active MPSD session under the mutex and sends a game invite.
 func (i *broadcasterInviter) Invite(ctx context.Context, xuid, titleID string) error {
 	i.b.mu.Lock()
+	if !i.b.started {
+		i.b.mu.Unlock()
+		return errors.New("invite: broadcaster not started")
+	}
 	announcer, ok := xblAnnouncer(i.b.announcer)
-	if !ok || announcer.Session == nil {
+	if !ok {
 		i.b.mu.Unlock()
 		return errors.New("invite: no active MPSD session")
 	}
+	announcer.Lock()
 	session := announcer.Session
+	announcer.Unlock()
 	i.b.mu.Unlock()
+	if session == nil || session.Context().Err() != nil {
+		return errors.New("invite: no active MPSD session")
+	}
 	_, err := session.Invite(ctx, xuid, titleID)
 	return err
 }
@@ -586,6 +596,12 @@ func (i *subAccountInviter) Invite(ctx context.Context, xuid, titleID string) er
 	}
 	_, err := session.Invite(ctx, xuid, titleID)
 	return err
+}
+
+// Invite sends a Minecraft game invite to xuid through the broadcaster's
+// active MPSD session.
+func (b *Broadcaster) Invite(ctx context.Context, xuid string) error {
+	return (&broadcasterInviter{b: b}).Invite(ctx, xuid, strconv.FormatInt(TitleID, 10))
 }
 
 // loggingAnnouncer wraps an announcer with debug-level status logging.
