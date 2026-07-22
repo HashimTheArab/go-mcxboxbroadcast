@@ -2,6 +2,7 @@ package broadcaster
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -242,6 +243,96 @@ func TestFriendClientAcceptPendingFriendRequestsUsesBulkAddFriends(t *testing.T)
 	}
 	if len(accepted) != 2 || accepted[0].XUID != "1" || accepted[1].XUID != "2" {
 		t.Fatalf("accepted people = %#v", accepted)
+	}
+}
+
+func TestFriendClientAcceptPendingFriendRequestsBatchesBulkAdds(t *testing.T) {
+	pending := make([]map[string]string, 51)
+	for i := range pending {
+		pending[i] = map[string]string{"xuid": fmt.Sprint(i + 1)}
+	}
+	pendingBody, err := json.Marshal(map[string]any{"people": pending})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var batchSizes []int
+	client := FriendClient{
+		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.Method {
+			case http.MethodGet:
+				return response(http.StatusOK, string(pendingBody)), nil
+			case http.MethodPost:
+				var body struct {
+					XUIDs []string `json:"xuids"`
+				}
+				if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+					t.Fatal(err)
+				}
+				batchSizes = append(batchSizes, len(body.XUIDs))
+				responseBody, err := json.Marshal(map[string]any{"updatedPeople": body.XUIDs})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return response(http.StatusOK, string(responseBody)), nil
+			default:
+				t.Fatalf("unexpected request %s %s", req.Method, req.URL)
+			}
+			return nil, nil
+		})},
+	}
+
+	accepted, err := client.AcceptPendingFriendRequests(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accepted) != len(pending) {
+		t.Fatalf("accepted %d people, want %d", len(accepted), len(pending))
+	}
+	if got := fmt.Sprint(batchSizes); got != "[50 1]" {
+		t.Fatalf("bulk batch sizes = %s, want [50 1]", got)
+	}
+}
+
+func TestFriendClientAcceptPendingFriendRequestsSplitsLimitErrors(t *testing.T) {
+	var batchSizes []int
+	client := FriendClient{
+		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.Method {
+			case http.MethodGet:
+				return response(http.StatusOK, `{"people":[{"xuid":"1"},{"xuid":"2"},{"xuid":"3"},{"xuid":"4"}]}`), nil
+			case http.MethodPost:
+				var body struct {
+					XUIDs []string `json:"xuids"`
+				}
+				if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+					t.Fatal(err)
+				}
+				batchSizes = append(batchSizes, len(body.XUIDs))
+				if len(body.XUIDs) > 2 {
+					return response(http.StatusBadRequest, `{"code":1050,"description":"Bulk Operation exceeded our limits, retry with a lower count."}`), nil
+				}
+				responseBody, err := json.Marshal(map[string]any{"updatedPeople": body.XUIDs})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return response(http.StatusOK, string(responseBody)), nil
+			default:
+				t.Fatalf("unexpected request %s %s", req.Method, req.URL)
+			}
+			return nil, nil
+		})},
+	}
+
+	accepted, err := client.AcceptPendingFriendRequests(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accepted) != 4 {
+		t.Fatalf("accepted people = %#v, want all four", accepted)
+	}
+	if got := fmt.Sprint(batchSizes); got != "[4 2 2]" {
+		t.Fatalf("bulk batch sizes = %s, want [4 2 2]", got)
 	}
 }
 

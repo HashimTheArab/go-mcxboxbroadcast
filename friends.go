@@ -2,6 +2,7 @@ package broadcaster
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -30,6 +31,11 @@ type Person struct {
 // friendListConfig fetches people lists undecorated with contract version 5,
 // keeping the periodic response small at large friend counts.
 var friendListConfig = xblsocial.PeopleListConfig{Undecorated: true, ContractVersion: 5}
+
+// bulkAddFriendsBatchSize stays below Xbox Live's undocumented bulk-operation
+// limit. Code 1050 responses are also split dynamically in case the service
+// applies a lower limit to a particular account or request.
+const bulkAddFriendsBatchSize = 50
 
 // AcceptFriendRequestsError reports a successful bulk accept response that
 // still failed to update one or more pending friend requests.
@@ -61,7 +67,7 @@ func (c FriendClient) Friends(ctx context.Context) ([]Person, error) {
 }
 
 // AcceptPendingFriendRequests accepts incoming Xbox friend requests with a
-// single bulk add call and returns the people that Xbox reported as updated.
+// bounded bulk add calls and returns the people that Xbox reported as updated.
 func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]Person, error) {
 	socialClient := c.social()
 	pending, err := socialClient.People(ctx, xblsocial.PeopleListIncomingFriendRequests, xblsocial.PeopleListConfig{Undecorated: true})
@@ -81,9 +87,16 @@ func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]Person
 		return nil, nil
 	}
 
-	updatedXUIDs, err := socialClient.BulkAddFriends(ctx, xuids)
-	if err != nil {
-		return nil, err
+	updatedXUIDs := make([]string, 0, len(xuids))
+	var bulkErr error
+	for start := 0; start < len(xuids); start += bulkAddFriendsBatchSize {
+		end := min(start+bulkAddFriendsBatchSize, len(xuids))
+		updated, err := bulkAddFriends(ctx, socialClient, xuids[start:end])
+		updatedXUIDs = append(updatedXUIDs, updated...)
+		if err != nil {
+			bulkErr = err
+			break
+		}
 	}
 	updated := make(map[string]struct{}, len(updatedXUIDs))
 	accepted := make([]Person, 0, len(updatedXUIDs))
@@ -92,6 +105,9 @@ func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]Person
 			updated[xuid] = struct{}{}
 			accepted = append(accepted, person)
 		}
+	}
+	if bulkErr != nil {
+		return accepted, bulkErr
 	}
 	var failed []string
 	for _, xuid := range xuids {
@@ -103,6 +119,29 @@ func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]Person
 		return accepted, &AcceptFriendRequestsError{Failed: failed}
 	}
 	return accepted, nil
+}
+
+// bulkAddFriends retries Xbox's bulk-limit response with progressively smaller
+// batches. Successful work from the first half is retained if the second half
+// fails for an unrelated reason such as rate limiting.
+func bulkAddFriends(ctx context.Context, client *xblsocial.Client, xuids []string) ([]string, error) {
+	updated, err := client.BulkAddFriends(ctx, xuids)
+	if err == nil || len(xuids) == 1 || !isBulkOperationLimit(err) {
+		return updated, err
+	}
+
+	middle := len(xuids) / 2
+	left, err := bulkAddFriends(ctx, client, xuids[:middle])
+	if err != nil {
+		return left, err
+	}
+	right, err := bulkAddFriends(ctx, client, xuids[middle:])
+	return append(left, right...), err
+}
+
+func isBulkOperationLimit(err error) bool {
+	var responseErr *xblsocial.ResponseError
+	return errors.As(err, &responseErr) && responseErr.Code == 1050
 }
 
 // Follow follows the XUID, which makes the user a friend when they also follow

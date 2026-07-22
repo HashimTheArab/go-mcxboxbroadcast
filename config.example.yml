@@ -30,7 +30,7 @@ friendSync:
   initialInvite: true
   expiry:
     enabled: true
-    days: 15
+    days: 8
     check: 1800
     historyPath: cache/player_history.json
 
