@@ -78,6 +78,15 @@ func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 	}), nil
 }
 
+// subAccountStatus makes a sub-account's activity independently joinable
+// while preserving the primary session's advertised NetherNet connection and
+// world metadata.
+func subAccountStatus(status room.Status, xuid string) room.Status {
+	status.OwnerID = xuid
+	status.LevelID = accountLevelID(xuid)
+	return status
+}
+
 // applyQueriedStatus overlays a queried server status onto the announced one.
 func applyQueriedStatus(st *Status, queried minecraft.ServerStatus) {
 	st.WorldName = queried.ServerName
