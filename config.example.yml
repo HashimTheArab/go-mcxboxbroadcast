@@ -15,6 +15,10 @@ session:
   configFallback: false
   broadcastSetting: 3
   worldType: Survival
+  # Set both to 0 to use the operating system's full ephemeral UDP range.
+  icePortRange:
+    min: 0
+    max: 0
   sessionInfo:
     hostName: Minecraft Server
     worldName: Minecraft World

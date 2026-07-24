@@ -11,8 +11,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/df-mc/go-nethernet"
 	"github.com/df-mc/go-xsapi/v2"
 	"github.com/pelletier/go-toml/v2"
+	"github.com/pion/webrtc/v4"
 	"github.com/sandertv/gophertunnel/minecraft"
 	"github.com/sandertv/gophertunnel/minecraft/service"
 	"gopkg.in/yaml.v3"
@@ -44,14 +46,20 @@ type HTTPFileConfig struct {
 // The Geyser-extension-only remoteAddress/remotePort keys are intentionally
 // absent; the broadcast target always comes from sessionInfo.
 type SessionFileConfig struct {
-	UpdateInterval   int             `yaml:"updateInterval" toml:"updateInterval"`
-	SignalingMode    string          `yaml:"signalingMode" toml:"signalingMode"`
-	QueryServer      bool            `yaml:"queryServer" toml:"queryServer"`
-	WebQueryFallback bool            `yaml:"webQueryFallback" toml:"webQueryFallback"`
-	ConfigFallback   bool            `yaml:"configFallback" toml:"configFallback"`
-	BroadcastSetting int32           `yaml:"broadcastSetting" toml:"broadcastSetting"`
-	WorldType        string          `yaml:"worldType" toml:"worldType"`
-	SessionInfo      SessionInfoFile `yaml:"sessionInfo" toml:"sessionInfo"`
+	UpdateInterval   int              `yaml:"updateInterval" toml:"updateInterval"`
+	SignalingMode    string           `yaml:"signalingMode" toml:"signalingMode"`
+	QueryServer      bool             `yaml:"queryServer" toml:"queryServer"`
+	WebQueryFallback bool             `yaml:"webQueryFallback" toml:"webQueryFallback"`
+	ConfigFallback   bool             `yaml:"configFallback" toml:"configFallback"`
+	BroadcastSetting int32            `yaml:"broadcastSetting" toml:"broadcastSetting"`
+	WorldType        string           `yaml:"worldType" toml:"worldType"`
+	ICEPortRange     ICEPortRangeFile `yaml:"icePortRange" toml:"icePortRange"`
+	SessionInfo      SessionInfoFile  `yaml:"sessionInfo" toml:"sessionInfo"`
+}
+
+type ICEPortRangeFile struct {
+	Min int `yaml:"min" toml:"min"`
+	Max int `yaml:"max" toml:"max"`
 }
 
 type SessionInfoFile struct {
@@ -274,6 +282,10 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	netherNetListenConfig, err := c.Session.ICEPortRange.listenConfig()
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
 		XBLClient:            in.XBLClient,
 		XBLTokenSource:       in.XBLTokenSource,
@@ -297,6 +309,7 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 		ListenConfig: minecraft.ListenConfig{
 			HTTPClient: in.HTTPClient,
 		},
+		NetherNetListenConfig:        netherNetListenConfig,
 		UpdateInterval:               time.Duration(c.Session.UpdateInterval) * time.Second,
 		HTTPClient:                   in.HTTPClient,
 		Log:                          in.Log,
@@ -322,6 +335,23 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 		}
 	}
 	return cfg, nil
+}
+
+func (r ICEPortRangeFile) listenConfig() (nethernet.ListenConfig, error) {
+	if r.Min == 0 && r.Max == 0 {
+		return nethernet.ListenConfig{}, nil
+	}
+	if r.Min < 1 || r.Max < 1 || r.Min > 65535 || r.Max > 65535 || r.Min > r.Max {
+		return nethernet.ListenConfig{}, fmt.Errorf(
+			"session.icePortRange must be disabled with min/max 0 or satisfy 1 <= min <= max <= 65535 (got min=%d max=%d)",
+			r.Min, r.Max,
+		)
+	}
+	var settingEngine webrtc.SettingEngine
+	if err := settingEngine.SetEphemeralUDPPortRange(uint16(r.Min), uint16(r.Max)); err != nil {
+		return nethernet.ListenConfig{}, fmt.Errorf("configure session.icePortRange: %w", err)
+	}
+	return nethernet.ListenConfig{API: webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine))}, nil
 }
 
 func configSignalingMode(mode string) (SignalingMode, error) {

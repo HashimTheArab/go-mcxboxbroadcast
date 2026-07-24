@@ -252,6 +252,55 @@ func TestConfigFileMapsSuppressSessionUpdateMessage(t *testing.T) {
 	}
 }
 
+func TestRuntimeConfigMapsICEUDPPortRange(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := os.WriteFile(path, []byte(`
+session:
+  icePortRange:
+    min: 40000
+    max: 40010
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfigFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{XBLTokenSource: staticTokenSource{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.NetherNetListenConfig.API == nil {
+		t.Fatal("configured ICE UDP port range did not create a WebRTC API")
+	}
+}
+
+func TestRuntimeConfigRejectsInvalidICEUDPPortRange(t *testing.T) {
+	tests := map[string]string{
+		"missing maximum": "min: 40000\n    max: 0",
+		"missing minimum": "min: 0\n    max: 40010",
+		"reversed":        "min: 40010\n    max: 40000",
+		"negative":        "min: -1\n    max: 40000",
+		"too large":       "min: 40000\n    max: 65536",
+	}
+	for name, ports := range tests {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yml")
+			data := "session:\n  icePortRange:\n    " + ports + "\n"
+			if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadConfigFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := cfg.RuntimeConfig(RuntimeConfigInput{XBLTokenSource: staticTokenSource{}}); err == nil {
+				t.Fatal("expected invalid ICE UDP port range error")
+			}
+		})
+	}
+}
+
 func TestConfigFileRejectsWebSocketSignalingMode(t *testing.T) {
 	cfg := DefaultConfigFile()
 	cfg.Session.SignalingMode = "websocket"
