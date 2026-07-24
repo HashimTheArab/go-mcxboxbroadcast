@@ -7,6 +7,7 @@ import (
 	"image/color"
 	"image/png"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,8 +15,88 @@ import (
 	"testing"
 	"time"
 
+	"github.com/df-mc/go-xsapi/v2"
 	"github.com/sandertv/gophertunnel/minecraft/service"
 )
+
+func TestBroadcasterUploadsGalleryForEnabledSubAccounts(t *testing.T) {
+	imagePath := testGalleryImageFile(t)
+	seen := map[string]string{}
+	client := &http.Client{Transport: galleryRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/xuid/") {
+			xuid := req.URL.Path[strings.LastIndex(req.URL.Path, "/")+1:]
+			seen[xuid] = req.Header.Get("Authorization")
+			if xuid == "bad" {
+				return galleryHTTPResponse(http.StatusInternalServerError, ""), nil
+			}
+			return galleryHTTPResponse(http.StatusOK, `{"result":{"showcasedImages":[]}}`), nil
+		}
+		if req.Method == http.MethodPost && req.URL.Path == "/api/v1.0/gallery" {
+			return galleryHTTPResponse(http.StatusAccepted, `{"result":{"id":"new"}}`), nil
+		}
+		t.Fatalf("unexpected request %s %s", req.Method, req.URL)
+		return nil, nil
+	})}
+	b := &Broadcaster{
+		ctx: context.Background(),
+		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		conf: Config{
+			XUID: "primary",
+			Gallery: &GalleryConfig{
+				Enabled:     true,
+				ImagePath:   imagePath,
+				TokenSource: galleryTokenSource{authorization: "Bearer primary"},
+				Client:      client,
+			},
+			SubAccounts: []SubAccountConfig{
+				{
+					ID:                   "good",
+					Enabled:              true,
+					XBLClient:            &xsapi.Client{},
+					XUID:                 "good",
+					MinecraftTokenSource: galleryTokenSource{authorization: "Bearer good"},
+				},
+				{
+					ID:                   "bad",
+					Enabled:              true,
+					XBLClient:            &xsapi.Client{},
+					XUID:                 "bad",
+					MinecraftTokenSource: galleryTokenSource{authorization: "Bearer bad"},
+				},
+				{
+					ID:                   "after-failure",
+					Enabled:              true,
+					XBLClient:            &xsapi.Client{},
+					XUID:                 "after-failure",
+					MinecraftTokenSource: galleryTokenSource{authorization: "Bearer after-failure"},
+				},
+				{
+					ID:                   "disabled",
+					Enabled:              false,
+					XBLClient:            &xsapi.Client{},
+					XUID:                 "disabled",
+					MinecraftTokenSource: galleryTokenSource{authorization: "Bearer disabled"},
+				},
+			},
+		},
+	}
+
+	b.uploadGallery(context.Background())
+
+	for xuid, authorization := range map[string]string{
+		"primary":       "Bearer primary",
+		"good":          "Bearer good",
+		"bad":           "Bearer bad",
+		"after-failure": "Bearer after-failure",
+	} {
+		if got := seen[xuid]; got != authorization {
+			t.Fatalf("gallery authorization for %s = %q, want %q", xuid, got, authorization)
+		}
+	}
+	if _, ok := seen["disabled"]; ok {
+		t.Fatal("disabled sub-account gallery was uploaded")
+	}
+}
 
 func TestGalleryClientReusesReencodedEquivalentImage(t *testing.T) {
 	localImage := testPNG(t, png.BestCompression)
@@ -235,4 +316,12 @@ type galleryMinecraftTokenSource struct{}
 
 func (galleryMinecraftTokenSource) ServiceToken(context.Context) (*service.Token, error) {
 	return &service.Token{AuthorizationHeader: "Bearer minecraft", ValidUntil: time.Now().Add(time.Hour)}, nil
+}
+
+type galleryTokenSource struct {
+	authorization string
+}
+
+func (s galleryTokenSource) ServiceToken(context.Context) (*service.Token, error) {
+	return &service.Token{AuthorizationHeader: s.authorization, ValidUntil: time.Now().Add(time.Hour)}, nil
 }
