@@ -25,6 +25,49 @@ import (
 	"github.com/sandertv/gophertunnel/minecraft/room"
 )
 
+func TestBroadcasterStartRejectsClosingState(t *testing.T) {
+	b, err := New(Config{
+		XBLTokenSource: staticTokenSource{},
+		Server:         ServerInfo{Host: "127.0.0.1", Port: 19132},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.closing = true
+
+	err = b.Start(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "closing") {
+		t.Fatalf("Start() error = %v, want closing-state rejection", err)
+	}
+}
+
+func TestBroadcasterConcurrentCloseWaitsForActiveShutdown(t *testing.T) {
+	state := &broadcasterCloseState{done: make(chan struct{})}
+	b := &Broadcaster{closing: true, closeState: state}
+	want := errors.New("close failed")
+	result := make(chan error, 1)
+	go func() {
+		result <- b.Close()
+	}()
+
+	select {
+	case err := <-result:
+		t.Fatalf("concurrent Close() returned before shutdown completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	// Simulate a later lifecycle generation replacing the broadcaster's state.
+	// The waiter must still read the result from the generation it captured.
+	b.mu.Lock()
+	b.closeState = &broadcasterCloseState{done: make(chan struct{})}
+	b.mu.Unlock()
+	state.err = want
+	close(state.done)
+	if err := <-result; !errors.Is(err, want) {
+		t.Fatalf("concurrent Close() error = %v, want %v", err, want)
+	}
+}
+
 func TestBroadcasterStartSubAccountsMutuallyFollowsBeforePublish(t *testing.T) {
 	var calls []string
 	client := &http.Client{Transport: broadcasterRoundTripFunc(func(req *http.Request) (*http.Response, error) {

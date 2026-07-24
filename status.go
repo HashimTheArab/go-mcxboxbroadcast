@@ -23,6 +23,9 @@ import (
 var defaultRoomStatus = room.DefaultStatus()
 
 func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
+	b.statusMu.Lock()
+	defer b.statusMu.Unlock()
+
 	ownerID, err := b.primaryXUIDForStatus(ctx)
 	if err != nil {
 		return room.Status{}, err

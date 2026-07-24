@@ -68,7 +68,7 @@ func TestBroadcasterStartSubAccountPublishesIndependentSessionAndSignaling(t *te
 	}
 	sub := &fakeAnnouncer{}
 	subSignaling := &fakeSignaling{networkID: "sub-nethernet"}
-	subListener := &trackedListener{}
+	subListener := newTrackedListener()
 	var ref mpsd.SessionReference
 	client := &http.Client{Transport: broadcasterRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if req.URL.Host != "peoplehub.xboxlive.com" {
@@ -203,7 +203,7 @@ func TestBroadcasterSubAccountUpdateFailureDoesNotCountAsPrimaryFailure(t *testi
 func TestBroadcasterCleanupClosesIndependentSubAccountSessions(t *testing.T) {
 	sub := &fakeAnnouncer{}
 	signaling := &fakeSignaling{}
-	listener := &trackedListener{}
+	listener := newTrackedListener()
 	b := &Broadcaster{subAnnouncers: []publishedSubAccount{{
 		id:        "sub1",
 		xuid:      "sub",
@@ -273,7 +273,7 @@ func TestBroadcasterRejectsPrimarySignalingForSubAccount(t *testing.T) {
 		},
 	}
 
-	_, err := b.subAccountSignalingFor(context.Background(), &SubAccountConfig{})
+	_, err := b.subAccountSignalingFor(context.Background(), &SubAccountConfig{}, primary)
 	if err == nil || !strings.Contains(err.Error(), "primary signaling instance") {
 		t.Fatalf("subAccountSignalingFor() error = %v, want shared-instance rejection", err)
 	}
@@ -296,7 +296,7 @@ func TestBroadcasterSubAccountTokenSetupHonoursStartupDeadline(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := b.subAccountSignalingFor(ctx, &SubAccountConfig{})
+		_, err := b.subAccountSignalingFor(ctx, &SubAccountConfig{}, nil)
 		done <- err
 	}()
 
@@ -337,12 +337,13 @@ func TestBroadcasterDetectsLostSubAccountSignaling(t *testing.T) {
 		}},
 	}
 
-	if got := b.sessionUnhealthyReason(); got != "sub-account sub1 signaling lost" {
-		t.Fatalf("sessionUnhealthyReason() = %q, want lost sub-account signaling", got)
+	id, signaling := b.lostSubAccountSignaling()
+	if id != "sub1" || signaling != b.subAnnouncers[0].signaling {
+		t.Fatalf("lostSubAccountSignaling() = (%q, %p), want sub1 signaling", id, signaling)
 	}
 }
 
-func TestBroadcasterReconnectsLostSubAccountWithStaticPrimarySignaling(t *testing.T) {
+func TestBroadcasterReconnectsLostSubAccountWithoutRestartingPrimary(t *testing.T) {
 	lostCtx, lose := context.WithCancel(context.Background())
 	lose()
 	primary := &fakeSignaling{networkID: "primary-nethernet"}
@@ -350,8 +351,9 @@ func TestBroadcasterReconnectsLostSubAccountWithStaticPrimarySignaling(t *testin
 	replacement := &fakeSignaling{networkID: "replacement-sub-nethernet"}
 	oldAnnouncer := &fakeAnnouncer{}
 	newAnnouncer := &fakeAnnouncer{}
-	oldListener := &trackedListener{}
-	newListener := &trackedListener{}
+	oldListener := newTrackedListener()
+	newListener := newTrackedListener()
+	primaryAnnouncer := &fakeAnnouncer{}
 	connection := room.Connection{
 		ConnectionType: p2p.ConnectionTypeSignalingOverJSONRPC,
 		NetherNetID:    "replacement-sub-nethernet",
@@ -361,10 +363,9 @@ func TestBroadcasterReconnectsLostSubAccountWithStaticPrimarySignaling(t *testin
 		log:               testBroadcasterLogger(),
 		signaling:         primary,
 		sessionConnection: &room.Connection{ConnectionType: p2p.ConnectionTypeSignalingOverJSONRPC, NetherNetID: "primary-nethernet", PmsgID: uuid.New()},
-		announcer:         &fakeAnnouncer{},
+		announcer:         primaryAnnouncer,
 		started:           true,
 		conf: Config{
-			Signaling: primary,
 			XBLClient: &xsapi.Client{},
 			XUID:      "same",
 			Status:    Status{HostName: "Host", WorldName: "World"},
@@ -403,8 +404,25 @@ func TestBroadcasterReconnectsLostSubAccountWithStaticPrimarySignaling(t *testin
 		t.Fatal("checkSessionHealth() = false, want lost sub-account signaling recovery")
 	}
 
+	deadline := time.Now().Add(time.Second)
+	for {
+		b.mu.Lock()
+		replaced := len(b.subAnnouncers) == 1 && b.subAnnouncers[0].signaling == replacement && b.subAnnouncers[0].listener == newListener
+		b.mu.Unlock()
+		if replaced {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for targeted sub-account recovery")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
 	if !oldAnnouncer.Closed() || !oldListener.Closed() {
 		t.Fatalf("lost sub-account resources remain open: announcer=%v listener=%v", oldAnnouncer.Closed(), oldListener.Closed())
+	}
+	if primaryAnnouncer.Closed() || primary.closed {
+		t.Fatal("targeted sub-account recovery restarted the primary endpoint")
 	}
 	if len(b.subAnnouncers) != 1 || b.subAnnouncers[0].signaling != replacement || b.subAnnouncers[0].listener != newListener {
 		t.Fatalf("sub-account endpoint was not replaced: %#v", b.subAnnouncers)
@@ -412,11 +430,149 @@ func TestBroadcasterReconnectsLostSubAccountWithStaticPrimarySignaling(t *testin
 	if b.subAnnouncersByID["sub1"] == nil || b.subAnnouncersByID["sub1"] == oldAnnouncer {
 		t.Fatal("sub-account announcer lookup was not replaced")
 	}
+	b.reconnectWg.Wait()
 
 	if err := b.cleanupPublishedSessions(false); err != nil {
 		t.Fatal(err)
 	}
 	b.acceptWg.Wait()
+}
+
+func TestBroadcasterRevalidatesPreparedSubAccountAgainstCurrentPrimary(t *testing.T) {
+	lostCtx, lose := context.WithCancel(context.Background())
+	lose()
+	oldPrimary := &fakeSignaling{networkID: "old-primary"}
+	newPrimary := &fakeSignaling{networkID: "new-primary"}
+	lost := &cancelableSignaling{ctx: lostCtx, networkID: "lost-sub"}
+	factoryStarted := make(chan struct{})
+	releaseFactory := make(chan struct{})
+	b := &Broadcaster{
+		log:       testBroadcasterLogger(),
+		signaling: oldPrimary,
+		started:   true,
+		conf: Config{
+			XBLClient: &xsapi.Client{},
+			XUID:      "same",
+			Status:    Status{HostName: "Host", WorldName: "World"},
+			SubAccounts: []SubAccountConfig{{
+				ID:        "sub1",
+				Enabled:   true,
+				XBLClient: &xsapi.Client{},
+				XUID:      "same",
+			}},
+		},
+		subAnnouncers: []publishedSubAccount{{
+			id:        "sub1",
+			xuid:      "same",
+			announcer: &fakeAnnouncer{},
+			signaling: lost,
+			listener:  newTrackedListener(),
+		}},
+		subAnnouncersByID: map[string]room.Announcer{"sub1": &fakeAnnouncer{}},
+		subAccountAnnouncerFactory: func(context.Context, SubAccountConfig, mpsd.SessionReference) (room.Announcer, error) {
+			return &fakeAnnouncer{}, nil
+		},
+		subAccountSignalingFactory: func(context.Context, *SubAccountConfig) (nethernet.Signaling, error) {
+			close(factoryStarted)
+			<-releaseFactory
+			return newPrimary, nil
+		},
+		subAccountConnectionFactory: func(context.Context, *SubAccountConfig, nethernet.Signaling) (*room.Connection, error) {
+			return &room.Connection{ConnectionType: p2p.ConnectionTypeSignalingOverJSONRPC, NetherNetID: "new-primary", PmsgID: uuid.New()}, nil
+		},
+		subAccountListenerFactory: func(nethernet.Signaling, room.Status) (net.Listener, error) {
+			return newTrackedListener(), nil
+		},
+	}
+	b.ctx, b.cancel = context.WithCancel(context.Background())
+	defer b.cancel()
+
+	result := make(chan error, 1)
+	go func() {
+		result <- b.recreateSubAccount("sub1", lost)
+	}()
+	select {
+	case <-factoryStarted:
+	case <-time.After(time.Second):
+		t.Fatal("sub-account signaling preparation did not start")
+	}
+	b.mu.Lock()
+	b.signaling = newPrimary
+	b.mu.Unlock()
+	close(releaseFactory)
+
+	err := <-result
+	if err == nil || !strings.Contains(err.Error(), "matches the current primary") {
+		t.Fatalf("recreateSubAccount() error = %v, want current-primary rejection", err)
+	}
+	if newPrimary.closed {
+		t.Fatal("rejecting the now-primary signaling closed the primary endpoint")
+	}
+}
+
+func TestBroadcasterSubAccountReconnectDoesNotBlockHealthLoopOrMutex(t *testing.T) {
+	lostCtx, lose := context.WithCancel(context.Background())
+	lose()
+	reconnectStarted := make(chan struct{})
+	b := &Broadcaster{
+		log:       testBroadcasterLogger(),
+		signaling: &fakeSignaling{networkID: "primary-nethernet"},
+		started:   true,
+		conf: Config{
+			XUID: "same",
+			SubAccounts: []SubAccountConfig{{
+				ID:        "sub1",
+				Enabled:   true,
+				XBLClient: &xsapi.Client{},
+				XUID:      "same",
+			}},
+		},
+		subAnnouncers: []publishedSubAccount{{
+			id:        "sub1",
+			signaling: &cancelableSignaling{ctx: lostCtx, networkID: "lost-sub-nethernet"},
+			announcer: &fakeAnnouncer{},
+			listener:  newTrackedListener(),
+		}},
+		subAccountSignalingFactory: func(ctx context.Context, _ *SubAccountConfig) (nethernet.Signaling, error) {
+			close(reconnectStarted)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+	b.ctx, b.cancel = context.WithCancel(context.Background())
+
+	returned := make(chan bool, 1)
+	go func() {
+		returned <- b.checkSessionHealth()
+	}()
+	select {
+	case unhealthy := <-returned:
+		if !unhealthy {
+			t.Fatal("checkSessionHealth() = false, want recovery scheduled")
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("checkSessionHealth blocked on sub-account reconnection")
+	}
+	select {
+	case <-reconnectStarted:
+	case <-time.After(time.Second):
+		t.Fatal("sub-account reconnection did not start")
+	}
+
+	lockAcquired := make(chan struct{})
+	go func() {
+		b.mu.Lock()
+		b.mu.Unlock()
+		close(lockAcquired)
+	}()
+	select {
+	case <-lockAcquired:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("sub-account reconnection held the broadcaster mutex during network work")
+	}
+
+	b.cancel()
+	b.reconnectWg.Wait()
 }
 
 func TestBroadcasterSkipsDuplicateIDsBeforePublishing(t *testing.T) {
@@ -462,15 +618,24 @@ func TestBroadcasterSkipsDuplicateIDsBeforePublishing(t *testing.T) {
 type trackedListener struct {
 	mu     sync.Mutex
 	closed bool
+	done   chan struct{}
+}
+
+func newTrackedListener() *trackedListener {
+	return &trackedListener{done: make(chan struct{})}
 }
 
 func (l *trackedListener) Accept() (net.Conn, error) {
+	<-l.done
 	return nil, net.ErrClosed
 }
 
 func (l *trackedListener) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if !l.closed {
+		close(l.done)
+	}
 	l.closed = true
 	return nil
 }
