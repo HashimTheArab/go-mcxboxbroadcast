@@ -2,6 +2,7 @@ package broadcaster
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"testing"
@@ -128,6 +129,38 @@ func TestBroadcasterUpdateRefreshesSubAccountSession(t *testing.T) {
 	}
 }
 
+func TestBroadcasterSubAccountUpdateFailureDoesNotCountAsPrimaryFailure(t *testing.T) {
+	primary := &fakeAnnouncer{}
+	sub := &fakeAnnouncer{announceErr: fmt.Errorf("sub update failed")}
+	b := &Broadcaster{
+		log:       testBroadcasterLogger(),
+		announcer: primary,
+		subAnnouncers: []publishedSubAccount{{
+			id:        "sub1",
+			xuid:      "sub",
+			announcer: sub,
+		}},
+		started: true,
+		conf: Config{
+			Server: ServerInfo{Host: "play.example.net", Port: 19132},
+			XUID:   "primary",
+			Status: Status{HostName: "Host", WorldName: "World"},
+		},
+	}
+
+	err := b.Update(context.Background())
+	var subErr *subAccountUpdateError
+	if !errors.As(err, &subErr) {
+		t.Fatalf("Update() error = %v, want subAccountUpdateError", err)
+	}
+	if countsAsPrimaryUpdateFailure(err) {
+		t.Fatalf("sub-account-only update error counted as primary failure: %v", err)
+	}
+	if !countsAsPrimaryUpdateFailure(fmt.Errorf("primary update failed")) {
+		t.Fatal("primary update error did not count as primary failure")
+	}
+}
+
 func TestBroadcasterCleanupClosesIndependentSubAccountSessions(t *testing.T) {
 	sub := &fakeAnnouncer{}
 	b := &Broadcaster{subAnnouncers: []publishedSubAccount{{
@@ -147,10 +180,11 @@ func TestBroadcasterCleanupClosesIndependentSubAccountSessions(t *testing.T) {
 	}
 }
 
-func TestBroadcasterCleanupRetainsDuplicateIDSubAccountSessions(t *testing.T) {
+func TestBroadcasterSkipsDuplicateIDsBeforePublishing(t *testing.T) {
 	first := &fakeAnnouncer{}
 	second := &fakeAnnouncer{}
 	announcers := []room.Announcer{first, second}
+	factoryCalls := 0
 	b := &Broadcaster{
 		log: testBroadcasterLogger(),
 		conf: Config{
@@ -162,6 +196,7 @@ func TestBroadcasterCleanupRetainsDuplicateIDSubAccountSessions(t *testing.T) {
 			},
 		},
 		subAccountAnnouncerFactory: func(context.Context, SubAccountConfig, mpsd.SessionReference) (room.Announcer, error) {
+			factoryCalls++
 			next := announcers[0]
 			announcers = announcers[1:]
 			return next, nil
@@ -174,7 +209,13 @@ func TestBroadcasterCleanupRetainsDuplicateIDSubAccountSessions(t *testing.T) {
 	if err := b.cleanupPublishedSessions(false); err != nil {
 		t.Fatal(err)
 	}
-	if !first.Closed() || !second.Closed() {
-		t.Fatalf("all independently published sessions must close: first=%v second=%v", first.Closed(), second.Closed())
+	if factoryCalls != 1 {
+		t.Fatalf("announcer factory calls = %d, want 1", factoryCalls)
+	}
+	if !first.Closed() {
+		t.Fatal("published session was not closed")
+	}
+	if second.Closed() {
+		t.Fatal("duplicate-ID session was published and retained")
 	}
 }
