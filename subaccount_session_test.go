@@ -97,10 +97,14 @@ func TestBroadcasterUpdateRefreshesSubAccountSession(t *testing.T) {
 	primary := &fakeAnnouncer{}
 	sub := &fakeAnnouncer{}
 	b := &Broadcaster{
-		log:               testBroadcasterLogger(),
-		announcer:         primary,
-		subAnnouncersByID: map[string]room.Announcer{"sub1": sub},
-		started:           true,
+		log:       testBroadcasterLogger(),
+		announcer: primary,
+		subAnnouncers: []publishedSubAccount{{
+			id:        "sub1",
+			xuid:      "sub",
+			announcer: sub,
+		}},
+		started: true,
 		conf: Config{
 			Server: ServerInfo{Host: "play.example.net", Port: 19132},
 			XUID:   "primary",
@@ -126,7 +130,11 @@ func TestBroadcasterUpdateRefreshesSubAccountSession(t *testing.T) {
 
 func TestBroadcasterCleanupClosesIndependentSubAccountSessions(t *testing.T) {
 	sub := &fakeAnnouncer{}
-	b := &Broadcaster{subAnnouncersByID: map[string]room.Announcer{"sub1": sub}}
+	b := &Broadcaster{subAnnouncers: []publishedSubAccount{{
+		id:        "sub1",
+		xuid:      "sub",
+		announcer: sub,
+	}}}
 
 	if err := b.cleanupPublishedSessions(false); err != nil {
 		t.Fatal(err)
@@ -136,5 +144,37 @@ func TestBroadcasterCleanupClosesIndependentSubAccountSessions(t *testing.T) {
 	}
 	if len(b.subAnnouncersByID) != 0 {
 		t.Fatalf("sub-account announcers retained after cleanup: %#v", b.subAnnouncersByID)
+	}
+}
+
+func TestBroadcasterCleanupRetainsDuplicateIDSubAccountSessions(t *testing.T) {
+	first := &fakeAnnouncer{}
+	second := &fakeAnnouncer{}
+	announcers := []room.Announcer{first, second}
+	b := &Broadcaster{
+		log: testBroadcasterLogger(),
+		conf: Config{
+			XBLClient: &xsapi.Client{},
+			XUID:      "same",
+			SubAccounts: []SubAccountConfig{
+				{ID: "duplicate", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "same"},
+				{ID: "duplicate", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "same"},
+			},
+		},
+		subAccountAnnouncerFactory: func(context.Context, SubAccountConfig, mpsd.SessionReference) (room.Announcer, error) {
+			next := announcers[0]
+			announcers = announcers[1:]
+			return next, nil
+		},
+	}
+
+	if err := b.startSubAccounts(context.Background(), room.Status{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.cleanupPublishedSessions(false); err != nil {
+		t.Fatal(err)
+	}
+	if !first.Closed() || !second.Closed() {
+		t.Fatalf("all independently published sessions must close: first=%v second=%v", first.Closed(), second.Closed())
 	}
 }

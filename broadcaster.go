@@ -47,6 +47,7 @@ type Broadcaster struct {
 	signaling                  nethernet.Signaling
 	sessionRef                 mpsd.SessionReference
 	sessionConnection          *room.Connection
+	subAnnouncers              []publishedSubAccount
 	subAnnouncersByID          map[string]room.Announcer
 	announcerFactory           func(*Broadcaster) room.Announcer
 	subAccountAnnouncerFactory func(context.Context, SubAccountConfig, mpsd.SessionReference) (room.Announcer, error)
@@ -79,6 +80,12 @@ type Broadcaster struct {
 	// galleryUploadTimeout bounds each account's gallery upload. Zero uses the
 	// default.
 	galleryUploadTimeout time.Duration
+}
+
+type publishedSubAccount struct {
+	id        string
+	xuid      string
+	announcer room.Announcer
 }
 
 type transferConn interface {
@@ -951,6 +958,11 @@ func (b *Broadcaster) startSubAccount(ctx context.Context, account *SubAccountCo
 	if b.subAnnouncersByID == nil {
 		b.subAnnouncersByID = make(map[string]room.Announcer)
 	}
+	b.subAnnouncers = append(b.subAnnouncers, publishedSubAccount{
+		id:        account.ID,
+		xuid:      account.XUID,
+		announcer: announcer,
+	})
 	b.subAnnouncersByID[account.ID] = announcer
 	b.debug("published independent sub-account session", "sub_account", account.ID, "xuid", account.XUID)
 	return nil
@@ -1586,8 +1598,8 @@ func (b *Broadcaster) sessionUnhealthyReason() string {
 	if count := sessionMemberCount(session); count >= sessionMemberRestartThreshold {
 		return fmt.Sprintf("session has %d/30 members", count)
 	}
-	for id, subAnnouncer := range b.subAnnouncersByID {
-		xbl, ok := xblAnnouncer(subAnnouncer)
+	for _, sub := range b.subAnnouncers {
+		xbl, ok := xblAnnouncer(sub.announcer)
 		if !ok {
 			continue
 		}
@@ -1599,7 +1611,7 @@ func (b *Broadcaster) sessionUnhealthyReason() string {
 		}
 		if session != nil {
 			if count := sessionMemberCount(session); count >= sessionMemberRestartThreshold {
-				return fmt.Sprintf("sub-account %s session has %d/30 members", id, count)
+				return fmt.Sprintf("sub-account %s session has %d/30 members", sub.id, count)
 			}
 		}
 	}
@@ -1851,14 +1863,9 @@ func (b *Broadcaster) Update(ctx context.Context) error {
 		return err
 	}
 	var subErr error
-	for i := range b.conf.SubAccounts {
-		account := &b.conf.SubAccounts[i]
-		announcer := b.subAnnouncersByID[account.ID]
-		if announcer == nil {
-			continue
-		}
-		if err := announcer.Announce(ctx, subAccountStatus(status, accountXUID(*account))); err != nil {
-			subErr = errors.Join(subErr, fmt.Errorf("update sub-account %s: %w", account.ID, err))
+	for _, sub := range b.subAnnouncers {
+		if err := sub.announcer.Announce(ctx, subAccountStatus(status, sub.xuid)); err != nil {
+			subErr = errors.Join(subErr, fmt.Errorf("update sub-account %s: %w", sub.id, err))
 		}
 	}
 	if subErr != nil {
@@ -1878,9 +1885,10 @@ func (b *Broadcaster) Update(ctx context.Context) error {
 // optionally the primary announcer.
 func (b *Broadcaster) cleanupPublishedSessions(closeAnnouncer bool) error {
 	var err error
-	for _, announcer := range b.subAnnouncersByID {
-		err = errors.Join(err, announcer.Close())
+	for _, sub := range b.subAnnouncers {
+		err = errors.Join(err, sub.announcer.Close())
 	}
+	b.subAnnouncers = nil
 	b.subAnnouncersByID = nil
 	if closeAnnouncer && b.announcer != nil {
 		err = errors.Join(err, b.announcer.Close())
