@@ -875,6 +875,7 @@ func (b *Broadcaster) newAnnouncer(ctx context.Context) (room.Announcer, error) 
 // A failing sub-account is logged and skipped so it cannot take down the
 // broadcaster, matching MCXboxBroadcast.
 func (b *Broadcaster) startSubAccounts(ctx context.Context, status room.Status) error {
+	seenIDs := make(map[string]struct{}, len(b.conf.SubAccounts))
 	for i := range b.conf.SubAccounts {
 		account := &b.conf.SubAccounts[i]
 		b.debug("checking sub-account",
@@ -890,6 +891,12 @@ func (b *Broadcaster) startSubAccounts(ctx context.Context, status room.Status) 
 			b.log.Warn("sub-account skipped because xbox live credentials are missing", "sub_account", account.ID)
 			continue
 		}
+		if _, duplicate := seenIDs[account.ID]; duplicate {
+			b.log.Error("sub-account skipped because id is duplicated", "sub_account", account.ID)
+			b.notify(ctx, "Sub-account "+account.ID+" was skipped because its id is duplicated.")
+			continue
+		}
+		seenIDs[account.ID] = struct{}{}
 		if err := b.startSubAccountBounded(ctx, account, status); err != nil {
 			// A canceled context means the broadcaster is shutting down, not
 			// that this or the remaining sub-accounts genuinely failed.
@@ -1534,6 +1541,28 @@ const (
 	sessionUpdateFailureLimit = 3
 )
 
+// subAccountUpdateError reports that the primary session updated successfully
+// but one or more independently published sub-account sessions did not.
+type subAccountUpdateError struct {
+	err error
+}
+
+func (e *subAccountUpdateError) Error() string {
+	return e.err.Error()
+}
+
+func (e *subAccountUpdateError) Unwrap() error {
+	return e.err
+}
+
+func countsAsPrimaryUpdateFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	var subErr *subAccountUpdateError
+	return !errors.As(err, &subErr)
+}
+
 // updateLoop periodically refreshes the Xbox session metadata, checking
 // session health before each update like Java's checkConnection().
 func (b *Broadcaster) updateLoop() {
@@ -1548,8 +1577,12 @@ func (b *Broadcaster) updateLoop() {
 				continue
 			}
 			ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
-			if err := b.Update(ctx); err == nil {
+			err := b.Update(ctx)
+			if err == nil {
 				consecutiveFailures = 0
+			} else if !errors.Is(err, context.Canceled) && !countsAsPrimaryUpdateFailure(err) {
+				consecutiveFailures = 0
+				b.log.Error("update sub-account sessions", "err", err)
 			} else if !errors.Is(err, context.Canceled) {
 				consecutiveFailures++
 				b.log.Error("update session", "err", err)
@@ -1869,7 +1902,7 @@ func (b *Broadcaster) Update(ctx context.Context) error {
 		}
 	}
 	if subErr != nil {
-		return subErr
+		return &subAccountUpdateError{err: subErr}
 	}
 	// Matching MCXboxBroadcast, suppressSessionUpdateMessage only demotes the
 	// periodic success log to debug level.
