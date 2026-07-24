@@ -98,6 +98,119 @@ func TestBroadcasterUploadsGalleryForEnabledSubAccounts(t *testing.T) {
 	}
 }
 
+func TestGalleryClientCleanupWaitsForActiveUpload(t *testing.T) {
+	imagePath := testGalleryImageFile(t)
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	client := &xsapi.Client{}
+	b := &Broadcaster{
+		ctx: context.Background(),
+		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		conf: Config{
+			XUID: "primary",
+			Gallery: &GalleryConfig{
+				Enabled:     true,
+				ImagePath:   imagePath,
+				TokenSource: galleryTokenSource{authorization: "Bearer primary"},
+				Client: &http.Client{Transport: galleryRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+					if strings.HasSuffix(req.URL.Path, "/xuid/primary") {
+						close(requestStarted)
+						<-releaseRequest
+					}
+					return galleryHTTPResponse(http.StatusInternalServerError, ""), nil
+				})},
+			},
+			SubAccounts: []SubAccountConfig{{
+				ID:                   "sub",
+				Enabled:              true,
+				XBLClient:            client,
+				XBLTokenSource:       staticTokenSource{},
+				XUID:                 "sub",
+				MinecraftTokenSource: galleryTokenSource{authorization: "Bearer sub"},
+			}},
+		},
+	}
+
+	uploadDone := make(chan struct{})
+	go func() {
+		defer close(uploadDone)
+		b.uploadGallery(context.Background())
+	}()
+	<-requestStarted
+
+	cleanupDone := make(chan struct{})
+	go func() {
+		defer close(cleanupDone)
+		b.clearCreatedXBLClientReferences(map[*xsapi.Client]struct{}{client: {}})
+	}()
+
+	select {
+	case <-cleanupDone:
+		t.Fatal("client cleanup completed while gallery upload was active")
+	case <-time.After(20 * time.Millisecond):
+	}
+	if b.conf.SubAccounts[0].XBLClient != client {
+		t.Fatal("client reference was cleared before the active gallery upload completed")
+	}
+
+	close(releaseRequest)
+	<-uploadDone
+	<-cleanupDone
+	if b.conf.SubAccounts[0].XBLClient != nil {
+		t.Fatal("client reference was not cleared after gallery upload completed")
+	}
+}
+
+func TestGalleryTimeoutIsIndependentPerAccount(t *testing.T) {
+	imagePath := testGalleryImageFile(t)
+	seenSub := false
+	client := &http.Client{Transport: galleryRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/xuid/primary"):
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/xuid/sub"):
+			if err := req.Context().Err(); err != nil {
+				t.Fatalf("sub-account received expired context: %v", err)
+			}
+			seenSub = true
+			return galleryHTTPResponse(http.StatusOK, `{"result":{"showcasedImages":[]}}`), nil
+		case req.Method == http.MethodPost && req.URL.Path == "/api/v1.0/gallery":
+			return galleryHTTPResponse(http.StatusAccepted, `{"result":{"id":"new"}}`), nil
+		default:
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL)
+			return nil, nil
+		}
+	})}
+	b := &Broadcaster{
+		ctx:                  context.Background(),
+		log:                  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		galleryUploadTimeout: 20 * time.Millisecond,
+		conf: Config{
+			XUID: "primary",
+			Gallery: &GalleryConfig{
+				Enabled:     true,
+				ImagePath:   imagePath,
+				TokenSource: galleryTokenSource{authorization: "Bearer primary"},
+				Client:      client,
+			},
+			SubAccounts: []SubAccountConfig{{
+				ID:                   "sub",
+				Enabled:              true,
+				XBLClient:            &xsapi.Client{},
+				XUID:                 "sub",
+				MinecraftTokenSource: galleryTokenSource{authorization: "Bearer sub"},
+			}},
+		},
+	}
+
+	b.uploadGalleryWithTimeout()
+
+	if !seenSub {
+		t.Fatal("sub-account gallery upload did not run after primary timeout")
+	}
+}
+
 func TestGalleryClientReusesReencodedEquivalentImage(t *testing.T) {
 	localImage := testPNG(t, png.BestCompression)
 	remoteImage := testPNG(t, png.NoCompression)

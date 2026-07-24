@@ -76,6 +76,9 @@ type Broadcaster struct {
 	// subAccountSettleDelay is the wait after establishing a new sub-account
 	// friendship before joining the session.
 	subAccountSettleDelay time.Duration
+	// galleryUploadTimeout bounds each account's gallery upload. Zero uses the
+	// default.
+	galleryUploadTimeout time.Duration
 }
 
 type transferConn interface {
@@ -1047,11 +1050,12 @@ func (b *Broadcaster) uploadGallery(ctx context.Context) {
 		return
 	}
 	src := cfg.TokenSource
+	primaryCtx, cancel := b.galleryAccountContext(ctx)
 	if src == nil {
-		tokens, err := b.minecraftTokenSource(b.sharedTokenSourceContext(ctx))
+		tokens, err := b.minecraftTokenSource(b.sharedTokenSourceContext(primaryCtx))
 		if err != nil {
 			b.log.Warn("minecraft services token source unavailable", "err", err)
-			b.notify(ctx, "Showcase image upload skipped: Minecraft services token source is unavailable.")
+			b.notify(primaryCtx, "Showcase image upload skipped: Minecraft services token source is unavailable.")
 		} else {
 			src = tokens
 		}
@@ -1059,11 +1063,12 @@ func (b *Broadcaster) uploadGallery(ctx context.Context) {
 	if src != nil {
 		if xuid := b.primaryXUID(); xuid == "" {
 			b.log.Warn("gallery skipped because token XUID is empty")
-			b.notify(ctx, "Showcase image upload skipped: Xbox profile XUID is empty.")
+			b.notify(primaryCtx, "Showcase image upload skipped: Xbox profile XUID is empty.")
 		} else {
-			b.uploadGalleryAccount(ctx, cfg, "", xuid, src)
+			b.uploadGalleryAccount(primaryCtx, cfg, "", xuid, src)
 		}
 	}
+	cancel()
 
 	for i := range b.conf.SubAccounts {
 		account := &b.conf.SubAccounts[i]
@@ -1075,14 +1080,28 @@ func (b *Broadcaster) uploadGallery(ctx context.Context) {
 			b.log.Warn("sub-account gallery skipped because xuid is empty", "sub_account", account.ID)
 			continue
 		}
-		src, err := b.subAccountMinecraftTokenSource(b.sharedTokenSourceContext(ctx), account)
+		accountCtx, cancel := b.galleryAccountContext(ctx)
+		src, err := b.subAccountMinecraftTokenSource(b.sharedTokenSourceContext(accountCtx), account)
 		if err != nil {
 			b.log.Warn("sub-account minecraft services token source unavailable", "sub_account", account.ID, "err", err)
-			b.notify(ctx, "Showcase image upload skipped for sub-account "+account.ID+": Minecraft services token source is unavailable.")
+			b.notify(accountCtx, "Showcase image upload skipped for sub-account "+account.ID+": Minecraft services token source is unavailable.")
+			cancel()
 			continue
 		}
-		b.uploadGalleryAccount(ctx, cfg, account.ID, xuid, src)
+		b.uploadGalleryAccount(accountCtx, cfg, account.ID, xuid, src)
+		cancel()
 	}
+}
+
+func (b *Broadcaster) galleryAccountContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	timeout := b.galleryUploadTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	return context.WithTimeout(parent, timeout)
 }
 
 func (b *Broadcaster) uploadGalleryAccount(ctx context.Context, cfg *GalleryConfig, accountID, xuid string, src service.TokenSource) {
@@ -1291,11 +1310,10 @@ func presenceClientXUIDs(clients []PresenceClient) []string {
 	return xuids
 }
 
-// uploadGalleryWithTimeout runs uploadGallery with a 30-second timeout.
+// uploadGalleryWithTimeout runs gallery uploads with an independent timeout
+// for each account.
 func (b *Broadcaster) uploadGalleryWithTimeout() {
-	ctx, cancel := context.WithTimeout(b.ctx, 30*time.Second)
-	defer cancel()
-	b.uploadGallery(ctx)
+	b.uploadGallery(b.ctx)
 }
 
 // notify sends a notification via the configured notifier, if any.
@@ -1891,6 +1909,9 @@ func createdXBLClientSet(clients []*xsapi.Client) map[*xsapi.Client]struct{} {
 
 // clearCreatedXBLClientReferences nils out config references to closed clients.
 func (b *Broadcaster) clearCreatedXBLClientReferences(created map[*xsapi.Client]struct{}) {
+	b.galleryMu.Lock()
+	defer b.galleryMu.Unlock()
+
 	primaryCreated := xblClientCreated(b.conf.XBLClient, created) || xblClientCreated(b.xblClient, created)
 	if primaryCreated {
 		b.conf.XBLClient = nil
@@ -1905,9 +1926,7 @@ func (b *Broadcaster) clearCreatedXBLClientReferences(created map[*xsapi.Client]
 			b.conf.SubAccounts[i].XBLClient = nil
 		}
 	}
-	b.galleryMu.Lock()
 	b.subMinecraftTokens = nil
-	b.galleryMu.Unlock()
 }
 
 // xblClientCreated reports whether a client was created by the broadcaster.
