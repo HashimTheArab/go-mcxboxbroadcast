@@ -176,12 +176,13 @@ type FriendSyncConfig struct {
 }
 
 type SubAccountConfig struct {
-	ID             string
-	Enabled        bool
-	XBLClient      *xsapi.Client
-	XBLTokenSource xsapi.TokenSource
-	XUID           string
-	PublishConfig  mpsd.PublishConfig
+	ID                   string
+	Enabled              bool
+	XBLClient            *xsapi.Client
+	XBLTokenSource       xsapi.TokenSource
+	MinecraftTokenSource service.TokenSource
+	XUID                 string
+	PublishConfig        mpsd.PublishConfig
 	// FriendSync overrides the primary account's friend sync configuration for
 	// this sub-account. If nil, the primary configuration is used.
 	FriendSync *FriendSyncConfig

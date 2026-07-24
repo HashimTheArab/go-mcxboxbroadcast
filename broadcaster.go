@@ -52,15 +52,17 @@ type Broadcaster struct {
 	subAccountPublisher func(context.Context, SubAccountConfig, mpsd.SessionReference, mpsd.PublishConfig) (*mpsd.Session, error)
 	xblClient           *xsapi.Client
 	minecraftTokens     service.TokenSource
+	subMinecraftTokens  map[*xsapi.Client]service.TokenSource
 	createdXBLClients   []*xsapi.Client
 
 	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{}
 
-	mu       sync.Mutex
-	started  bool
-	acceptWg sync.WaitGroup
+	mu        sync.Mutex
+	galleryMu sync.Mutex
+	started   bool
+	acceptWg  sync.WaitGroup
 
 	// lastQuery is the most recent successful target-server query, kept so
 	// query failures fall back to real data instead of failing the update.
@@ -1031,8 +1033,12 @@ func subAccountFollowState(ctx context.Context, sub FriendClient, primaryXUID st
 	return false, false
 }
 
-// uploadGallery uploads the configured showcase image to the Xbox gallery.
+// uploadGallery uploads the configured showcase image for the primary account
+// and each enabled sub-account. Accounts fail independently.
 func (b *Broadcaster) uploadGallery(ctx context.Context) {
+	b.galleryMu.Lock()
+	defer b.galleryMu.Unlock()
+
 	cfg := b.conf.Gallery
 	if cfg == nil || !cfg.Enabled {
 		return
@@ -1046,31 +1052,85 @@ func (b *Broadcaster) uploadGallery(ctx context.Context) {
 		if err != nil {
 			b.log.Warn("minecraft services token source unavailable", "err", err)
 			b.notify(ctx, "Showcase image upload skipped: Minecraft services token source is unavailable.")
-			return
+		} else {
+			src = tokens
 		}
-		src = tokens
 	}
-	xuid := b.primaryXUID()
-	if xuid == "" {
-		b.log.Warn("gallery skipped because token XUID is empty")
-		b.notify(ctx, "Showcase image upload skipped: Xbox profile XUID is empty.")
-		return
+	if src != nil {
+		if xuid := b.primaryXUID(); xuid == "" {
+			b.log.Warn("gallery skipped because token XUID is empty")
+			b.notify(ctx, "Showcase image upload skipped: Xbox profile XUID is empty.")
+		} else {
+			b.uploadGalleryAccount(ctx, cfg, "", xuid, src)
+		}
 	}
+
+	for i := range b.conf.SubAccounts {
+		account := &b.conf.SubAccounts[i]
+		if !account.Enabled || !subAccountHasXBLCredentials(*account) {
+			continue
+		}
+		xuid := accountXUID(*account)
+		if xuid == "" {
+			b.log.Warn("sub-account gallery skipped because xuid is empty", "sub_account", account.ID)
+			continue
+		}
+		src, err := b.subAccountMinecraftTokenSource(b.sharedTokenSourceContext(ctx), account)
+		if err != nil {
+			b.log.Warn("sub-account minecraft services token source unavailable", "sub_account", account.ID, "err", err)
+			b.notify(ctx, "Showcase image upload skipped for sub-account "+account.ID+": Minecraft services token source is unavailable.")
+			continue
+		}
+		b.uploadGalleryAccount(ctx, cfg, account.ID, xuid, src)
+	}
+}
+
+func (b *Broadcaster) uploadGalleryAccount(ctx context.Context, cfg *GalleryConfig, accountID, xuid string, src service.TokenSource) {
 	client := GalleryClient{TokenSource: src, Client: cfg.Client, Log: b.log}
 	if client.Client == nil {
 		client.Client = b.conf.HTTPClient
 	}
-	b.info("setting showcase image", "path", cfg.ImagePath, "delete_other", cfg.DeleteOtherImages)
+	args := []any{"path", cfg.ImagePath, "delete_other", cfg.DeleteOtherImages, "xuid", xuid}
+	if accountID != "" {
+		args = append(args, "sub_account", accountID)
+	}
+	b.info("setting showcase image", args...)
 	result, err := client.SetShowcaseResult(ctx, xuid, cfg.ImagePath, cfg.DeleteOtherImages)
 	if err != nil {
-		b.log.Error("set showcase image", "err", err)
-		b.notify(ctx, "Showcase image upload failed: "+err.Error())
+		b.log.Error("set showcase image", append(args, "err", err)...)
+		if accountID == "" {
+			b.notify(ctx, "Showcase image upload failed: "+err.Error())
+		} else {
+			b.notify(ctx, "Showcase image upload failed for sub-account "+accountID+": "+err.Error())
+		}
 		return
 	}
 	if result.AlreadySet {
-		b.info("showcase image is already set, skipping upload", "image_id", result.ImageID)
+		b.info("showcase image is already set, skipping upload", append(args, "image_id", result.ImageID)...)
 	}
-	b.info("successfully set showcase image", "path", cfg.ImagePath, "image_id", result.ImageID, "uploaded", result.Uploaded)
+	b.info("successfully set showcase image", append(args, "image_id", result.ImageID, "uploaded", result.Uploaded)...)
+}
+
+func (b *Broadcaster) subAccountMinecraftTokenSource(ctx context.Context, account *SubAccountConfig) (service.TokenSource, error) {
+	if account.MinecraftTokenSource != nil {
+		return account.MinecraftTokenSource, nil
+	}
+	client, err := b.subAccountXBLClient(ctx, account)
+	if err != nil {
+		return nil, err
+	}
+	if tokens := b.subMinecraftTokens[client]; tokens != nil {
+		return tokens, nil
+	}
+	tokens, err := newMinecraftTokenSource(ctx, client, b.conf.HTTPClient, b.log.With("sub_account", account.ID))
+	if err != nil {
+		return nil, err
+	}
+	if b.subMinecraftTokens == nil {
+		b.subMinecraftTokens = make(map[*xsapi.Client]service.TokenSource)
+	}
+	b.subMinecraftTokens[client] = tokens
+	return tokens, nil
 }
 
 // sharedTokenSourceContext returns the broadcaster's context or the fallback if unavailable.
@@ -1845,6 +1905,9 @@ func (b *Broadcaster) clearCreatedXBLClientReferences(created map[*xsapi.Client]
 			b.conf.SubAccounts[i].XBLClient = nil
 		}
 	}
+	b.galleryMu.Lock()
+	b.subMinecraftTokens = nil
+	b.galleryMu.Unlock()
 }
 
 // xblClientCreated reports whether a client was created by the broadcaster.
