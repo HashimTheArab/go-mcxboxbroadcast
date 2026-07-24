@@ -28,6 +28,7 @@ func TestPterodactylArtifacts(t *testing.T) {
 		} `json:"config"`
 		Scripts struct {
 			Installation struct {
+				Script     string `json:"script"`
 				Container  string `json:"container"`
 				Entrypoint string `json:"entrypoint"`
 			} `json:"installation"`
@@ -71,13 +72,28 @@ func TestPterodactylArtifacts(t *testing.T) {
 		}
 	}
 
-	var seenTargetHost, seenTargetPort bool
+	var seenTargetHost, seenTargetPort, seenICEPortMin, seenICEPortMax bool
 	for _, variable := range egg.Variables {
 		seenTargetHost = seenTargetHost || variable.EnvVariable == "TARGET_SERVER_HOST"
 		seenTargetPort = seenTargetPort || variable.EnvVariable == "TARGET_SERVER_PORT"
+		seenICEPortMin = seenICEPortMin || variable.EnvVariable == "ICE_PORT_MIN"
+		seenICEPortMax = seenICEPortMax || variable.EnvVariable == "ICE_PORT_MAX"
 	}
 	if !seenTargetHost || !seenTargetPort {
 		t.Fatalf("target server variables missing: host=%v port=%v", seenTargetHost, seenTargetPort)
+	}
+	if !seenICEPortMin || !seenICEPortMax {
+		t.Fatalf("ICE port variables missing: min=%v max=%v", seenICEPortMin, seenICEPortMax)
+	}
+	for _, want := range []string{"ICE_PORT_MIN", "ICE_PORT_MAX", "session.icePortRange.min", "session.icePortRange.max"} {
+		if !strings.Contains(egg.Config.Files, want) {
+			t.Fatalf("config.files does not contain %q", want)
+		}
+	}
+	for _, want := range []string{"icePortRange:", "${ICE_PORT_MIN}", "${ICE_PORT_MAX}"} {
+		if !strings.Contains(egg.Scripts.Installation.Script, want) {
+			t.Fatalf("installation script does not contain %q", want)
+		}
 	}
 
 	dockerfile, err := os.ReadFile("Dockerfile")
