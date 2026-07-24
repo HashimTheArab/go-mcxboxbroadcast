@@ -42,12 +42,12 @@ func TestBroadcasterStartSubAccountsMutuallyFollowsBeforePublish(t *testing.T) {
 			XUID:      "200",
 		}},
 	}}
-	b.subAccountPublisher = func(context.Context, SubAccountConfig, mpsd.SessionReference, mpsd.PublishConfig) (*mpsd.Session, error) {
+	b.subAccountAnnouncerFactory = func(context.Context, SubAccountConfig, mpsd.SessionReference) (room.Announcer, error) {
 		calls = append(calls, "publish")
-		return &mpsd.Session{}, nil
+		return &fakeAnnouncer{}, nil
 	}
 
-	if err := b.startSubAccounts(context.Background()); err != nil {
+	if err := b.startSubAccounts(context.Background(), room.Status{}); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -87,12 +87,12 @@ func TestBroadcasterStartSubAccountsSkipsExistingMutualFollow(t *testing.T) {
 			XUID:      "200",
 		}},
 	}}
-	b.subAccountPublisher = func(context.Context, SubAccountConfig, mpsd.SessionReference, mpsd.PublishConfig) (*mpsd.Session, error) {
+	b.subAccountAnnouncerFactory = func(context.Context, SubAccountConfig, mpsd.SessionReference) (room.Announcer, error) {
 		calls = append(calls, "publish")
-		return &mpsd.Session{}, nil
+		return &fakeAnnouncer{}, nil
 	}
 
-	if err := b.startSubAccounts(context.Background()); err != nil {
+	if err := b.startSubAccounts(context.Background(), room.Status{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, call := range calls {
@@ -120,13 +120,13 @@ func TestBroadcasterStartSubAccountsStopsQuietlyOnContextCancel(t *testing.T) {
 			{ID: "second", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "100"},
 		},
 	}}
-	b.subAccountPublisher = func(_ context.Context, account SubAccountConfig, _ mpsd.SessionReference, _ mpsd.PublishConfig) (*mpsd.Session, error) {
+	b.subAccountAnnouncerFactory = func(_ context.Context, account SubAccountConfig, _ mpsd.SessionReference) (room.Announcer, error) {
 		started = append(started, account.ID)
 		cancel()
 		return nil, ctx.Err()
 	}
 
-	err := b.startSubAccounts(ctx)
+	err := b.startSubAccounts(ctx, room.Status{})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("startSubAccounts() error = %v, want context.Canceled", err)
 	}
@@ -167,15 +167,15 @@ func TestBroadcasterStartSubAccountsContinuesPastFailingAccount(t *testing.T) {
 			{ID: "good", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "100"},
 		},
 	}}
-	b.subAccountPublisher = func(_ context.Context, account SubAccountConfig, _ mpsd.SessionReference, _ mpsd.PublishConfig) (*mpsd.Session, error) {
+	b.subAccountAnnouncerFactory = func(_ context.Context, account SubAccountConfig, _ mpsd.SessionReference) (room.Announcer, error) {
 		if account.ID == "bad" {
 			return nil, errors.New("boom")
 		}
 		published = append(published, account.ID)
-		return &mpsd.Session{}, nil
+		return &fakeAnnouncer{}, nil
 	}
 
-	if err := b.startSubAccounts(context.Background()); err != nil {
+	if err := b.startSubAccounts(context.Background(), room.Status{}); err != nil {
 		t.Fatalf("startSubAccounts() error = %v, want nil (bad account skipped)", err)
 	}
 	if fmt.Sprint(published) != "[good]" {
@@ -198,12 +198,12 @@ func TestBroadcasterStartSubAccountsSkipsMutualFollowWithoutXUIDs(t *testing.T) 
 			XUID:      "200",
 		}},
 	}}
-	b.subAccountPublisher = func(context.Context, SubAccountConfig, mpsd.SessionReference, mpsd.PublishConfig) (*mpsd.Session, error) {
+	b.subAccountAnnouncerFactory = func(context.Context, SubAccountConfig, mpsd.SessionReference) (room.Announcer, error) {
 		publishCalls++
-		return &mpsd.Session{}, nil
+		return &fakeAnnouncer{}, nil
 	}
 
-	if err := b.startSubAccounts(context.Background()); err != nil {
+	if err := b.startSubAccounts(context.Background(), room.Status{}); err != nil {
 		t.Fatal(err)
 	}
 	if httpCalls != 0 {
@@ -228,12 +228,12 @@ func TestBroadcasterStartSubAccountsSkipsEnabledAccountWithoutCredentials(t *tes
 			Enabled: true,
 		}},
 	}}
-	b.subAccountPublisher = func(context.Context, SubAccountConfig, mpsd.SessionReference, mpsd.PublishConfig) (*mpsd.Session, error) {
+	b.subAccountAnnouncerFactory = func(context.Context, SubAccountConfig, mpsd.SessionReference) (room.Announcer, error) {
 		publishCalls++
-		return &mpsd.Session{}, nil
+		return &fakeAnnouncer{}, nil
 	}
 
-	if err := b.startSubAccounts(context.Background()); err != nil {
+	if err := b.startSubAccounts(context.Background(), room.Status{}); err != nil {
 		t.Fatal(err)
 	}
 	if httpCalls != 0 {
@@ -887,7 +887,7 @@ func TestStartSubAccountsTimeoutDoesNotBlockStartup(t *testing.T) {
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	defer b.cancel()
 	b.subAccountStartTimeout = 50 * time.Millisecond
-	b.subAccountPublisher = func(ctx context.Context, _ SubAccountConfig, _ mpsd.SessionReference, _ mpsd.PublishConfig) (*mpsd.Session, error) {
+	b.subAccountAnnouncerFactory = func(ctx context.Context, _ SubAccountConfig, _ mpsd.SessionReference) (room.Announcer, error) {
 		<-ctx.Done() // a hung join must be bounded by the per-account timeout
 		return nil, ctx.Err()
 	}
@@ -897,7 +897,7 @@ func TestStartSubAccountsTimeoutDoesNotBlockStartup(t *testing.T) {
 		// re-locking inside the sub-account path deadlocks the test too.
 		b.mu.Lock()
 		defer b.mu.Unlock()
-		done <- b.startSubAccounts(b.ctx)
+		done <- b.startSubAccounts(b.ctx, room.Status{})
 	}()
 	select {
 	case err := <-done:
