@@ -43,6 +43,30 @@ func TestFriendSyncerAcceptsPendingIncomingRequests(t *testing.T) {
 	}
 }
 
+func TestFriendSyncerBoundsXboxOperations(t *testing.T) {
+	client := &deadlineFriendClient{}
+	syncer := FriendSyncer{
+		Client: client,
+		Config: FriendSyncConfig{
+			AutoFollow:    true,
+			AutoUnfollow:  true,
+			InitialInvite: true,
+		},
+		Inviter: deadlineInviter{record: client.record},
+	}
+	if err := syncer.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, operation := range []string{"accept", "friends", "follow", "unfollow", "force_unfollow", "invite"} {
+		if !client.called[operation] {
+			t.Fatalf("%s was not called", operation)
+		}
+		if !client.deadlined[operation] {
+			t.Fatalf("%s did not receive a bounded context", operation)
+		}
+	}
+}
+
 func TestFriendSyncerContinuesAutoFollowWhenPendingAcceptFails(t *testing.T) {
 	acceptErr := errors.New("pending requests unavailable")
 	client := syncFriendClient{
@@ -382,6 +406,62 @@ type syncFriendClient struct {
 	followCalls     int
 	removeCalls     int
 	forceUnfollowed []string
+}
+
+type deadlineFriendClient struct {
+	called    map[string]bool
+	deadlined map[string]bool
+}
+
+func (c *deadlineFriendClient) record(operation string, ctx context.Context) {
+	if c.called == nil {
+		c.called = map[string]bool{}
+		c.deadlined = map[string]bool{}
+	}
+	c.called[operation] = true
+	deadline, ok := ctx.Deadline()
+	c.deadlined[operation] = ok && time.Until(deadline) > 0 && time.Until(deadline) <= 20*time.Second
+}
+
+func (c *deadlineFriendClient) Friends(ctx context.Context) ([]Person, error) {
+	c.record("friends", ctx)
+	return []Person{
+		{XUID: "follow", Gamertag: "Follow", IsFollowingCaller: true},
+		{XUID: "restricted", Gamertag: "Restricted", IsFollowingCaller: true},
+		{XUID: "unfollow", Gamertag: "Unfollow", IsFollowedByCaller: true},
+	}, nil
+}
+
+func (c *deadlineFriendClient) Follow(ctx context.Context, xuid string) error {
+	c.record("follow", ctx)
+	if xuid == "restricted" {
+		return xblsocial.ErrFriendRestricted
+	}
+	return nil
+}
+
+func (c *deadlineFriendClient) Unfollow(ctx context.Context, _ string) error {
+	c.record("unfollow", ctx)
+	return nil
+}
+
+func (c *deadlineFriendClient) ForceUnfollow(ctx context.Context, _ string) error {
+	c.record("force_unfollow", ctx)
+	return nil
+}
+
+func (c *deadlineFriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]Person, error) {
+	c.record("accept", ctx)
+	return []Person{{XUID: "pending", Gamertag: "Pending"}}, nil
+}
+
+type deadlineInviter struct {
+	record func(string, context.Context)
+}
+
+func (i deadlineInviter) Invite(ctx context.Context, _, _ string) error {
+	i.record("invite", ctx)
+	return nil
 }
 
 func (c *syncFriendClient) ForceUnfollow(_ context.Context, xuid string) error {

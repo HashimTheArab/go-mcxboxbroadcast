@@ -30,7 +30,9 @@ func (c PresenceClient) Update(ctx context.Context) (time.Duration, error) {
 		return defaultPresenceHeartbeat, errors.New("xuid is empty")
 	}
 	presenceClient := presence.New(c.client(), xsts.UserInfo{XUID: c.XUID})
-	result, err := presenceClient.Update(ctx, presence.TitleRequest{State: presence.StateActive})
+	operationCtx, cancel := xboxOperationContext(ctx)
+	result, err := presenceClient.Update(operationCtx, presence.TitleRequest{State: presence.StateActive})
+	cancel()
 	if err != nil {
 		return defaultPresenceHeartbeat, err
 	}
