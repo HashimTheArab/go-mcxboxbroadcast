@@ -52,9 +52,7 @@ The config exposes the same operator-facing areas as MCXboxBroadcast:
   database — operators migrating from MCXboxBroadcast start with a fresh
   expiry history)
 - Slack/Discord-compatible webhook notifications
-- primary and sub-account token cache paths; every enabled sub-account
-  publishes its own Xbox activity and account-authenticated NetherNet
-  signaling endpoint so multiple broadcaster profiles remain joinable at once
+- primary and sub-account token cache paths
 - optional HTTP proxy URL through `http.proxy`
 - NetherNet signaling mode through `session.signalingMode`; `jsonrpc` is the
   supported config value and matches MCXboxBroadcast's `ConnectionType=7`/

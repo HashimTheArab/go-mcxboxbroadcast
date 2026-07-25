@@ -12,7 +12,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/sandertv/gophertunnel/minecraft/p2p"
 	"github.com/sandertv/gophertunnel/minecraft/room"
-	"github.com/sandertv/gophertunnel/minecraft/service"
 )
 
 type signalingConnectionAnnouncer struct {
@@ -61,22 +60,7 @@ func (b *Broadcaster) signalingConnection(ctx context.Context, sig nethernet.Sig
 	if strings.TrimSpace(networkID) == "" {
 		return nil, errors.New("jsonrpc signaling connection: nethernet id is empty")
 	}
-	src, err := b.minecraftTokenSource(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return signalingConnectionWithTokenSource(ctx, sig, src)
-}
-
-func signalingConnectionWithTokenSource(ctx context.Context, sig nethernet.Signaling, src service.TokenSource) (*room.Connection, error) {
-	if sig == nil {
-		return nil, errors.New("jsonrpc signaling connection: signaling is nil")
-	}
-	networkID := sig.NetworkID()
-	if strings.TrimSpace(networkID) == "" {
-		return nil, errors.New("jsonrpc signaling connection: nethernet id is empty")
-	}
-	pmsgID, err := playerMessagingID(ctx, src)
+	pmsgID, err := b.playerMessagingID(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -87,9 +71,10 @@ func signalingConnectionWithTokenSource(ctx context.Context, sig nethernet.Signa
 	}, nil
 }
 
-func playerMessagingID(ctx context.Context, src service.TokenSource) (uuid.UUID, error) {
-	if src == nil {
-		return uuid.Nil, errors.New("create minecraft token source for jsonrpc signaling: token source is nil")
+func (b *Broadcaster) playerMessagingID(ctx context.Context) (uuid.UUID, error) {
+	src, err := b.minecraftTokenSource(ctx)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("create minecraft token source for jsonrpc signaling: %w", err)
 	}
 	tok, err := src.ServiceToken(ctx)
 	if err != nil {

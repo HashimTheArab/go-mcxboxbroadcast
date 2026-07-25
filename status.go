@@ -23,9 +23,6 @@ import (
 var defaultRoomStatus = room.DefaultStatus()
 
 func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
-	b.statusMu.Lock()
-	defer b.statusMu.Unlock()
-
 	ownerID, err := b.primaryXUIDForStatus(ctx)
 	if err != nil {
 		return room.Status{}, err
@@ -79,22 +76,6 @@ func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 		CrossPlayDisabled:       false,
 		LevelID:                 defaultString(levelID(st.LevelID), accountLevelID(ownerID)),
 	}), nil
-}
-
-// subAccountStatus applies sub-account ownership while preserving the primary
-// world metadata.
-func subAccountStatus(status room.Status, xuid string) room.Status {
-	status.OwnerID = xuid
-	status.LevelID = accountLevelID(xuid)
-	return status
-}
-
-// subAccountStatusWithConnection also replaces discovery metadata with the
-// sub-account's account-authenticated signaling connection.
-func subAccountStatusWithConnection(status room.Status, xuid string, connection room.Connection) room.Status {
-	status = subAccountStatus(status, xuid)
-	status.SupportedConnections = []room.Connection{connection}
-	return status
 }
 
 // applyQueriedStatus overlays a queried server status onto the announced one.

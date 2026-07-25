@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,7 +19,6 @@ import (
 	"github.com/go-gl/mathgl/mgl32"
 	"github.com/google/uuid"
 	"github.com/sandertv/gophertunnel/minecraft"
-	"github.com/sandertv/gophertunnel/minecraft/p2p"
 	"github.com/sandertv/gophertunnel/minecraft/protocol"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/login"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
@@ -44,45 +42,34 @@ type Broadcaster struct {
 	conf Config
 	log  *slog.Logger
 
-	announcer                             room.Announcer
-	listener                              *minecraft.Listener
-	signaling                             nethernet.Signaling
-	sessionRef                            mpsd.SessionReference
-	sessionConnection                     *room.Connection
-	subAnnouncers                         []publishedSubAccount
-	subAnnouncersByID                     map[string]room.Announcer
-	announcerFactory                      func(*Broadcaster) room.Announcer
-	subAccountAnnouncerFactory            func(context.Context, SubAccountConfig, mpsd.SessionReference) (room.Announcer, error)
-	subAccountSignalingFactory            func(context.Context, *SubAccountConfig) (nethernet.Signaling, error)
-	subAccountConnectionFactory           func(context.Context, *SubAccountConfig, nethernet.Signaling) (*room.Connection, error)
-	subAccountListenerFactory             func(nethernet.Signaling, room.Status) (net.Listener, error)
-	subAccountMinecraftTokenSourceFactory func(context.Context, *SubAccountConfig) (service.TokenSource, error)
-	xblClient                             *xsapi.Client
-	minecraftTokens                       service.TokenSource
-	subMinecraftTokens                    map[*xsapi.Client]service.TokenSource
-	createdXBLClients                     []*xsapi.Client
+	announcer           room.Announcer
+	listener            *minecraft.Listener
+	signaling           nethernet.Signaling
+	sessionRef          mpsd.SessionReference
+	subSessions         []*mpsd.Session
+	subSessionsByID     map[string]*mpsd.Session
+	announcerFactory    func(*Broadcaster) room.Announcer
+	subAccountPublisher func(context.Context, SubAccountConfig, mpsd.SessionReference, mpsd.PublishConfig) (*mpsd.Session, error)
+	xblClient           *xsapi.Client
+	minecraftTokens     service.TokenSource
+	subMinecraftTokens  map[*xsapi.Client]service.TokenSource
+	createdXBLClients   []*xsapi.Client
 
 	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{}
 
-	mu                   sync.Mutex
-	galleryMu            sync.Mutex
-	statusMu             sync.Mutex
-	subAccountMu         sync.Mutex
-	started              bool
-	closing              bool
-	closeState           *broadcasterCloseState
-	acceptWg             sync.WaitGroup
-	reconnectWg          sync.WaitGroup
-	subAccountReconnects map[string]nethernet.Signaling
+	mu        sync.Mutex
+	galleryMu sync.Mutex
+	started   bool
+	acceptWg  sync.WaitGroup
 
 	// lastQuery is the most recent successful target-server query, kept so
 	// query failures fall back to real data instead of failing the update.
 	lastQuery *minecraft.ServerStatus
 
 	transferCloseTimeout time.Duration
-	// subAccountStartTimeout bounds each sub-account's session publish so a hung
+	// subAccountStartTimeout bounds each sub-account's session join so a hung
 	// directory or RTA call degrades to a skipped sub-account instead of
 	// blocking broadcaster startup. Zero uses the default.
 	subAccountStartTimeout time.Duration
@@ -92,20 +79,6 @@ type Broadcaster struct {
 	// galleryUploadTimeout bounds each account's gallery upload. Zero uses the
 	// default.
 	galleryUploadTimeout time.Duration
-}
-
-type publishedSubAccount struct {
-	id         string
-	xuid       string
-	connection room.Connection
-	announcer  room.Announcer
-	signaling  nethernet.Signaling
-	listener   net.Listener
-}
-
-type broadcasterCloseState struct {
-	done chan struct{}
-	err  error
 }
 
 type transferConn interface {
@@ -164,9 +137,6 @@ func New(conf Config) (*Broadcaster, error) {
 func (b *Broadcaster) Start(ctx context.Context) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.closing {
-		return errors.New("broadcaster is closing")
-	}
 	if b.started {
 		return errors.New("broadcaster already started")
 	}
@@ -215,8 +185,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 		return errors.Join(err, b.cleanupStartupFailure(true))
 	}
 	if connection != nil {
-		b.sessionConnection = connection
-		b.announcer = signalingConnectionAnnouncer{Announcer: b.announcer, connection: *b.sessionConnection}
+		b.announcer = signalingConnectionAnnouncer{Announcer: b.announcer, connection: *connection}
 		b.debug("using jsonrpc signaling", "nethernet_id", connection.NetherNetID, "pmsg_id", connection.PmsgID)
 	} else if len(status.SupportedConnections) == 0 {
 		// Without a signaling connection or caller-provided connections the
@@ -233,7 +202,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	}
 	b.info("created xbox live session")
 	b.debug("starting sub-account sessions", "count", len(b.conf.SubAccounts))
-	if err := b.startSubAccounts(b.ctx, status); err != nil {
+	if err := b.startSubAccounts(b.ctx); err != nil {
 		b.cancel()
 		err = errors.Join(err, b.cleanupStartupFailure(true))
 		return err
@@ -596,7 +565,7 @@ type broadcasterInviter struct {
 // Invite snapshots the active MPSD session under the mutex and sends a game invite.
 func (i *broadcasterInviter) Invite(ctx context.Context, xuid, titleID string) error {
 	i.b.mu.Lock()
-	if !i.b.started || i.b.closing {
+	if !i.b.started {
 		i.b.mu.Unlock()
 		return errors.New("invite: broadcaster not started")
 	}
@@ -616,8 +585,8 @@ func (i *broadcasterInviter) Invite(ctx context.Context, xuid, titleID string) e
 	return err
 }
 
-// subAccountInviter sends friend invites through a sub-account's independently
-// published session, resolved dynamically so invites survive session rebuilds.
+// subAccountInviter sends friend invites through a sub-account's joined
+// session, resolved dynamically so invites work as soon as the join lands.
 type subAccountInviter struct {
 	b  *Broadcaster
 	id string
@@ -625,17 +594,10 @@ type subAccountInviter struct {
 
 func (i *subAccountInviter) Invite(ctx context.Context, xuid, titleID string) error {
 	i.b.mu.Lock()
-	announcer := i.b.subAnnouncersByID[i.id]
+	session := i.b.subSessionsByID[i.id]
 	i.b.mu.Unlock()
-	xbl, ok := xblAnnouncer(announcer)
-	if !ok {
-		return errors.New("invite: sub-account has not published a session")
-	}
-	xbl.Lock()
-	session := xbl.Session
-	xbl.Unlock()
 	if session == nil {
-		return errors.New("invite: sub-account has not published a session")
+		return errors.New("invite: sub-account has not joined the session")
 	}
 	_, err := session.Invite(ctx, xuid, titleID)
 	return err
@@ -725,147 +687,6 @@ func (b *Broadcaster) signalingFor(ctx context.Context) (nethernet.Signaling, er
 	case <-dialCtx.Done():
 		return nil, fmt.Errorf("dial nethernet signaling: %w", dialCtx.Err())
 	}
-}
-
-// subAccountSignalingFor creates an account-authenticated signaling endpoint.
-// A distinct NetherNet/Pmsg identity is required because Minecraft collapses
-// otherwise independent activities that advertise the same signaling pair.
-func (b *Broadcaster) subAccountSignalingFor(ctx context.Context, account *SubAccountConfig, primary nethernet.Signaling) (nethernet.Signaling, error) {
-	if b.subAccountSignalingFactory != nil {
-		sig, err := b.subAccountSignalingFactory(ctx, account)
-		if err != nil {
-			return nil, err
-		}
-		return validateSubAccountSignaling(sig, primary)
-	}
-
-	mode, err := b.signalingMode()
-	if err != nil {
-		return nil, err
-	}
-	tokens, err := b.subAccountMinecraftTokenSource(ctx, account)
-	if err != nil {
-		return nil, fmt.Errorf("create minecraft token source: %w", err)
-	}
-	account.MinecraftTokenSource = tokens
-
-	if b.conf.SignalingFactory != nil {
-		subConf := b.conf
-		subConf.XBLClient = account.XBLClient
-		subConf.XBLTokenSource = account.XBLTokenSource
-		subConf.MinecraftTokenSource = tokens
-		subConf.XUID = account.XUID
-		subConf.Signaling = nil
-		subConf.SubAccounts = nil
-		sig, err := b.conf.SignalingFactory(ctx, subConf)
-		if err != nil {
-			return nil, err
-		}
-		return validateSubAccountSignaling(sig, primary)
-	}
-
-	timeout := b.signalingDialTimeout()
-	dialCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	result := dialDefaultSignaling(dialCtx, defaultSignalingConfig{
-		mode:            mode,
-		log:             b.log.With("sub_account", account.ID),
-		httpClient:      b.conf.HTTPClient,
-		xblClient:       account.XBLClient,
-		xblTokenSource:  account.XBLTokenSource,
-		minecraftTokens: tokens,
-	})
-	if result.err != nil {
-		closeDefaultSignalingResult(result)
-		return nil, result.err
-	}
-	sig, err := validateSubAccountSignaling(result.signaling, primary)
-	if err != nil {
-		if result.createdClient != nil {
-			_ = result.createdClient.Close()
-		}
-		return nil, err
-	}
-	if result.createdClient != nil {
-		account.XBLClient = result.createdClient
-		b.createdXBLClients = append(b.createdXBLClients, result.createdClient)
-	}
-	if result.minecraft != nil {
-		account.MinecraftTokenSource = result.minecraft
-	}
-	return sig, nil
-}
-
-func validateSubAccountSignaling(sig, primary nethernet.Signaling) (nethernet.Signaling, error) {
-	if sig == nil {
-		return nil, errors.New("signaling is nil")
-	}
-	if sameSignaling(sig, primary) {
-		return nil, errors.New("sub-account signaling factory returned the primary signaling instance")
-	}
-	if sig.Context().Err() != nil {
-		_ = closeSignaling(sig)
-		return nil, errors.New("signaling has dead context")
-	}
-	if strings.TrimSpace(sig.NetworkID()) == "" {
-		_ = closeSignaling(sig)
-		return nil, errors.New("signaling network id is empty")
-	}
-	return sig, nil
-}
-
-func sameSignaling(a, b nethernet.Signaling) bool {
-	if a == nil || b == nil {
-		return false
-	}
-	typ := reflect.TypeOf(a)
-	if typ != reflect.TypeOf(b) || !typ.Comparable() {
-		return false
-	}
-	return a == b
-}
-
-func (b *Broadcaster) subAccountConnection(ctx context.Context, account *SubAccountConfig, sig nethernet.Signaling) (*room.Connection, error) {
-	if b.subAccountConnectionFactory != nil {
-		return b.subAccountConnectionFactory(ctx, account, sig)
-	}
-	mode, err := b.signalingMode()
-	if err != nil {
-		return nil, err
-	}
-	if mode == SignalingModeWebSocket {
-		return &room.Connection{
-			ConnectionType: p2p.ConnectionTypeSignalingOverWebSocket,
-			NetherNetID:    p2p.NetherNetID(sig.NetworkID()),
-		}, nil
-	}
-	tokens, err := b.subAccountMinecraftTokenSource(ctx, account)
-	if err != nil {
-		return nil, err
-	}
-	return signalingConnectionWithTokenSource(ctx, sig, tokens)
-}
-
-func (b *Broadcaster) subAccountListener(sig nethernet.Signaling, status room.Status) (net.Listener, error) {
-	if b.subAccountListenerFactory != nil {
-		return b.subAccountListenerFactory(sig, status)
-	}
-	conf := b.minecraftListenConfig(status)
-	return conf.ListenNetwork(minecraft.NetherNet{
-		Signaling:    sig,
-		ListenConfig: b.netherNetListenConfig(),
-		Log:          b.log,
-	}, "")
-}
-
-func closeSignaling(sig nethernet.Signaling) error {
-	if sig == nil {
-		return nil
-	}
-	if closer, ok := sig.(interface{ Close() error }); ok {
-		return closer.Close()
-	}
-	return nil
 }
 
 // defaultSignalingConfig builds the signaling config from the broadcaster's current state.
@@ -1033,13 +854,10 @@ func (b *Broadcaster) newAnnouncer(ctx context.Context) (room.Announcer, error) 
 	}, b.primaryXUID(), b.log), nil
 }
 
-// startSubAccounts publishes an independently owned session and signaling
-// listener for every enabled sub-account. Every endpoint routes players to the
-// same configured target server.
+// startSubAccounts joins the primary session with all enabled sub-accounts.
 // A failing sub-account is logged and skipped so it cannot take down the
 // broadcaster, matching MCXboxBroadcast.
-func (b *Broadcaster) startSubAccounts(ctx context.Context, status room.Status) error {
-	seenIDs := make(map[string]struct{}, len(b.conf.SubAccounts))
+func (b *Broadcaster) startSubAccounts(ctx context.Context) error {
 	for i := range b.conf.SubAccounts {
 		account := &b.conf.SubAccounts[i]
 		b.debug("checking sub-account",
@@ -1055,13 +873,7 @@ func (b *Broadcaster) startSubAccounts(ctx context.Context, status room.Status) 
 			b.log.Warn("sub-account skipped because xbox live credentials are missing", "sub_account", account.ID)
 			continue
 		}
-		if _, duplicate := seenIDs[account.ID]; duplicate {
-			b.log.Error("sub-account skipped because id is duplicated", "sub_account", account.ID)
-			b.notify(ctx, "Sub-account "+account.ID+" was skipped because its id is duplicated.")
-			continue
-		}
-		seenIDs[account.ID] = struct{}{}
-		if err := b.startSubAccountBounded(ctx, account, status); err != nil {
+		if err := b.startSubAccountBounded(ctx, account); err != nil {
 			// A canceled context means the broadcaster is shutting down, not
 			// that this or the remaining sub-accounts genuinely failed.
 			if ctx.Err() != nil {
@@ -1074,157 +886,61 @@ func (b *Broadcaster) startSubAccounts(ctx context.Context, status room.Status) 
 	return nil
 }
 
-// startSubAccount prepares one sub-account and publishes its own session.
+// startSubAccount prepares one sub-account and joins it to the primary session.
 // startSubAccountBounded runs startSubAccount under the per-account timeout.
-// The context only scopes the publish requests; the sub-account's RTA
-// connection and session outlive it.
-func (b *Broadcaster) startSubAccountBounded(ctx context.Context, account *SubAccountConfig, status room.Status) error {
+// The context only scopes the join requests; the sub-account's RTA connection
+// and session outlive it.
+func (b *Broadcaster) startSubAccountBounded(ctx context.Context, account *SubAccountConfig) error {
 	timeout := b.subAccountStartTimeout
 	if timeout <= 0 {
 		timeout = 90 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return b.startSubAccount(ctx, account, status)
+	return b.startSubAccount(ctx, account)
 }
 
-func (b *Broadcaster) startSubAccount(ctx context.Context, account *SubAccountConfig, status room.Status) error {
-	primary := b.signaling
-	independentEndpoint := primary != nil || b.subAccountSignalingFactory != nil
-	published, err := b.prepareSubAccount(ctx, account, status, independentEndpoint, primary)
-	if err != nil {
-		return err
-	}
-	b.retainPublishedSubAccount(published)
-	return nil
-}
-
-// prepareSubAccount performs account and network work without mutating the
-// published-session collection. Callers install the returned resources under
-// b.mu with retainPublishedSubAccount.
-func (b *Broadcaster) prepareSubAccount(ctx context.Context, account *SubAccountConfig, status room.Status, independentEndpoint bool, primary nethernet.Signaling) (publishedSubAccount, error) {
-	b.subAccountMu.Lock()
-	defer b.subAccountMu.Unlock()
-
+func (b *Broadcaster) startSubAccount(ctx context.Context, account *SubAccountConfig) error {
 	if _, err := b.subAccountXBLClient(ctx, account); err != nil {
-		return publishedSubAccount{}, fmt.Errorf("prepare xbox live client: %w", err)
+		return fmt.Errorf("prepare xbox live client: %w", err)
 	}
 	if account.XUID == "" {
 		account.XUID = accountXUID(*account)
 	}
 	if account.XUID == "" {
-		return publishedSubAccount{}, errors.New("sub-account xuid unavailable")
+		b.log.Warn("sub-account xuid unavailable", "sub_account", account.ID)
 	}
 	if err := b.ensureSubAccountMutualFollow(ctx, *account); err != nil {
-		return publishedSubAccount{}, fmt.Errorf("prepare mutual follow: %w", err)
+		return fmt.Errorf("prepare mutual follow: %w", err)
 	}
-
-	var subSignaling nethernet.Signaling
-	var subConnection *room.Connection
-	// Unit-level callers may exercise session publication without starting a
-	// complete broadcaster. A running broadcaster always has primary signaling
-	// and therefore creates an independent endpoint here.
-	if independentEndpoint {
-		var err error
-		subSignaling, err = b.subAccountSignalingFor(ctx, account, primary)
-		if err != nil {
-			return publishedSubAccount{}, fmt.Errorf("create signaling: %w", err)
-		}
-		subConnection, err = b.subAccountConnection(ctx, account, subSignaling)
-		if err != nil {
-			_ = closeSignaling(subSignaling)
-			return publishedSubAccount{}, fmt.Errorf("create signaling connection: %w", err)
-		}
-	} else {
-		subConnection = b.sessionConnection
-	}
-	if independentEndpoint && subConnection == nil {
-		_ = closeSignaling(subSignaling)
-		return publishedSubAccount{}, errors.New("sub-account session would publish no supported connection")
-	}
-
-	ref := mpsd.SessionReference{
-		ServiceConfigID: serviceConfigUUID,
-		TemplateName:    TemplateName,
-		Name:            strings.ToUpper(uuid.NewString()),
-	}
-	b.debug("publishing independent sub-account session",
+	pub := account.PublishConfig
+	b.debug("joining sub-account to session",
 		"sub_account", account.ID,
 		"xuid", account.XUID,
-		"session_name", ref.Name,
+		"session_name", b.sessionRef.Name,
 	)
-	announcer, err := b.newSubAccountAnnouncer(ctx, *account, ref)
+	s, err := b.joinSubAccount(ctx, *account, pub)
 	if err != nil {
-		_ = closeSignaling(subSignaling)
-		return publishedSubAccount{}, fmt.Errorf("create announcer: %w", err)
+		return fmt.Errorf("join session: %w", err)
 	}
-	announcer = loggingAnnouncer{Announcer: announcer, log: b.log.With("sub_account", account.ID)}
-	subStatus := subAccountStatus(status, account.XUID)
-	if subConnection != nil {
-		announcer = signalingConnectionAnnouncer{Announcer: announcer, connection: *subConnection}
-		subStatus = subAccountStatusWithConnection(status, account.XUID, *subConnection)
+	// b.mu is held by Start for the whole startup sequence, so the session
+	// bookkeeping mutates directly; locking here would self-deadlock.
+	b.subSessions = append(b.subSessions, s)
+	if b.subSessionsByID == nil {
+		b.subSessionsByID = make(map[string]*mpsd.Session)
 	}
-	if err := announcer.Announce(ctx, subStatus); err != nil {
-		_ = announcer.Close()
-		_ = closeSignaling(subSignaling)
-		return publishedSubAccount{}, fmt.Errorf("announce session: %w", err)
-	}
-
-	var subListener net.Listener
-	if subSignaling != nil {
-		listener, err := b.subAccountListener(subSignaling, subStatus)
-		if err != nil {
-			_ = announcer.Close()
-			_ = closeSignaling(subSignaling)
-			return publishedSubAccount{}, fmt.Errorf("listen nethernet: %w", err)
-		}
-		if listener == nil {
-			_ = announcer.Close()
-			_ = closeSignaling(subSignaling)
-			return publishedSubAccount{}, errors.New("listen nethernet: listener is nil")
-		}
-		subListener = listener
-	}
-
-	published := publishedSubAccount{
-		id:        account.ID,
-		xuid:      account.XUID,
-		announcer: announcer,
-		signaling: subSignaling,
-		listener:  subListener,
-	}
-	if subConnection != nil {
-		published.connection = *subConnection
-	}
-	return published, nil
+	b.subSessionsByID[account.ID] = s
+	b.debug("joined sub-account to session", "sub_account", account.ID, "xuid", account.XUID)
+	return nil
 }
 
-// retainPublishedSubAccount installs a prepared endpoint. b.mu must be held.
-func (b *Broadcaster) retainPublishedSubAccount(published publishedSubAccount) {
-	if b.subAnnouncersByID == nil {
-		b.subAnnouncersByID = make(map[string]room.Announcer)
-	}
-	b.subAnnouncers = append(b.subAnnouncers, published)
-	b.subAnnouncersByID[published.id] = published.announcer
-	if published.listener != nil {
-		b.acceptWg.Add(1)
-		go func() {
-			defer b.acceptWg.Done()
-			b.acceptListener(published.listener)
-		}()
-	}
-	b.debug("published independent sub-account session",
-		"sub_account", published.id,
-		"xuid", published.xuid,
-		"network_id", signalingNetworkID(published.signaling),
-	)
-}
-
-// newSubAccountAnnouncer creates an MPSD announcer owned by account. Its
-// session reference is deliberately distinct from the primary session.
-func (b *Broadcaster) newSubAccountAnnouncer(ctx context.Context, account SubAccountConfig, ref mpsd.SessionReference) (room.Announcer, error) {
-	if b.subAccountAnnouncerFactory != nil {
-		return b.subAccountAnnouncerFactory(ctx, account, ref)
+// joinSubAccount joins a sub-account to the primary session through the
+// primary account's activity handle. Publishing the same session reference
+// again would fail with 412 Precondition Failed, so the sub-account looks up
+// the handle and joins it like MCXboxBroadcast's sub-sessions.
+func (b *Broadcaster) joinSubAccount(ctx context.Context, account SubAccountConfig, pub mpsd.PublishConfig) (*mpsd.Session, error) {
+	if b.subAccountPublisher != nil {
+		return b.subAccountPublisher(ctx, account, b.sessionRef, pub)
 	}
 	if account.XBLClient == nil {
 		return nil, errors.New("sub-account xbox live client is nil")
@@ -1233,11 +949,38 @@ func (b *Broadcaster) newSubAccountAnnouncer(ctx context.Context, account SubAcc
 	if client == nil {
 		return nil, errors.New("sub-account MPSD client is nil")
 	}
-	return newSessionNonceAnnouncer(&room.XBLAnnouncer{
-		Client:           client,
-		SessionReference: ref,
-		PublishConfig:    account.PublishConfig,
-	}, account.XUID, b.log.With("sub_account", account.ID)), nil
+	handleID, err := b.primaryActivityHandleID(ctx, client)
+	if err != nil {
+		return nil, err
+	}
+	b.debug("resolved primary activity handle", "sub_account", account.ID, "handle_id", handleID)
+	s, err := client.Join(ctx, handleID, mpsd.JoinConfig{})
+	if err != nil {
+		return nil, fmt.Errorf("join handle %s: %w", handleID, err)
+	}
+	// Join publishes the sub-account's own activity handle as part of session
+	// creation, which is what makes the session visible to the sub-account's
+	// friends; no extra handle write is needed here.
+	return s, nil
+}
+
+// primaryActivityHandleID finds the primary account's activity handle for the
+// published session.
+func (b *Broadcaster) primaryActivityHandleID(ctx context.Context, client *mpsd.Client) (uuid.UUID, error) {
+	primaryXUID := b.primaryXUID()
+	if primaryXUID == "" {
+		return uuid.Nil, errors.New("primary xuid unavailable for activity handle lookup")
+	}
+	handles, err := client.ActivitiesForUsers(ctx, b.sessionRef.ServiceConfigID, []string{primaryXUID})
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("query primary activity handles: %w", err)
+	}
+	for _, handle := range handles {
+		if handle.SessionReference.Name == b.sessionRef.Name {
+			return handle.ID, nil
+		}
+	}
+	return uuid.Nil, fmt.Errorf("no activity handle found for session %q", b.sessionRef.Name)
 }
 
 // ensureSubAccountMutualFollow makes the primary and sub-account follow each
@@ -1388,9 +1131,6 @@ func (b *Broadcaster) uploadGalleryAccount(ctx context.Context, cfg *GalleryConf
 }
 
 func (b *Broadcaster) subAccountMinecraftTokenSource(ctx context.Context, account *SubAccountConfig) (service.TokenSource, error) {
-	if b.subAccountMinecraftTokenSourceFactory != nil {
-		return b.subAccountMinecraftTokenSourceFactory(ctx, account)
-	}
 	if account.MinecraftTokenSource != nil {
 		return account.MinecraftTokenSource, nil
 	}
@@ -1399,7 +1139,6 @@ func (b *Broadcaster) subAccountMinecraftTokenSource(ctx context.Context, accoun
 		return nil, err
 	}
 	if tokens := b.subMinecraftTokens[client]; tokens != nil {
-		account.MinecraftTokenSource = tokens
 		return tokens, nil
 	}
 	tokens, err := newMinecraftTokenSource(ctx, client, b.conf.HTTPClient, b.log.With("sub_account", account.ID))
@@ -1410,7 +1149,6 @@ func (b *Broadcaster) subAccountMinecraftTokenSource(ctx context.Context, accoun
 		b.subMinecraftTokens = make(map[*xsapi.Client]service.TokenSource)
 	}
 	b.subMinecraftTokens[client] = tokens
-	account.MinecraftTokenSource = tokens
 	return tokens, nil
 }
 
@@ -1603,7 +1341,7 @@ func (b *Broadcaster) notifySessionUpdateFailure(ctx context.Context, err error)
 }
 
 // acceptListener accepts connections from the given listener and transfers each to the target server.
-func (b *Broadcaster) acceptListener(l net.Listener) {
+func (b *Broadcaster) acceptListener(l *minecraft.Listener) {
 	for {
 		conn, err := l.Accept()
 		if err != nil {
@@ -1791,28 +1529,6 @@ const (
 	sessionUpdateFailureLimit = 3
 )
 
-// subAccountUpdateError reports that the primary session updated successfully
-// but one or more independently published sub-account sessions did not.
-type subAccountUpdateError struct {
-	err error
-}
-
-func (e *subAccountUpdateError) Error() string {
-	return e.err.Error()
-}
-
-func (e *subAccountUpdateError) Unwrap() error {
-	return e.err
-}
-
-func countsAsPrimaryUpdateFailure(err error) bool {
-	if err == nil {
-		return false
-	}
-	var subErr *subAccountUpdateError
-	return !errors.As(err, &subErr)
-}
-
 // updateLoop periodically refreshes the Xbox session metadata, checking
 // session health before each update like Java's checkConnection().
 func (b *Broadcaster) updateLoop() {
@@ -1827,12 +1543,8 @@ func (b *Broadcaster) updateLoop() {
 				continue
 			}
 			ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
-			err := b.Update(ctx)
-			if err == nil {
+			if err := b.Update(ctx); err == nil {
 				consecutiveFailures = 0
-			} else if !errors.Is(err, context.Canceled) && !countsAsPrimaryUpdateFailure(err) {
-				consecutiveFailures = 0
-				b.log.Error("update sub-account sessions", "err", err)
 			} else if !errors.Is(err, context.Canceled) {
 				consecutiveFailures++
 				b.log.Error("update session", "err", err)
@@ -1852,29 +1564,12 @@ func (b *Broadcaster) updateLoop() {
 // checkSessionHealth recreates the session when it is dead or nearly full and
 // reports whether a recreation was attempted.
 func (b *Broadcaster) checkSessionHealth() bool {
-	if id, sig := b.lostSubAccountSignaling(); id != "" {
-		b.startSubAccountReconnect(id, sig)
-		return true
-	}
 	reason := b.sessionUnhealthyReason()
 	if reason == "" {
 		return false
 	}
 	b.recreateAfterFailure(reason)
 	return true
-}
-
-// lostSubAccountSignaling returns the first independently published endpoint
-// whose signaling context has stopped.
-func (b *Broadcaster) lostSubAccountSignaling() (string, nethernet.Signaling) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for _, sub := range b.subAnnouncers {
-		if sub.signaling != nil && sub.signaling.Context().Err() != nil {
-			return sub.id, sub.signaling
-		}
-	}
-	return "", nil
 }
 
 // sessionUnhealthyReason reports why the published session needs recreation,
@@ -1898,21 +1593,9 @@ func (b *Broadcaster) sessionUnhealthyReason() string {
 	if count := sessionMemberCount(session); count >= sessionMemberRestartThreshold {
 		return fmt.Sprintf("session has %d/30 members", count)
 	}
-	for _, sub := range b.subAnnouncers {
-		xbl, ok := xblAnnouncer(sub.announcer)
-		if !ok {
-			continue
-		}
-		xbl.Lock()
-		session := xbl.Session
-		xbl.Unlock()
-		if session != nil && session.Context().Err() != nil {
+	for _, s := range b.subSessions {
+		if s.Context().Err() != nil {
 			return "sub-account session lost"
-		}
-		if session != nil {
-			if count := sessionMemberCount(session); count >= sessionMemberRestartThreshold {
-				return fmt.Sprintf("sub-account %s session has %d/30 members", sub.id, count)
-			}
 		}
 	}
 	return ""
@@ -2016,162 +1699,6 @@ func (b *Broadcaster) reconnectSignaling(sig nethernet.Signaling) error {
 	})
 }
 
-// reconnectSubAccount replaces one lost independently authenticated endpoint
-// without touching a statically configured primary signaling connection.
-func (b *Broadcaster) reconnectSubAccount(id string, lost nethernet.Signaling) error {
-	return retryWithBackoff(b.ctx, reconnectBackoffBase, reconnectBackoffMax, func() error {
-		return b.recreateSubAccount(id, lost)
-	}, func(err error, next time.Duration) {
-		b.log.Error("re-create sub-account failed, retrying", "sub_account", id, "err", err, "retry_in", next)
-		b.notify(b.ctx, "Sub-account "+id+" reconnection failed, retrying in "+next.String()+": "+err.Error())
-	})
-}
-
-// startSubAccountReconnect schedules at most one retry loop per sub-account.
-// Recovery runs outside the health loop so a slow authentication service does
-// not block primary session updates.
-func (b *Broadcaster) startSubAccountReconnect(id string, lost nethernet.Signaling) bool {
-	b.mu.Lock()
-	if b.ctx == nil || b.ctx.Err() != nil || !b.started {
-		b.mu.Unlock()
-		return false
-	}
-	if b.subAccountReconnects == nil {
-		b.subAccountReconnects = make(map[string]nethernet.Signaling)
-	}
-	if _, reconnecting := b.subAccountReconnects[id]; reconnecting {
-		b.mu.Unlock()
-		return false
-	}
-	b.subAccountReconnects[id] = lost
-	b.reconnectWg.Add(1)
-	b.mu.Unlock()
-
-	b.warn("re-creating sub-account signaling", "sub_account", id)
-	go func() {
-		defer b.reconnectWg.Done()
-		err := b.reconnectSubAccount(id, lost)
-		b.mu.Lock()
-		delete(b.subAccountReconnects, id)
-		b.mu.Unlock()
-		if err == nil {
-			b.info("sub-account signaling re-created", "sub_account", id)
-		} else if b.ctx.Err() == nil {
-			b.log.Error("re-create sub-account failed", "sub_account", id, "err", err)
-			b.notify(b.ctx, "Sub-account "+id+" recreation failed: "+err.Error())
-		}
-	}()
-	return true
-}
-
-// recreateSubAccount tears down a lost sub-account endpoint and republishes it.
-// The primary MPSD session, listener, and signaling instance remain live.
-func (b *Broadcaster) recreateSubAccount(id string, lost nethernet.Signaling) error {
-	b.mu.Lock()
-	if b.ctx.Err() != nil || !b.started {
-		b.mu.Unlock()
-		return errors.New("broadcaster is shut down")
-	}
-
-	account := b.subAccountConfigByID(id)
-	if account == nil || !account.Enabled {
-		b.mu.Unlock()
-		return fmt.Errorf("sub-account %s is no longer enabled", id)
-	}
-
-	var previous publishedSubAccount
-	hadPrevious := false
-	primary := b.signaling
-	independentEndpoint := primary != nil || b.subAccountSignalingFactory != nil
-	if index := b.publishedSubAccountIndex(id); index >= 0 {
-		current := b.subAnnouncers[index]
-		if !sameSignaling(current.signaling, lost) && current.signaling != nil && current.signaling.Context().Err() == nil {
-			b.mu.Unlock()
-			return nil
-		}
-		previous = current
-		hadPrevious = true
-		b.subAnnouncers = append(b.subAnnouncers[:index], b.subAnnouncers[index+1:]...)
-		delete(b.subAnnouncersByID, id)
-	}
-	b.mu.Unlock()
-
-	if hadPrevious {
-		_ = b.closePublishedSubAccount(previous)
-	}
-
-	status, err := b.status(b.ctx)
-	if err != nil {
-		return fmt.Errorf("resolve session status: %w", err)
-	}
-	timeout := b.subAccountStartTimeout
-	if timeout <= 0 {
-		timeout = 90 * time.Second
-	}
-	ctx, cancel := context.WithTimeout(b.ctx, timeout)
-	prepared, err := b.prepareSubAccount(ctx, account, status, independentEndpoint, primary)
-	cancel()
-	if err != nil {
-		return fmt.Errorf("restart sub-account: %w", err)
-	}
-
-	b.mu.Lock()
-	if b.ctx.Err() != nil || !b.started {
-		b.mu.Unlock()
-		_ = b.closePublishedSubAccount(prepared)
-		return errors.New("broadcaster is shut down")
-	}
-	if sameSignaling(prepared.signaling, b.signaling) {
-		b.mu.Unlock()
-		// The prepared signaling now belongs to the primary lifecycle; dispose
-		// only the sub-account resources so rejecting it cannot close primary.
-		prepared.signaling = nil
-		_ = b.closePublishedSubAccount(prepared)
-		return errors.New("restart sub-account: prepared signaling matches the current primary signaling")
-	}
-	if index := b.publishedSubAccountIndex(id); index >= 0 {
-		current := b.subAnnouncers[index]
-		if current.signaling != nil && current.signaling.Context().Err() == nil {
-			b.mu.Unlock()
-			_ = b.closePublishedSubAccount(prepared)
-			return nil
-		}
-	}
-	b.retainPublishedSubAccount(prepared)
-	b.mu.Unlock()
-	return nil
-}
-
-func (b *Broadcaster) subAccountConfigByID(id string) *SubAccountConfig {
-	for i := range b.conf.SubAccounts {
-		if b.conf.SubAccounts[i].ID == id {
-			return &b.conf.SubAccounts[i]
-		}
-	}
-	return nil
-}
-
-func (b *Broadcaster) publishedSubAccountIndex(id string) int {
-	for i := range b.subAnnouncers {
-		if b.subAnnouncers[i].id == id {
-			return i
-		}
-	}
-	return -1
-}
-
-func (b *Broadcaster) closePublishedSubAccount(sub publishedSubAccount) error {
-	var err error
-	if sub.listener != nil {
-		err = errors.Join(err, sub.listener.Close())
-	}
-	if sub.announcer != nil {
-		err = errors.Join(err, sub.announcer.Close())
-	}
-	err = errors.Join(err, closeSignaling(sub.signaling))
-	return err
-}
-
 // retryWithBackoff calls attempt until it returns nil or ctx is done, waiting
 // between attempts starting at base and doubling up to max. onError, when
 // non-nil, is called with each failed attempt's error and the delay before the
@@ -2267,14 +1794,13 @@ func (b *Broadcaster) recreateSession() error {
 		return fmt.Errorf("re-create signaling connection: %w", err)
 	}
 	if connection != nil {
-		b.sessionConnection = connection
-		b.announcer = signalingConnectionAnnouncer{Announcer: b.announcer, connection: *b.sessionConnection}
+		b.announcer = signalingConnectionAnnouncer{Announcer: b.announcer, connection: *connection}
 	}
 	if err := b.announcer.Announce(b.ctx, status); err != nil {
 		closeSignaling()
 		return fmt.Errorf("re-announce session: %w", err)
 	}
-	if err := b.startSubAccounts(b.ctx, status); err != nil {
+	if err := b.startSubAccounts(b.ctx); err != nil {
 		_ = b.cleanupPublishedSessions(true)
 		closeSignaling()
 		return fmt.Errorf("re-create sub-accounts: %w", err)
@@ -2307,7 +1833,7 @@ func (b *Broadcaster) recreateSession() error {
 func (b *Broadcaster) Update(ctx context.Context) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if !b.started || b.closing {
+	if !b.started {
 		return errors.New("broadcaster not started")
 	}
 	status, err := b.status(ctx)
@@ -2317,19 +1843,6 @@ func (b *Broadcaster) Update(ctx context.Context) error {
 	b.debugRoomStatus("resolved room status update", status)
 	if err := b.announcer.Announce(ctx, status); err != nil {
 		return err
-	}
-	var subErr error
-	for _, sub := range b.subAnnouncers {
-		subStatus := subAccountStatus(status, sub.xuid)
-		if sub.connection != (room.Connection{}) {
-			subStatus = subAccountStatusWithConnection(status, sub.xuid, sub.connection)
-		}
-		if err := sub.announcer.Announce(ctx, subStatus); err != nil {
-			subErr = errors.Join(subErr, fmt.Errorf("update sub-account %s: %w", sub.id, err))
-		}
-	}
-	if subErr != nil {
-		return &subAccountUpdateError{err: subErr}
 	}
 	// Matching MCXboxBroadcast, suppressSessionUpdateMessage only demotes the
 	// periodic success log to debug level.
@@ -2341,19 +1854,16 @@ func (b *Broadcaster) Update(ctx context.Context) error {
 	return nil
 }
 
-// cleanupPublishedSessions closes independent sub-account sessions and
-// optionally the primary announcer.
+// cleanupPublishedSessions closes sub-sessions and optionally the announcer.
 func (b *Broadcaster) cleanupPublishedSessions(closeAnnouncer bool) error {
 	var err error
-	for _, sub := range b.subAnnouncers {
-		err = errors.Join(err, b.closePublishedSubAccount(sub))
+	for _, s := range b.subSessions {
+		err = errors.Join(err, s.Close())
 	}
-	b.subAnnouncers = nil
-	b.subAnnouncersByID = nil
+	b.subSessions = nil
 	if closeAnnouncer && b.announcer != nil {
 		err = errors.Join(err, b.announcer.Close())
 	}
-	b.sessionConnection = nil
 	return err
 }
 
@@ -2431,19 +1941,10 @@ func xblClientCreated(client *xsapi.Client, created map[*xsapi.Client]struct{}) 
 // Close stops the listener and removes the Xbox session.
 func (b *Broadcaster) Close() error {
 	b.mu.Lock()
-	if b.closing {
-		state := b.closeState
-		b.mu.Unlock()
-		<-state.done
-		return state.err
-	}
+	defer b.mu.Unlock()
 	if !b.started {
-		b.mu.Unlock()
 		return nil
 	}
-	b.closing = true
-	state := &broadcasterCloseState{done: make(chan struct{})}
-	b.closeState = state
 	b.cancel()
 	err := b.listener.Close()
 	err = errors.Join(err, b.cleanupPublishedSessions(false))
@@ -2452,22 +1953,9 @@ func (b *Broadcaster) Close() error {
 			err = errors.Join(err, c.Close())
 		}
 	}
-	done := b.done
-	b.mu.Unlock()
-
-	// A targeted sub-account reconnect may still be unwinding account network
-	// calls. Wait without b.mu so it can discard any prepared replacement.
-	b.reconnectWg.Wait()
 	err = errors.Join(err, b.closeCreatedXBLClients())
-	if done != nil {
-		<-done
-	}
-	b.mu.Lock()
+	<-b.done
 	b.started = false
-	b.closing = false
-	state.err = err
-	close(state.done)
-	b.mu.Unlock()
 	return err
 }
 

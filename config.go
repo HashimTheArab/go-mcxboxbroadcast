@@ -52,9 +52,8 @@ type Config struct {
 	FriendSync *FriendSyncConfig
 	// FriendHistory records player activity for friend expiry.
 	FriendHistory HistoryStore
-	// SubAccounts contains additional accounts that publish independently owned
-	// MPSD sessions and account-authenticated NetherNet listeners for the same
-	// target server.
+	// SubAccounts contains additional accounts that join/publish the same MPSD
+	// session to extend friend-list visibility.
 	SubAccounts []SubAccountConfig
 
 	// Signaling is the NetherNet signaling connection used to accept clients.
