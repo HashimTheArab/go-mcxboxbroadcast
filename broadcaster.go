@@ -397,8 +397,8 @@ func (b *Broadcaster) minecraftListenConfig(status room.Status) minecraft.Listen
 	conf.StatusProvider = b.minecraftStatusProvider(status)
 	conf.CompressionThreshold = -1
 	conf.ForceDisableVibrantVisuals = true
-	conf.ResourcePackWorldTemplateUUID = uuid.New()
-	conf.ResourcePackWorldTemplateVersion = "*"
+	conf.ResourcePackWorldTemplateUUID = uuid.Nil
+	conf.ResourcePackWorldTemplateVersion = ""
 	if b.debugEnabled() && conf.PacketFunc == nil {
 		conf.PacketFunc = b.logMinecraftPacket
 	}

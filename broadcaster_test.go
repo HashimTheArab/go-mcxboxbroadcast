@@ -373,8 +373,8 @@ func TestMinecraftListenConfigKeepsFullLoginFlow(t *testing.T) {
 	if !conf.ForceDisableVibrantVisuals {
 		t.Fatal("expected listener to force-disable vibrant visuals")
 	}
-	if conf.ResourcePackWorldTemplateUUID == uuid.Nil || conf.ResourcePackWorldTemplateVersion != "*" {
-		t.Fatalf("unexpected resource-pack template metadata: uuid=%s version=%q", conf.ResourcePackWorldTemplateUUID, conf.ResourcePackWorldTemplateVersion)
+	if conf.ResourcePackWorldTemplateUUID != uuid.Nil || conf.ResourcePackWorldTemplateVersion != "" {
+		t.Fatalf("unexpected resource-pack template metadata: uuid=%s version=%q, want zero UUID and empty version", conf.ResourcePackWorldTemplateUUID, conf.ResourcePackWorldTemplateVersion)
 	}
 }
 
