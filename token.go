@@ -225,7 +225,12 @@ func requestLiveTokenWriter(ctx context.Context, conf auth.Config, out io.Writer
 	if out == nil {
 		out = io.Discard
 	}
-	return conf.RequestLiveTokenContext(ctx, out)
+	tok, err := conf.RequestLiveTokenContext(ctx, out)
+	var retrieveErr *oauth2.RetrieveError
+	if errors.As(err, &retrieveErr) && retrieveErr.ErrorCode == "invalid_grant" {
+		return nil, fmt.Errorf("%w; set or reset the Microsoft account password, then retry the device login", err)
+	}
+	return tok, err
 }
 
 func refreshLiveToken(ctx context.Context, clientID, refreshToken string) (*oauth2.Token, error) {

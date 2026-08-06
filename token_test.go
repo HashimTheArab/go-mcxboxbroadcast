@@ -16,6 +16,7 @@ import (
 	"github.com/df-mc/go-xsapi/v2/xal/xasd"
 	"github.com/df-mc/go-xsapi/v2/xal/xasu"
 	"github.com/df-mc/go-xsapi/v2/xal/xsts"
+	"github.com/sandertv/gophertunnel/minecraft/auth"
 	"github.com/sandertv/gophertunnel/minecraft/service"
 	"golang.org/x/oauth2"
 )
@@ -231,6 +232,33 @@ func TestLiveTokenSourceFallsBackToDeviceCodeWhenRefreshRejected(t *testing.T) {
 	}
 }
 
+func TestRequestLiveTokenWriterSuggestsPasswordResetForInvalidGrant(t *testing.T) {
+	client := &http.Client{Transport: tokenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.String() {
+		case "https://login.live.com/oauth20_connect.srf":
+			return tokenTestJSONResponse(http.StatusOK, `{"device_code":"device","user_code":"code","verification_uri":"https://www.microsoft.com/link","expires_in":900,"interval":1}`), nil
+		case "https://login.live.com/oauth20_token.srf":
+			return tokenTestJSONResponse(http.StatusBadRequest, `{"error":"invalid_grant","error_description":"user interaction is required"}`), nil
+		default:
+			t.Fatalf("unexpected device auth request %s %s", req.Method, req.URL)
+			return nil, nil
+		}
+	})}
+	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, client)
+
+	_, err := requestLiveTokenWriter(ctx, auth.AndroidConfig, io.Discard)
+	if err == nil {
+		t.Fatal("expected device authentication error")
+	}
+	if !strings.Contains(err.Error(), "set or reset the Microsoft account password") {
+		t.Fatalf("error = %q, want password-reset guidance", err)
+	}
+	var retrieveErr *oauth2.RetrieveError
+	if !errors.As(err, &retrieveErr) || retrieveErr.ErrorCode != "invalid_grant" {
+		t.Fatalf("error = %v, want wrapped invalid_grant retrieve error", err)
+	}
+}
+
 func TestMinecraftTokenDiagnosticsFormatsPlayerBannedError(t *testing.T) {
 	baseErr := errors.New(`minecraft/service: PlayerBanned: "Player 2535433454914320 is banned." ()`)
 	src := withMinecraftTokenDiagnostics(failingMinecraftTokenSource{err: baseErr})
@@ -349,4 +377,10 @@ func tokenTestResponse(code int, body string) *http.Response {
 		Body:       io.NopCloser(strings.NewReader(body)),
 		Header:     make(http.Header),
 	}
+}
+
+func tokenTestJSONResponse(code int, body string) *http.Response {
+	resp := tokenTestResponse(code, body)
+	resp.Header.Set("Content-Type", "application/json")
+	return resp
 }
