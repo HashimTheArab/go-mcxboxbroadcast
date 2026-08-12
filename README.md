@@ -38,6 +38,11 @@ If `config.yml` does not exist, the command writes a default one and starts from
 those values. The first run starts Microsoft device-code authentication and
 stores the Live token at `accounts.primaryCachePath`.
 
+Configuration keys use the exact camelCase names shown in
+[`config.example.yml`](config.example.yml). YAML and TOML are supported; legacy
+kebab-case keys, root-level session settings, friend-expiry aliases, and
+`slack-webhook` are not translated.
+
 Use `-debug` or set `debugMode: true` in the config to show detailed runtime
 events such as session creation, presence heartbeats, friend sync scans, pending
 friend-request accepts, friends being added/removed, and the final add/remove
