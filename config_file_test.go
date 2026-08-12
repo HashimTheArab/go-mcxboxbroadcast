@@ -53,56 +53,56 @@ func TestExampleConfigLoads(t *testing.T) {
 	}
 }
 
-func TestLoadConfigFileAcceptsUpstreamKebabCaseKeys(t *testing.T) {
+func TestLoadConfigFileAcceptsCanonicalYAMLKeys(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yml")
 	if err := os.WriteFile(path, []byte(`
-config-version: 2
-debug-mode: true
-suppress-session-update-message: true
+configVersion: 2
+debugMode: true
+suppressSessionUpdateMessage: true
 
 session:
-  remote-address: bedrock.example.net
-  remote-port: "19133"
-  update-interval: 45
-  query-server: false
-  web-query-fallback: true
-  config-fallback: false
-  broadcast-setting: 2
-  world-type: Creative
-  session-info:
-    host-name: Example Host
-    world-name: Example World
+  remoteAddress: bedrock.example.net
+  remotePort: "19133"
+  updateInterval: 45
+  queryServer: false
+  webQueryFallback: true
+  configFallback: false
+  broadcastSetting: 2
+  worldType: Creative
+  sessionInfo:
+    hostName: Example Host
+    worldName: Example World
     players: 4
-    max-players: 32
+    maxPlayers: 32
     ip: ignored.example.net
     port: 19134
 
-friend-sync:
-  update-interval: 75
-  auto-follow: false
-  auto-unfollow: true
-  initial-invite: false
+friendSync:
+  updateInterval: 75
+  autoFollow: false
+  autoUnfollow: true
+  initialInvite: false
   expiry:
     enabled: false
     days: 21
     check: 2400
-    history-path: cache/upstream_history.json
+    historyPath: cache/upstream_history.json
 
 notifications:
   enabled: true
-  webhook-url: https://example.net/webhook
+  webhookUrl: https://example.net/webhook
 
 gallery:
   enabled: true
-  image-path: images/upstream.jpg
-  delete-other-images: false
+  imagePath: images/upstream.jpg
+  deleteOtherImages: false
 
 accounts:
-  primary-cache-path: cache/upstream_live_token.json
-  sub-accounts:
+  primaryCachePath: cache/upstream_live_token.json
+  subAccounts:
     - id: alt
       enabled: true
-      cache-path: cache/alt_live_token.json
+      cachePath: cache/alt_live_token.json
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -116,35 +116,35 @@ accounts:
 		t.Fatalf("expected migrated config version, got %d", cfg.ConfigVersion)
 	}
 	if !cfg.DebugMode || !cfg.SuppressSessionUpdateMessage {
-		t.Fatalf("top-level kebab-case aliases were not loaded: %#v", cfg)
+		t.Fatalf("canonical top-level keys were not loaded: %#v", cfg)
 	}
 	if cfg.Session.UpdateInterval != 45 || cfg.Session.QueryServer || !cfg.Session.WebQueryFallback || cfg.Session.ConfigFallback {
-		t.Fatalf("session query aliases were not loaded: %#v", cfg.Session)
+		t.Fatalf("canonical session query keys were not loaded: %#v", cfg.Session)
 	}
 	if cfg.Session.BroadcastSetting != 2 || cfg.Session.WorldType != "Creative" {
-		t.Fatalf("session status aliases were not loaded: %#v", cfg.Session)
+		t.Fatalf("canonical session status keys were not loaded: %#v", cfg.Session)
 	}
 	if cfg.Session.SessionInfo.HostName != "Example Host" || cfg.Session.SessionInfo.MaxPlayers != 32 {
-		t.Fatalf("session-info aliases were not loaded: %#v", cfg.Session.SessionInfo)
+		t.Fatalf("canonical sessionInfo keys were not loaded: %#v", cfg.Session.SessionInfo)
 	}
 	if cfg.FriendSync.UpdateInterval != 75 || cfg.FriendSync.AutoFollow || !cfg.FriendSync.AutoUnfollow || cfg.FriendSync.InitialInvite {
-		t.Fatalf("friend-sync aliases were not loaded: %#v", cfg.FriendSync)
+		t.Fatalf("canonical friendSync keys were not loaded: %#v", cfg.FriendSync)
 	}
 	if cfg.FriendSync.Expiry.HistoryPath != "cache/upstream_history.json" || cfg.FriendSync.Expiry.Enabled {
-		t.Fatalf("friend-sync expiry aliases were not loaded: %#v", cfg.FriendSync.Expiry)
+		t.Fatalf("canonical friendSync expiry keys were not loaded: %#v", cfg.FriendSync.Expiry)
 	}
 	if cfg.Notifications.WebhookURL != "https://example.net/webhook" {
-		t.Fatalf("notification alias was not loaded: %#v", cfg.Notifications)
+		t.Fatalf("canonical notification key was not loaded: %#v", cfg.Notifications)
 	}
 	if cfg.Gallery.ImagePath != "images/upstream.jpg" || cfg.Gallery.DeleteOtherImages {
-		t.Fatalf("gallery aliases were not loaded: %#v", cfg.Gallery)
+		t.Fatalf("canonical gallery keys were not loaded: %#v", cfg.Gallery)
 	}
 	if cfg.Accounts.PrimaryCachePath != "cache/upstream_live_token.json" || len(cfg.Accounts.SubAccounts) != 1 || cfg.Accounts.SubAccounts[0].CachePath != "cache/alt_live_token.json" {
-		t.Fatalf("account aliases were not loaded: %#v", cfg.Accounts)
+		t.Fatalf("canonical account keys were not loaded: %#v", cfg.Accounts)
 	}
 }
 
-func TestLoadConfigFileMigratesUpstreamLegacyKeys(t *testing.T) {
+func TestLoadConfigFileDoesNotTranslateLegacyKeys(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yml")
 	if err := os.WriteFile(path, []byte(`
 config-version: 1
@@ -167,18 +167,18 @@ friend-sync:
 		t.Fatal(err)
 	}
 
-	if !cfg.DebugMode || !cfg.SuppressSessionUpdateMessage {
-		t.Fatalf("legacy top-level aliases were not migrated: %#v", cfg)
+	if cfg.DebugMode || cfg.SuppressSessionUpdateMessage {
+		t.Fatalf("legacy top-level keys were translated: %#v", cfg)
 	}
-	if cfg.Session.UpdateInterval != 55 {
-		t.Fatalf("legacy session keys were not moved: %#v", cfg.Session)
+	if cfg.Session.UpdateInterval != 30 {
+		t.Fatalf("legacy session keys were translated: %#v", cfg.Session)
 	}
-	if cfg.FriendSync.Expiry.Enabled || cfg.FriendSync.Expiry.Days != 30 || cfg.FriendSync.Expiry.Check != 3600 {
-		t.Fatalf("legacy friend expiry aliases were not migrated: %#v", cfg.FriendSync.Expiry)
+	if !cfg.FriendSync.Expiry.Enabled || cfg.FriendSync.Expiry.Days != 15 || cfg.FriendSync.Expiry.Check != 1800 {
+		t.Fatalf("legacy friend expiry keys were translated: %#v", cfg.FriendSync.Expiry)
 	}
 }
 
-func TestLoadConfigFileMigratesLegacySlackWebhook(t *testing.T) {
+func TestLoadConfigFileDoesNotTranslateLegacySlackWebhook(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yml")
 	if err := os.WriteFile(path, []byte(`
 slack-webhook: https://example.net/hook
@@ -190,8 +190,8 @@ slack-webhook: https://example.net/hook
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Notifications.Enabled || cfg.Notifications.WebhookURL != "https://example.net/hook" {
-		t.Fatalf("legacy slack webhook was not migrated: %#v", cfg.Notifications)
+	if cfg.Notifications.Enabled || cfg.Notifications.WebhookURL != "" {
+		t.Fatalf("legacy slack webhook was translated: %#v", cfg.Notifications)
 	}
 }
 
