@@ -3,6 +3,9 @@ package broadcaster
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +20,9 @@ import (
 	"github.com/df-mc/go-nethernet"
 	"github.com/df-mc/go-xsapi/v2"
 	"github.com/df-mc/go-xsapi/v2/mpsd"
+	"github.com/df-mc/go-xsapi/v2/xal/xasd"
+	"github.com/df-mc/go-xsapi/v2/xal/xasu"
+	"github.com/df-mc/go-xsapi/v2/xal/xsts"
 	"github.com/google/uuid"
 	"github.com/sandertv/gophertunnel/minecraft"
 	"github.com/sandertv/gophertunnel/minecraft/p2p"
@@ -25,20 +31,69 @@ import (
 	"github.com/sandertv/gophertunnel/minecraft/room"
 )
 
+type broadcasterTokenSource struct {
+	xuid string
+	key  *ecdsa.PrivateKey
+}
+
+func (s broadcasterTokenSource) XSTSToken(context.Context, string) (*xsts.Token, error) {
+	return &xsts.Token{
+		Token: "token",
+		DisplayClaims: xsts.DisplayClaims{UserInfo: []xsts.UserInfo{{
+			UserInfo: xasu.UserInfo{UserHash: "uhs"},
+			XUID:     s.xuid,
+		}}},
+	}, nil
+}
+
+func (broadcasterTokenSource) DeviceToken(context.Context) (*xasd.Token, error) {
+	return nil, errors.New("unexpected device token request")
+}
+
+func (s broadcasterTokenSource) ProofKey() *ecdsa.PrivateKey {
+	return s.key
+}
+
+func newTestXSAPIClient(t *testing.T, client *http.Client, xuid string) *xsapi.Client {
+	t.Helper()
+	base := client.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	configured := *client
+	configured.Transport = broadcasterRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host == "title.mgt.xboxlive.com" {
+			return broadcasterResponse(http.StatusOK, `{"EndPoints":[{"Protocol":"https","Host":"peoplehub.xboxlive.com","HostType":"fqdn","RelyingParty":"http://xboxlive.com","TokenType":"JWT"},{"Protocol":"https","Host":"social.xboxlive.com","HostType":"fqdn","RelyingParty":"http://xboxlive.com","TokenType":"JWT"},{"Protocol":"https","Host":"userpresence.xboxlive.com","HostType":"fqdn","RelyingParty":"http://xboxlive.com","TokenType":"JWT"}]}`), nil
+		}
+		return base.RoundTrip(req)
+	})
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate proof key: %v", err)
+	}
+	xbl, err := (xsapi.ClientConfig{HTTPClient: &configured, RTAMode: xsapi.RTADisabled}).New(t.Context(), broadcasterTokenSource{xuid: xuid, key: key})
+	if err != nil {
+		t.Fatalf("create xsapi client: %v", err)
+	}
+	return xbl
+}
+
 func TestBroadcasterStartSubAccountsMutuallyFollowsBeforePublish(t *testing.T) {
 	var calls []string
 	client := &http.Client{Transport: broadcasterRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		calls = append(calls, fmt.Sprintf("%s %s auth=%s", req.Method, req.URL.String(), req.Header.Get("Authorization")))
 		return broadcasterResponse(http.StatusNoContent, ""), nil
 	})}
+	primary := newTestXSAPIClient(t, client, "100")
+	sub := newTestXSAPIClient(t, client, "200")
 	b := &Broadcaster{log: testBroadcasterLogger(), conf: Config{
-		XBLClient:  &xsapi.Client{},
+		XBLClient:  primary,
 		XUID:       "100",
 		HTTPClient: client,
 		SubAccounts: []SubAccountConfig{{
 			ID:        "sub",
 			Enabled:   true,
-			XBLClient: &xsapi.Client{},
+			XBLClient: sub,
 			XUID:      "200",
 		}},
 	}}
@@ -54,9 +109,9 @@ func TestBroadcasterStartSubAccountsMutuallyFollowsBeforePublish(t *testing.T) {
 		// The follow state is checked first so restarts do not re-PUT
 		// existing friendships; the 204 here fails decoding, so both follows
 		// proceed.
-		"GET https://peoplehub.xboxlive.com/users/me/people/followers auth=",
-		"PUT https://social.xboxlive.com/users/me/people/xuid(200) auth=",
-		"PUT https://social.xboxlive.com/users/me/people/xuid(100) auth=",
+		"GET https://peoplehub.xboxlive.com/users/me/people/followers auth=XBL3.0 x=uhs;token",
+		"PUT https://social.xboxlive.com/users/me/people/xuid(200) auth=XBL3.0 x=uhs;token",
+		"PUT https://social.xboxlive.com/users/me/people/xuid(100) auth=XBL3.0 x=uhs;token",
 		"publish",
 	}
 	if fmt.Sprint(calls) != fmt.Sprint(want) {
@@ -76,14 +131,16 @@ func TestBroadcasterStartSubAccountsSkipsExistingMutualFollow(t *testing.T) {
 			return nil, nil
 		}
 	})}
+	primary := newTestXSAPIClient(t, client, "100")
+	sub := newTestXSAPIClient(t, client, "200")
 	b := &Broadcaster{log: testBroadcasterLogger(), conf: Config{
-		XBLClient:  &xsapi.Client{},
+		XBLClient:  primary,
 		XUID:       "100",
 		HTTPClient: client,
 		SubAccounts: []SubAccountConfig{{
 			ID:        "sub",
 			Enabled:   true,
-			XBLClient: &xsapi.Client{},
+			XBLClient: sub,
 			XUID:      "200",
 		}},
 	}}
