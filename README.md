@@ -10,7 +10,9 @@ Go-first building blocks:
 
 - `github.com/df-mc/go-xsapi/v2` for Xbox Live MPSD/RTA session publishing,
   replaced in `go.mod` with the `HashimTheArab/go-xsapi` fork.
-- `github.com/df-mc/go-nethernet` for NetherNet/WebRTC listener support.
+- `github.com/df-mc/go-nethernet` for NetherNet/WebRTC listener support. The
+  upstream module is used directly because it now contains the networking
+  changes that previously required Lunar's fork.
 - `hashimthearab/gophertunnel` Lunar P2P branch for NetherNet, signaling,
   room announcements, and `minecraft/p2p`-compatible session metadata. This
   should be updated to the official `sandertv/gophertunnel` once it supports

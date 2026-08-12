@@ -315,6 +315,8 @@ func TestNewXBLTokenSourceCachesDeviceAndXSTSTokens(t *testing.T) {
 	validUntil := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
 	client := &http.Client{Transport: tokenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch req.URL.String() {
+		case "https://title.mgt.xboxlive.com/titles/default/endpoints?type=1":
+			return tokenTestResponse(http.StatusOK, `{"EndPoints":[{"Protocol":"https","Host":"*.xboxlive.com","HostType":"wildcard","RelyingParty":"http://xboxlive.com","TokenType":"JWT"}]}`), nil
 		case "https://device.auth.xboxlive.com/device/authenticate":
 			deviceRequests++
 			return tokenTestResponse(http.StatusOK, `{"IssueInstant":"`+validUntil+`","NotAfter":"`+validUntil+`","Token":"device","DisplayClaims":{"xdi":{"did":"device"}}}`), nil
@@ -326,14 +328,14 @@ func TestNewXBLTokenSourceCachesDeviceAndXSTSTokens(t *testing.T) {
 		}
 		return nil, nil
 	})}
-	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, client)
+	ctx := auth.WithContextClient(context.Background(), client)
 	src := NewXBLTokenSource(ctx, oauth2.StaticTokenSource(&oauth2.Token{
 		AccessToken: "live",
 		Expiry:      time.Now().Add(time.Hour),
 	}))
 
 	for i := 0; i < 2; i++ {
-		tok, err := src.XSTSToken(context.Background(), "http://xboxlive.com")
+		tok, err := src.XSTSToken(ctx, "http://xboxlive.com")
 		if err != nil {
 			t.Fatal(err)
 		}

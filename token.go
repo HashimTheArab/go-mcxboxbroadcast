@@ -74,9 +74,7 @@ func NewXSAPIClient(ctx context.Context, src xsapi.TokenSource, client *http.Cli
 	if src == nil {
 		return nil, fmt.Errorf("xbox live token source is nil")
 	}
-	if client != nil {
-		ctx = context.WithValue(ctx, oauth2.HTTPClient, client)
-	}
+	ctx = auth.WithContextClient(ctx, client)
 	return xsapi.ClientConfig{HTTPClient: client, Logger: log, RTAMode: xsapi.RTALazy}.New(ctx, src)
 }
 
@@ -91,9 +89,7 @@ func newMinecraftTokenSource(ctx context.Context, xbl *xsapi.Client, client *htt
 	if xbl == nil {
 		return nil, fmt.Errorf("xbox live client is nil")
 	}
-	if client != nil {
-		ctx = context.WithValue(ctx, oauth2.HTTPClient, client)
-	}
+	ctx = auth.WithContextClient(ctx, client)
 	debugLog(log, "discovering minecraft services")
 	discovery, err := service.Discover(ctx, service.ApplicationTypeMinecraftPE, protocol.CurrentVersion)
 	if err != nil {

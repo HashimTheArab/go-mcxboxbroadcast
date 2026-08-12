@@ -201,7 +201,7 @@ func TestFriendClientFollowReturnsSocialResponseErrors(t *testing.T) {
 	}
 }
 
-func TestFriendClientAcceptPendingFriendRequestsUsesBulkAddFriends(t *testing.T) {
+func TestFriendClientAcceptPendingFriendRequestsUsesAddFriends(t *testing.T) {
 	var requests []string
 	client := FriendClient{
 		Client: testAuthenticatedClient("XBL3.0 x=user;token", roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -216,12 +216,14 @@ func TestFriendClientAcceptPendingFriendRequestsUsesBulkAddFriends(t *testing.T)
 				}
 				return response(http.StatusOK, `{"people":[{"xuid":"1","gamertag":"One"},{"xuid":"2","gamertag":"Two"}]}`), nil
 			case req.Method == http.MethodPost && req.URL.String() == addFriendsURL:
-				body, err := io.ReadAll(req.Body)
-				if err != nil {
+				var body struct {
+					XUIDs []string `json:"xuids"`
+				}
+				if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 					t.Fatal(err)
 				}
-				if want := `{"xuids":["1","2"]}`; string(body) != want {
-					t.Fatalf("bulk body = %s, want %s", body, want)
+				if got, want := strings.Join(body.XUIDs, ","), "1,2"; got != want {
+					t.Fatalf("add-friends XUIDs = %s, want %s", got, want)
 				}
 				return response(http.StatusOK, `{"updatedPeople":["1","2"]}`), nil
 			default:
@@ -246,7 +248,7 @@ func TestFriendClientAcceptPendingFriendRequestsUsesBulkAddFriends(t *testing.T)
 	}
 }
 
-func TestFriendClientAcceptPendingFriendRequestsBatchesBulkAdds(t *testing.T) {
+func TestFriendClientAcceptPendingFriendRequestsBatchesAdds(t *testing.T) {
 	pending := make([]map[string]string, 51)
 	for i := range pending {
 		pending[i] = map[string]string{"xuid": fmt.Sprint(i + 1)}

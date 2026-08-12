@@ -18,6 +18,7 @@ import (
 	"github.com/HashimTheArab/go-mcxboxbroadcast"
 	"github.com/df-mc/go-xsapi/v2"
 	"github.com/df-mc/go-xsapi/v2/xal/sisu"
+	"github.com/sandertv/gophertunnel/minecraft/auth"
 	"golang.org/x/oauth2"
 )
 
@@ -84,7 +85,7 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 	}
 	authCtx := ctx
 	if httpClient != nil && strings.TrimSpace(cfg.HTTP.Proxy) != "" {
-		authCtx = context.WithValue(authCtx, oauth2.HTTPClient, httpClient)
+		authCtx = auth.WithContextClient(authCtx, httpClient)
 	}
 	level := slog.LevelInfo
 	if opts.Debug || cfg.DebugMode {

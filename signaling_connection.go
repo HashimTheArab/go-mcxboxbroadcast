@@ -2,8 +2,6 @@ package broadcaster
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -80,41 +78,8 @@ func (b *Broadcaster) playerMessagingID(ctx context.Context) (uuid.UUID, error) 
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("request minecraft token for jsonrpc signaling: %w", err)
 	}
-	if tok.Claims.PlayerMessagingID != uuid.Nil {
-		return tok.Claims.PlayerMessagingID, nil
+	if tok.Claims.PlayerMessagingID == uuid.Nil {
+		return uuid.Nil, errors.New("minecraft token player messaging id is empty")
 	}
-	pmsgID, err := playerMessagingIDFromAuthorizationHeader(tok.AuthorizationHeader)
-	if err != nil {
-		return uuid.Nil, fmt.Errorf("read minecraft player messaging id: %w", err)
-	}
-	return pmsgID, nil
-}
-
-func playerMessagingIDFromAuthorizationHeader(header string) (uuid.UUID, error) {
-	token := strings.TrimSpace(header)
-	if token == "" {
-		return uuid.Nil, errors.New("authorization header is empty")
-	}
-	fields := strings.Fields(token)
-	if len(fields) > 0 {
-		token = fields[len(fields)-1]
-	}
-	parts := strings.Split(token, ".")
-	if len(parts) < 2 {
-		return uuid.Nil, errors.New("authorization header does not contain a JWT")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return uuid.Nil, fmt.Errorf("decode jwt payload: %w", err)
-	}
-	var claims struct {
-		PlayerMessagingID uuid.UUID `json:"pmid"`
-	}
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return uuid.Nil, fmt.Errorf("decode jwt claims: %w", err)
-	}
-	if claims.PlayerMessagingID == uuid.Nil {
-		return uuid.Nil, errors.New("pmid claim is empty")
-	}
-	return claims.PlayerMessagingID, nil
+	return tok.Claims.PlayerMessagingID, nil
 }

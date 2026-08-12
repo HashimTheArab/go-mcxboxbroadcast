@@ -3,9 +3,9 @@ module github.com/HashimTheArab/go-mcxboxbroadcast
 go 1.26.2
 
 require (
-	github.com/df-mc/go-nethernet v1.0.19-0.20260806003522-be651398d023
-	github.com/df-mc/go-playfab/v2 v2.0.2-0.20260618232935-6d86fc87875f
-	github.com/df-mc/go-xsapi/v2 v2.0.2
+	github.com/df-mc/go-nethernet v1.0.20
+	github.com/df-mc/go-playfab/v2 v2.0.2
+	github.com/df-mc/go-xsapi/v2 v2.0.3
 	github.com/go-gl/mathgl v1.2.0
 	github.com/google/uuid v1.6.0
 	github.com/lmittmann/tint v1.2.0
@@ -53,7 +53,7 @@ require (
 
 replace (
 	github.com/sandertv/go-raknet => github.com/hashimthearab/go-raknet v1.15.1-0.20260625072737-109968c5e6ff
-	github.com/sandertv/gophertunnel => github.com/hashimthearab/gophertunnel v1.25.3-0.20260806044231-be6713da4dc0
+	github.com/sandertv/gophertunnel => github.com/hashimthearab/gophertunnel v1.25.3-0.20260812030328-18b1a3b9cb7b
 )
 
-replace github.com/df-mc/go-xsapi/v2 => github.com/HashimTheArab/go-xsapi/v2 v2.0.0-20260805041801-59085dc74ee0
+replace github.com/df-mc/go-xsapi/v2 => github.com/HashimTheArab/go-xsapi/v2 v2.0.0-20260812035252-bcb6f3204394

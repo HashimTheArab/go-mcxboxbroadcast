@@ -130,7 +130,11 @@ func (a *sessionNonceAnnouncer) publishConfig(status room.Status, custom []byte)
 }
 
 func (a *sessionNonceAnnouncer) publishRestrictions(status room.Status) (read, join string) {
-	read, join = sessionRestrictions(status.BroadcastSetting)
+	setting := status.BroadcastSetting
+	if !setting.Valid() {
+		setting = p2p.BroadcastSettingFriendsOfFriends
+	}
+	read, join = setting.ReadRestriction(), setting.JoinRestriction()
 	if a.PublishConfig.ReadRestriction != "" {
 		read = a.PublishConfig.ReadRestriction
 	}
@@ -138,17 +142,6 @@ func (a *sessionNonceAnnouncer) publishRestrictions(status room.Status) (read, j
 		join = a.PublishConfig.JoinRestriction
 	}
 	return read, join
-}
-
-func sessionRestrictions(setting p2p.BroadcastSetting) (read, join string) {
-	switch setting {
-	case p2p.BroadcastSettingFriendsOfFriends, p2p.BroadcastSettingFriendsOnly:
-		return mpsd.SessionRestrictionFollowed, mpsd.SessionRestrictionFollowed
-	case p2p.BroadcastSettingInviteOnly:
-		return mpsd.SessionRestrictionLocal, mpsd.SessionRestrictionFollowed
-	default:
-		return mpsd.SessionRestrictionFollowed, mpsd.SessionRestrictionFollowed
-	}
 }
 
 func (a *sessionNonceAnnouncer) handleSessionLocked() {
