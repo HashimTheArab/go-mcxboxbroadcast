@@ -12,6 +12,7 @@ import (
 	"time"
 
 	xblsocial "github.com/df-mc/go-xsapi/v2/social"
+	"github.com/df-mc/go-xsapi/v2/xal/xsts"
 )
 
 // Endpoint fixtures pinning the exact request URLs the social layer must hit
@@ -27,8 +28,8 @@ func followURL(xuid string) string {
 	return fmt.Sprintf("https://social.xboxlive.com/users/me/people/xuid(%s)", xuid)
 }
 
-func unfollowURL(xuid string) string {
-	return fmt.Sprintf("https://social.xboxlive.com/users/me/people/friends/v2/xuid(%s)?deleteRelationships=follows", xuid)
+func privacyBlockURL(xuid string) string {
+	return fmt.Sprintf("https://privacy.xboxlive.com/users/xuid(%s)/people/never", xuid)
 }
 
 func TestFriendClientFriendsMergesFollowersAndSocial(t *testing.T) {
@@ -123,30 +124,53 @@ func TestFriendClientFollowReturnsRetryAfterError(t *testing.T) {
 	}
 }
 
-func TestFriendClientUnfollowReturnsRetryAfterError(t *testing.T) {
+func TestFriendClientUnfollowReturnsBlockError(t *testing.T) {
 	client := FriendClient{
-		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			if req.Method != http.MethodDelete {
+		Social: xblsocial.New(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method != http.MethodPut {
 				t.Fatalf("unexpected method %s", req.Method)
 			}
-			if req.URL.String() != unfollowURL("123") {
+			if req.URL.String() != privacyBlockURL("caller") {
 				t.Fatalf("unexpected URL %s", req.URL)
 			}
 			resp := response(http.StatusTooManyRequests, "")
 			resp.Header.Set("Retry-After", "3")
+			resp.Request = req
 			return resp, nil
-		})},
+		})}, nil, xsts.UserInfo{XUID: "caller"}, nil),
 	}
 	err := client.Unfollow(context.Background(), "123")
 	if err == nil {
-		t.Fatal("expected retry-after error")
+		t.Fatal("expected block error")
 	}
-	var responseErr *xblsocial.ResponseError
-	if !errors.As(err, &responseErr) {
-		t.Fatalf("expected social response error, got %T: %v", err, err)
+	if !strings.Contains(err.Error(), "PUT "+privacyBlockURL("caller")) {
+		t.Fatalf("error = %v, want privacy endpoint", err)
 	}
-	if responseErr.RetryAfter != 3*time.Second {
-		t.Fatalf("retry delay = %s, want 3s", responseErr.RetryAfter)
+}
+
+func TestFriendClientUnfollowBlocksAndUnblocks(t *testing.T) {
+	var methods []string
+	client := FriendClient{
+		Social: xblsocial.New(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.String() != privacyBlockURL("caller") {
+				t.Fatalf("unexpected URL %s", req.URL)
+			}
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.TrimSpace(string(body)) != `{"Xuid":"123"}` {
+				t.Fatalf("request body = %s, want target XUID", body)
+			}
+			methods = append(methods, req.Method)
+			return response(http.StatusOK, ""), nil
+		})}, nil, xsts.UserInfo{XUID: "caller"}, nil),
+	}
+	if err := client.Unfollow(context.Background(), "123"); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(methods, ","); got != "PUT,DELETE" {
+		t.Fatalf("privacy methods = %s, want PUT,DELETE", got)
 	}
 }
 

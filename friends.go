@@ -150,9 +150,17 @@ func (c FriendClient) Follow(ctx context.Context, xuid string) error {
 	return c.social().Follow(ctx, xuid)
 }
 
-// Unfollow removes the authenticated account's follow relationship for xuid.
+// Unfollow removes xuid from the authenticated account's friend list.
+//
+// Xbox's relationship delete only removes the caller's outgoing follow. A
+// block removes the user from the friend list on both sides; immediately
+// unblocking preserves the removal without leaving the user blocked.
 func (c FriendClient) Unfollow(ctx context.Context, xuid string) error {
-	return c.social().Unfollow(ctx, xuid)
+	socialClient := c.social()
+	if err := socialClient.Block(ctx, xuid); err != nil {
+		return err
+	}
+	return socialClient.Unblock(ctx, xuid)
 }
 
 // ForceUnfollow removes the follow relationship the user identified by xuid
