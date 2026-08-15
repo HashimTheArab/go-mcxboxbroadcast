@@ -114,6 +114,10 @@ func TestFriendSyncerDebugLogsFriendSyncProgress(t *testing.T) {
 		`msg="friend sync scan"`,
 		`followers=2`,
 		`following=1`,
+		`followers_only=2`,
+		`following_only=1`,
+		`mutual=0`,
+		`neither=0`,
 		`msg="adding friends" count=2`,
 		`msg="added friend" xuid=1`,
 		`msg="added friend" xuid=2`,
@@ -125,6 +129,48 @@ func TestFriendSyncerDebugLogsFriendSyncProgress(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("debug log missing %q in:\n%s", want, output)
 		}
+	}
+}
+
+func TestFriendSyncerDebugLogsExpiryCandidates(t *testing.T) {
+	var log bytes.Buffer
+	history := &syncHistoryStore{
+		lastSeen: map[string]time.Time{
+			"stale":  time.Now().Add(-16 * 24 * time.Hour),
+			"recent": time.Now(),
+		},
+	}
+	client := &syncFriendClient{
+		people: []Person{
+			{XUID: "stale", Gamertag: "Stale", IsFollowingCaller: true, IsFollowedByCaller: true},
+			{XUID: "recent", Gamertag: "Recent", IsFollowingCaller: true, IsFollowedByCaller: true},
+		},
+	}
+	syncer := FriendSyncer{
+		Client:  client,
+		History: history,
+		Config: FriendSyncConfig{
+			AutoUnfollow:  true,
+			ExpiryEnabled: true,
+			ExpiryDays:    15,
+		},
+		Log: slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelDebug})),
+	}
+	if err := syncer.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	output := log.String()
+	for _, want := range []string{
+		`msg="friend sync expiry scan"`,
+		`mutual_expiry_candidates=1`,
+		`expired_friends=1`,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("debug log missing %q in:\n%s", want, output)
+		}
+	}
+	if client.removeCalls != 1 {
+		t.Fatalf("remove calls = %d, want 1", client.removeCalls)
 	}
 }
 
