@@ -150,9 +150,9 @@ func (c FriendClient) Follow(ctx context.Context, xuid string) error {
 	return c.social().Follow(ctx, xuid)
 }
 
-// Unfollow removes the authenticated account's follow relationship for xuid.
+// Unfollow removes the mutual follow relationship with xuid.
 func (c FriendClient) Unfollow(ctx context.Context, xuid string) error {
-	return c.social().Unfollow(ctx, xuid)
+	return c.social().RemoveMutualFollow(ctx, xuid)
 }
 
 // ForceUnfollow removes the follow relationship the user identified by xuid

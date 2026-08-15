@@ -28,7 +28,7 @@ func followURL(xuid string) string {
 }
 
 func unfollowURL(xuid string) string {
-	return fmt.Sprintf("https://social.xboxlive.com/users/me/people/friends/v2/xuid(%s)?deleteRelationships=follows", xuid)
+	return fmt.Sprintf("https://social.xboxlive.com/users/me/people/xuid(%s)", xuid)
 }
 
 func TestFriendClientFriendsMergesFollowersAndSocial(t *testing.T) {

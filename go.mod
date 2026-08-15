@@ -56,4 +56,4 @@ replace (
 	github.com/sandertv/gophertunnel => github.com/hashimthearab/gophertunnel v1.25.3-0.20260812030328-18b1a3b9cb7b
 )
 
-replace github.com/df-mc/go-xsapi/v2 => github.com/HashimTheArab/go-xsapi/v2 v2.0.0-20260812035252-bcb6f3204394
+replace github.com/df-mc/go-xsapi/v2 => github.com/HashimTheArab/go-xsapi/v2 v2.0.0-20260815130220-1dd83707307e
