@@ -1,5 +1,5 @@
-github.com/HashimTheArab/go-xsapi/v2 v2.0.0-20260815120618-a542f9a85884 h1:aAb6Qxcdcybij9TOKT29gG9F0iJCkky6egI7lnFZmWc=
-github.com/HashimTheArab/go-xsapi/v2 v2.0.0-20260815120618-a542f9a85884/go.mod h1:Gi/zQG2DFMJOMt4DIjuBuINTnU4YnZINe+RyFyza8oo=
+github.com/HashimTheArab/go-xsapi/v2 v2.0.0-20260815121336-afa10c629bb9 h1:1dahsFvQ4pt7SaXTVQGLEMjhq49yEADFdTbP7w4DEjI=
+github.com/HashimTheArab/go-xsapi/v2 v2.0.0-20260815121336-afa10c629bb9/go.mod h1:Gi/zQG2DFMJOMt4DIjuBuINTnU4YnZINe+RyFyza8oo=
 github.com/coder/websocket v1.8.14 h1:9L0p0iKiNOibykf283eHkKUHHrpG7f65OE3BhhO7v9g=
 github.com/coder/websocket v1.8.14/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/coreos/go-oidc/v3 v3.17.0 h1:hWBGaQfbi0iVviX4ibC7bk8OKT5qNr4klBaCHVNvehc=
