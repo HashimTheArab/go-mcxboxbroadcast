@@ -49,6 +49,7 @@ type Broadcaster struct {
 	sessionConnection          *room.Connection
 	subAnnouncers              []publishedSubAccount
 	subAnnouncersByID          map[string]room.Announcer
+	staleSubAnnouncers         []room.Announcer
 	announcerFactory           func(*Broadcaster) room.Announcer
 	subAccountAnnouncerFactory func(context.Context, SubAccountConfig, mpsd.SessionReference) (room.Announcer, error)
 	xblClient                  *xsapi.Client
@@ -268,11 +269,32 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	return nil
 }
 
+// enabledSubAccounts returns the first enabled configuration for each ID and
+// reports duplicate enabled IDs. All runtime consumers use this selection so
+// sessions, presence, friend sync, gallery, and recovery cannot disagree.
+func (b *Broadcaster) enabledSubAccounts() (accounts []*SubAccountConfig, duplicates []string) {
+	seen := make(map[string]struct{}, len(b.conf.SubAccounts))
+	for i := range b.conf.SubAccounts {
+		account := &b.conf.SubAccounts[i]
+		if !account.Enabled {
+			continue
+		}
+		if _, duplicate := seen[account.ID]; duplicate {
+			duplicates = append(duplicates, account.ID)
+			continue
+		}
+		seen[account.ID] = struct{}{}
+		accounts = append(accounts, account)
+	}
+	return accounts, duplicates
+}
+
 // subAccountFriendSyncActive reports whether any enabled sub-account runs a
 // friend syncer sharing the primary's history store.
 func (b *Broadcaster) subAccountFriendSyncActive() bool {
-	for _, account := range b.conf.SubAccounts {
-		if !account.Enabled || !subAccountHasXBLCredentials(account) {
+	accounts, _ := b.enabledSubAccounts()
+	for _, account := range accounts {
+		if !subAccountHasXBLCredentials(*account) {
 			continue
 		}
 		if account.FriendSync != nil || b.conf.FriendSync != nil {
@@ -286,8 +308,9 @@ func (b *Broadcaster) subAccountFriendSyncActive() bool {
 // people who friend a sub-account are followed back. Sub-accounts without an
 // explicit FriendSync configuration inherit the primary account's.
 func (b *Broadcaster) startSubAccountFriendSync() {
-	for _, account := range b.conf.SubAccounts {
-		if !account.Enabled || account.XBLClient == nil {
+	accounts, _ := b.enabledSubAccounts()
+	for _, account := range accounts {
+		if account.XBLClient == nil {
 			continue
 		}
 		conf := account.FriendSync
@@ -337,14 +360,12 @@ func (b *Broadcaster) presenceClients() []PresenceClient {
 		XUID:   b.primaryXUID(),
 		Client: authenticatedHTTPClient(b.conf.XBLClient, b.conf.HTTPClient),
 	}}
-	for _, account := range b.conf.SubAccounts {
-		if !account.Enabled {
+	accounts, _ := b.enabledSubAccounts()
+	for _, account := range accounts {
+		if !subAccountHasXBLCredentials(*account) {
 			continue
 		}
-		if !subAccountHasXBLCredentials(account) {
-			continue
-		}
-		xuid := accountXUID(account)
+		xuid := accountXUID(*account)
 		if xuid == "" {
 			continue
 		}
@@ -874,28 +895,22 @@ func (b *Broadcaster) newAnnouncer(ctx context.Context) (room.Announcer, error) 
 // A failing sub-account is logged and skipped so it cannot take down the
 // broadcaster, matching MCXboxBroadcast.
 func (b *Broadcaster) startSubAccounts(ctx context.Context, status room.Status) error {
-	seenIDs := make(map[string]struct{}, len(b.conf.SubAccounts))
-	for i := range b.conf.SubAccounts {
-		account := &b.conf.SubAccounts[i]
+	accounts, duplicates := b.enabledSubAccounts()
+	for _, id := range duplicates {
+		b.log.Error("sub-account skipped because id is duplicated", "sub_account", id)
+		b.notify(ctx, "Sub-account "+id+" was skipped because its id is duplicated.")
+	}
+	for _, account := range accounts {
 		b.debug("checking sub-account",
 			"sub_account", account.ID,
 			"enabled", account.Enabled,
 			"has_xbox_credentials", subAccountHasXBLCredentials(*account),
 			"xuid", accountXUID(*account),
 		)
-		if !account.Enabled {
-			continue
-		}
 		if !subAccountHasXBLCredentials(*account) {
 			b.log.Warn("sub-account skipped because xbox live credentials are missing", "sub_account", account.ID)
 			continue
 		}
-		if _, duplicate := seenIDs[account.ID]; duplicate {
-			b.log.Error("sub-account skipped because id is duplicated", "sub_account", account.ID)
-			b.notify(ctx, "Sub-account "+account.ID+" was skipped because its id is duplicated.")
-			continue
-		}
-		seenIDs[account.ID] = struct{}{}
 		if err := b.startSubAccountBounded(ctx, account, status); err != nil {
 			// A canceled context means the broadcaster is shutting down, not
 			// that this or the remaining sub-accounts genuinely failed.
@@ -1080,9 +1095,9 @@ func (b *Broadcaster) uploadGallery(ctx context.Context) {
 	}
 	cancel()
 
-	for i := range b.conf.SubAccounts {
-		account := &b.conf.SubAccounts[i]
-		if !account.Enabled || !subAccountHasXBLCredentials(*account) {
+	accounts, _ := b.enabledSubAccounts()
+	for _, account := range accounts {
+		if !subAccountHasXBLCredentials(*account) {
 			continue
 		}
 		xuid := accountXUID(*account)
@@ -1527,6 +1542,32 @@ const (
 	sessionUpdateFailureLimit = 3
 )
 
+// subAccountUpdateError reports that the primary session updated successfully
+// but one or more sub-account sessions could not be recovered.
+type subAccountUpdateError struct {
+	err error
+}
+
+// Error returns the underlying sub-account recovery failures.
+func (e *subAccountUpdateError) Error() string {
+	return e.err.Error()
+}
+
+// Unwrap exposes the underlying sub-account recovery failures.
+func (e *subAccountUpdateError) Unwrap() error {
+	return e.err
+}
+
+// countsAsPrimaryUpdateFailure reports whether err should contribute to the
+// failure count that recreates the primary session and shared signaling stack.
+func countsAsPrimaryUpdateFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	var subErr *subAccountUpdateError
+	return !errors.As(err, &subErr)
+}
+
 // updateLoop periodically refreshes the Xbox session metadata, checking
 // session health before each update like Java's checkConnection().
 func (b *Broadcaster) updateLoop() {
@@ -1544,6 +1585,9 @@ func (b *Broadcaster) updateLoop() {
 			err := b.Update(ctx)
 			if err == nil {
 				consecutiveFailures = 0
+			} else if !errors.Is(err, context.Canceled) && !countsAsPrimaryUpdateFailure(err) {
+				consecutiveFailures = 0
+				b.log.Error("update sub-account sessions", "err", err)
 			} else if !errors.Is(err, context.Canceled) {
 				consecutiveFailures++
 				b.log.Error("update session", "err", err)
@@ -1581,7 +1625,9 @@ func (b *Broadcaster) checkSessionHealth() bool {
 	if err := b.recoverSessionHealthIssue(ctx, issue); err != nil {
 		b.log.Error("recover sub-account session health", "sub_account", issue.subAccountID, "reason", issue.reason, "err", err)
 		b.notify(ctx, "Sub-account "+issue.subAccountID+" session recovery failed: "+err.Error())
-		return true
+		// Let Update refresh the healthy primary and sub-account sessions. Its
+		// sub-account-only error does not count toward a full-stack restart.
+		return false
 	}
 	b.info("sub-account session recovered", "sub_account", issue.subAccountID, "reason", issue.reason)
 	return true
@@ -1908,8 +1954,9 @@ func (b *Broadcaster) Update(ctx context.Context) error {
 		}
 		b.warn("replaced sub-account session after update failure", "sub_account", failure.id, "cause", failure.err)
 	}
+	b.cleanupStaleSubAccountSessions()
 	if recoveryErr != nil {
-		return recoveryErr
+		return &subAccountUpdateError{err: recoveryErr}
 	}
 	// Matching MCXboxBroadcast, suppressSessionUpdateMessage only demotes the
 	// periodic success log to debug level.
@@ -1937,9 +1984,10 @@ func (b *Broadcaster) replaceSubAccountSession(ctx context.Context, id string, s
 		return errors.New("stale sub-account session not found")
 	}
 	var account *SubAccountConfig
-	for i := range b.conf.SubAccounts {
-		if b.conf.SubAccounts[i].ID == id && b.conf.SubAccounts[i].Enabled {
-			account = &b.conf.SubAccounts[i]
+	accounts, _ := b.enabledSubAccounts()
+	for _, candidate := range accounts {
+		if candidate.ID == id {
+			account = candidate
 			break
 		}
 	}
@@ -1952,19 +2000,47 @@ func (b *Broadcaster) replaceSubAccountSession(ctx context.Context, id string, s
 	b.subAnnouncers = append(b.subAnnouncers[:oldIndex], b.subAnnouncers[oldIndex+1:]...)
 	if err := old.Close(); err != nil {
 		b.warn("close stale sub-account session", "sub_account", id, "err", err)
+		b.staleSubAnnouncers = append(b.staleSubAnnouncers, old)
 	}
 	return nil
+}
+
+// cleanupStaleSubAccountSessions retries closing replaced sessions whose first
+// close attempt failed. The caller must hold b.mu.
+func (b *Broadcaster) cleanupStaleSubAccountSessions() {
+	if len(b.staleSubAnnouncers) == 0 {
+		return
+	}
+	remaining := b.staleSubAnnouncers[:0]
+	for _, announcer := range b.staleSubAnnouncers {
+		if err := announcer.Close(); err != nil {
+			b.warn("retry close stale sub-account session", "err", err)
+			remaining = append(remaining, announcer)
+		}
+	}
+	b.staleSubAnnouncers = remaining
 }
 
 // cleanupPublishedSessions closes independent sub-account sessions and
 // optionally the primary announcer.
 func (b *Broadcaster) cleanupPublishedSessions(closeAnnouncer bool) error {
 	var err error
+	var failed []room.Announcer
 	for _, sub := range b.subAnnouncers {
-		err = errors.Join(err, sub.announcer.Close())
+		if closeErr := sub.announcer.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+			failed = append(failed, sub.announcer)
+		}
+	}
+	for _, stale := range b.staleSubAnnouncers {
+		if closeErr := stale.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+			failed = append(failed, stale)
+		}
 	}
 	b.subAnnouncers = nil
 	b.subAnnouncersByID = nil
+	b.staleSubAnnouncers = failed
 	if closeAnnouncer && b.announcer != nil {
 		err = errors.Join(err, b.announcer.Close())
 	}

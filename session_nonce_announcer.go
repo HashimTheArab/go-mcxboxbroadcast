@@ -286,7 +286,7 @@ type sessionConnection struct {
 	HostPort       uint16          `json:"HostPort"`
 	NetherNetID    json.RawMessage `json:"NetherNetId"`
 	RakNetGUID     string          `json:"RakNetGUID,omitempty"`
-	PmsgID         uuid.UUID       `json:"PmsgId,omitempty"`
+	PmsgID         uuid.UUID       `json:"PmsgId,omitzero"`
 }
 
 func sessionConnections(connections []room.Connection) []sessionConnection {

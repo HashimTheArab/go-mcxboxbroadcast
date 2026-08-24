@@ -89,6 +89,27 @@ func TestMarshalStatusWithNoncesKeepsOpaqueNetherNetIDAsString(t *testing.T) {
 	}
 }
 
+func TestMarshalStatusWithNoncesOmitsPmsgIDForWebSocket(t *testing.T) {
+	custom, err := marshalStatusWithNonces(room.Status{
+		SupportedConnections: []room.Connection{{
+			ConnectionType: p2p.ConnectionTypeSignalingOverWebSocket,
+			NetherNetID:    p2p.NetherNetID("123456789"),
+		}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		SupportedConnections []map[string]any `json:"SupportedConnections"`
+	}
+	if err := json.Unmarshal(custom, &got); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got.SupportedConnections[0]["PmsgId"]; ok {
+		t.Fatalf("websocket connection unexpectedly contains PmsgId: %s", custom)
+	}
+}
+
 func TestMarshalStatusWithNoncesWritesEmptyObject(t *testing.T) {
 	custom, err := marshalStatusWithNonces(room.Status{WorldName: "World"}, nil)
 	if err != nil {

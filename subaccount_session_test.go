@@ -176,6 +176,56 @@ func TestBroadcasterUpdateReplacesFailedSubAccountSession(t *testing.T) {
 	if got := replacement.Status(); got.OwnerID != "sub" || got.LevelID != accountLevelID("sub") {
 		t.Fatalf("replacement published wrong ownership: %#v", got)
 	}
+	if len(b.staleSubAnnouncers) != 1 {
+		t.Fatalf("stale cleanup queue = %#v, want failed-to-close announcer", b.staleSubAnnouncers)
+	}
+	stale.closeErr = nil
+	b.cleanupStaleSubAccountSessions()
+	if len(b.staleSubAnnouncers) != 0 {
+		t.Fatalf("stale cleanup queue = %#v, want empty after retry", b.staleSubAnnouncers)
+	}
+}
+
+func TestBroadcasterSubAccountRecoveryFailureDoesNotCountAsPrimaryFailure(t *testing.T) {
+	primary := &fakeAnnouncer{}
+	stale := &fakeAnnouncer{announceErr: errors.New("sub update failed")}
+	b := &Broadcaster{
+		log:       testBroadcasterLogger(),
+		announcer: primary,
+		subAnnouncers: []publishedSubAccount{{
+			id:        "sub1",
+			xuid:      "sub",
+			announcer: stale,
+		}},
+		subAnnouncersByID: map[string]room.Announcer{"sub1": stale},
+		started:           true,
+		conf: Config{
+			Server: ServerInfo{Host: "play.example.net", Port: 19132},
+			XUID:   "primary",
+			Status: Status{HostName: "Host", WorldName: "World"},
+			SubAccounts: []SubAccountConfig{{
+				ID:        "sub1",
+				Enabled:   true,
+				XBLClient: &xsapi.Client{},
+				XUID:      "sub",
+			}},
+		},
+		subAccountAnnouncerFactory: func(context.Context, SubAccountConfig, mpsd.SessionReference) (room.Announcer, error) {
+			return nil, errors.New("sub credentials revoked")
+		},
+	}
+
+	err := b.Update(context.Background())
+	var subErr *subAccountUpdateError
+	if !errors.As(err, &subErr) {
+		t.Fatalf("Update() error = %v, want subAccountUpdateError", err)
+	}
+	if countsAsPrimaryUpdateFailure(err) {
+		t.Fatalf("sub-account recovery error counted as primary failure: %v", err)
+	}
+	if got := primary.Status(); got.OwnerID != "primary" {
+		t.Fatalf("primary session was not updated before sub-account recovery failed: %#v", got)
+	}
 }
 
 func TestBroadcasterRecoversSubAccountHealthWithoutClosingPrimary(t *testing.T) {
@@ -287,5 +337,31 @@ func TestBroadcasterSkipsDuplicateIDsBeforePublishing(t *testing.T) {
 	}
 	if second.Closed() {
 		t.Fatal("duplicate-ID session was published and retained")
+	}
+}
+
+func TestBroadcasterRejectsDuplicateIDBeforeCredentialFiltering(t *testing.T) {
+	factoryCalls := 0
+	b := &Broadcaster{
+		log: testBroadcasterLogger(),
+		conf: Config{
+			XBLClient: &xsapi.Client{},
+			XUID:      "same",
+			SubAccounts: []SubAccountConfig{
+				{ID: "duplicate", Enabled: true},
+				{ID: "duplicate", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "same"},
+			},
+		},
+		subAccountAnnouncerFactory: func(context.Context, SubAccountConfig, mpsd.SessionReference) (room.Announcer, error) {
+			factoryCalls++
+			return &fakeAnnouncer{}, nil
+		},
+	}
+
+	if err := b.startSubAccounts(context.Background(), room.Status{}); err != nil {
+		t.Fatal(err)
+	}
+	if factoryCalls != 0 {
+		t.Fatalf("announcer factory calls = %d, want 0 for ambiguous duplicate ID", factoryCalls)
 	}
 }
