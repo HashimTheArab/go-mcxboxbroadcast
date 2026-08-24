@@ -395,14 +395,6 @@ func (b *Broadcaster) minecraftListenConfig(status room.Status) minecraft.Listen
 	conf := b.conf.ListenConfig
 	conf.ErrorLog = b.log
 	conf.StatusProvider = b.minecraftStatusProvider(status)
-	if conf.AcceptedProtocols == nil {
-		// The broadcaster only redirects, so it can serve every version since
-		// 1.26.40 regardless of which one the session document advertises.
-		conf.AcceptedProtocols = []minecraft.Protocol{
-			minecraft.Protocol12640(),
-			minecraft.Protocol12644(),
-		}
-	}
 	conf.CompressionThreshold = -1
 	conf.ForceDisableVibrantVisuals = true
 	conf.ResourcePackWorldTemplateUUID = uuid.Nil
