@@ -873,8 +873,8 @@ func (b *Broadcaster) newAnnouncer(ctx context.Context) (room.Announcer, error) 
 func (b *Broadcaster) startSubAccounts(ctx context.Context, status room.Status) error {
 	accounts, duplicates := b.enabledSubAccounts()
 	for _, id := range duplicates {
-		b.log.Error("sub-account skipped because id is duplicated", "sub_account", id)
-		b.notify(ctx, "Sub-account "+id+" was skipped because its id is duplicated.")
+		b.log.Error("duplicate sub-account id; only the first configuration is used", "sub_account", id)
+		b.notify(ctx, "Duplicate sub-account id "+id+": only the first configuration is used.")
 	}
 	for _, account := range accounts {
 		b.debug("checking sub-account",
