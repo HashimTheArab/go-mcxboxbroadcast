@@ -367,6 +367,15 @@ func TestMinecraftListenConfigKeepsFullLoginFlow(t *testing.T) {
 	if conf.AuthenticationDisabled {
 		t.Fatal("client authentication should be enabled by default so recorded XUIDs are verified")
 	}
+	if len(conf.AcceptedProtocols) != 2 {
+		t.Fatalf("accepted legacy protocols = %d, want 2", len(conf.AcceptedProtocols))
+	}
+	wantVersions := []string{"1.26.40", "1.26.44"}
+	for i, want := range wantVersions {
+		if got := conf.AcceptedProtocols[i].Ver(); got != want {
+			t.Fatalf("accepted protocol %d version = %q, want %q", i, got, want)
+		}
+	}
 	if conf.CompressionThreshold != -1 {
 		t.Fatalf("CompressionThreshold = %d, want -1 for Java-compatible threshold 0", conf.CompressionThreshold)
 	}
