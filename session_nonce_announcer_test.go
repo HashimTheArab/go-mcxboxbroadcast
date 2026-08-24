@@ -9,13 +9,11 @@ import (
 	"testing"
 
 	"github.com/df-mc/go-xsapi/v2/mpsd"
-	"github.com/google/uuid"
 	"github.com/sandertv/gophertunnel/minecraft/p2p"
 	"github.com/sandertv/gophertunnel/minecraft/room"
 )
 
 func TestMarshalStatusWithNoncesIncludesJavaSessionFields(t *testing.T) {
-	pmsgID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
 	custom, err := marshalStatusWithNonces(room.Status{
 		HostName:       "Host",
 		OwnerID:        "100",
@@ -27,9 +25,8 @@ func TestMarshalStatusWithNoncesIncludesJavaSessionFields(t *testing.T) {
 		LevelID:        "level",
 		TransportLayer: p2p.TransportLayerNetherNet,
 		SupportedConnections: []room.Connection{{
-			ConnectionType: p2p.ConnectionTypeSignalingOverJSONRPC,
+			ConnectionType: p2p.ConnectionTypeSignalingOverWebSocket,
 			NetherNetID:    p2p.NetherNetID("123456789"),
-			PmsgID:         pmsgID,
 		}},
 	}, map[string]string{"200": "0102030405060708"})
 	if err != nil {
@@ -52,11 +49,11 @@ func TestMarshalStatusWithNoncesIncludesJavaSessionFields(t *testing.T) {
 	}
 	connections := got["SupportedConnections"].([]any)
 	connection := connections[0].(map[string]any)
-	if connection["ConnectionType"] != float64(p2p.ConnectionTypeSignalingOverJSONRPC) {
+	if connection["ConnectionType"] != float64(p2p.ConnectionTypeSignalingOverWebSocket) {
 		t.Fatalf("unexpected connection type: %#v", connection)
 	}
-	if connection["PmsgId"] != pmsgID.String() {
-		t.Fatalf("unexpected pmsg id: %#v", connection)
+	if _, ok := connection["PmsgId"]; ok {
+		t.Fatalf("websocket connection unexpectedly contains PmsgId: %#v", connection)
 	}
 	// Java serializes NetherNetId as a number and always sends isHardcore.
 	if connection["NetherNetId"] != float64(123456789) {
@@ -86,27 +83,6 @@ func TestMarshalStatusWithNoncesKeepsOpaqueNetherNetIDAsString(t *testing.T) {
 	}
 	if got.SupportedConnections[0]["NetherNetId"] != "opaque-id" {
 		t.Fatalf("opaque NetherNetId should stay a string: %s", custom)
-	}
-}
-
-func TestMarshalStatusWithNoncesOmitsPmsgIDForWebSocket(t *testing.T) {
-	custom, err := marshalStatusWithNonces(room.Status{
-		SupportedConnections: []room.Connection{{
-			ConnectionType: p2p.ConnectionTypeSignalingOverWebSocket,
-			NetherNetID:    p2p.NetherNetID("123456789"),
-		}},
-	}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var got struct {
-		SupportedConnections []map[string]any `json:"SupportedConnections"`
-	}
-	if err := json.Unmarshal(custom, &got); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := got.SupportedConnections[0]["PmsgId"]; ok {
-		t.Fatalf("websocket connection unexpectedly contains PmsgId: %s", custom)
 	}
 }
 

@@ -90,10 +90,13 @@ func TestPterodactylArtifacts(t *testing.T) {
 			t.Fatalf("config.files does not contain %q", want)
 		}
 	}
-	for _, want := range []string{"signalingMode: websocket", "icePortRange:", "${ICE_PORT_MIN}", "${ICE_PORT_MAX}"} {
+	for _, want := range []string{"icePortRange:", "${ICE_PORT_MIN}", "${ICE_PORT_MAX}"} {
 		if !strings.Contains(egg.Scripts.Installation.Script, want) {
 			t.Fatalf("installation script does not contain %q", want)
 		}
+	}
+	if strings.Contains(egg.Scripts.Installation.Script, "signalingMode:") {
+		t.Fatal("installation script should not expose a signaling mode")
 	}
 
 	dockerfile, err := os.ReadFile("Dockerfile")

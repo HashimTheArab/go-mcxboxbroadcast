@@ -287,7 +287,7 @@ func TestXBLAnnouncerUnwrapsDiagnosticsWrappers(t *testing.T) {
 	wrapped := signalingConnectionAnnouncer{
 		Announcer: loggingAnnouncer{Announcer: inner},
 		connection: room.Connection{
-			ConnectionType: p2p.ConnectionTypeSignalingOverJSONRPC,
+			ConnectionType: p2p.ConnectionTypeSignalingOverWebSocket,
 		},
 	}
 	got, ok := xblAnnouncer(wrapped)
@@ -313,20 +313,9 @@ func TestBroadcasterInviteRequiresActiveBroadcaster(t *testing.T) {
 	}
 }
 
-func TestBroadcasterDefaultsToWebSocketSignaling(t *testing.T) {
-	b := &Broadcaster{}
-	mode, err := b.signalingMode()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if mode != SignalingModeWebSocket {
-		t.Fatalf("signaling mode = %q, want websocket", mode)
-	}
-}
-
 func TestBroadcasterBuildsWebSocketSignalingConnection(t *testing.T) {
-	b := &Broadcaster{conf: Config{SignalingMode: SignalingModeWebSocket}}
-	connection, err := b.signalingConnection(context.Background(), &fakeSignaling{networkID: "123456789"})
+	b := &Broadcaster{}
+	connection, err := b.signalingConnection(&fakeSignaling{networkID: "123456789"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -461,10 +450,12 @@ func TestBroadcasterSignalingFactoryIsUsedOnceForSharedSignaling(t *testing.T) {
 		conf: Config{
 			Server:               ServerInfo{Host: "127.0.0.1", Port: 19132},
 			XUID:                 "123",
-			SignalingMode:        SignalingModeJSONRPC,
 			MinecraftTokenSource: minecraftTokenSourceWithPMID{pmid: uuid.New()},
-			Status:               Status{HostName: "Host", WorldName: "World"},
-			UpdateInterval:       30 * time.Second,
+			ListenConfig: minecraft.ListenConfig{
+				AuthenticationDisabled: true,
+			},
+			Status:         Status{HostName: "Host", WorldName: "World"},
+			UpdateInterval: 30 * time.Second,
 			SignalingFactory: func(context.Context, Config) (nethernet.Signaling, error) {
 				calls++
 				return sig, nil
