@@ -72,6 +72,8 @@ session:
   sessionInfo:
     hostName: Example Host
     worldName: Example World
+    protocol: 2168
+    version: 1.26.44
     players: 4
     maxPlayers: 32
     ip: ignored.example.net
@@ -126,6 +128,16 @@ accounts:
 	}
 	if cfg.Session.SessionInfo.HostName != "Example Host" || cfg.Session.SessionInfo.MaxPlayers != 32 {
 		t.Fatalf("canonical sessionInfo keys were not loaded: %#v", cfg.Session.SessionInfo)
+	}
+	if cfg.Session.SessionInfo.Protocol != 2168 || cfg.Session.SessionInfo.Version != "1.26.44" {
+		t.Fatalf("canonical advertised protocol/version were not loaded: %#v", cfg.Session.SessionInfo)
+	}
+	runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{XBLTokenSource: staticTokenSource{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.Status.Protocol != 2168 || runtime.Status.Version != "1.26.44" {
+		t.Fatalf("runtime advertised protocol/version = %d/%q, want 2168/1.26.44", runtime.Status.Protocol, runtime.Status.Version)
 	}
 	if cfg.FriendSync.UpdateInterval != 75 || cfg.FriendSync.AutoFollow || !cfg.FriendSync.AutoUnfollow || cfg.FriendSync.InitialInvite {
 		t.Fatalf("canonical friendSync keys were not loaded: %#v", cfg.FriendSync)

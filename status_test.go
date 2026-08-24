@@ -80,6 +80,29 @@ func TestStatusVersionOverride(t *testing.T) {
 	}
 }
 
+func TestStatusProtocolAndVersionOverride(t *testing.T) {
+	b, err := New(Config{
+		XBLTokenSource: staticTokenSource{},
+		XUID:           "123",
+		Server:         ServerInfo{Host: "127.0.0.1", Port: 19132},
+		Status: Status{
+			HostName: "Host",
+			Protocol: 2168,
+			Version:  "1.26.44",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := b.status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Protocol != 2168 || status.Version != "1.26.44" {
+		t.Fatalf("advertised protocol/version = %d/%q, want 2168/1.26.44", status.Protocol, status.Version)
+	}
+}
+
 func TestStatusLevelIDUniquePerAccount(t *testing.T) {
 	levelID := func(xuid string) string {
 		b, err := New(Config{

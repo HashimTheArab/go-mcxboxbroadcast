@@ -68,7 +68,7 @@ func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 		// Always joinable_by_friends, matching MCXboxBroadcast; any other
 		// value makes clients hide the world from the friend list.
 		Joinability:             p2p.JoinabilityFriends,
-		Protocol:                protocol.CurrentProtocol,
+		Protocol:                st.Protocol,
 		Version:                 defaultString(st.Version, protocol.CurrentVersion),
 		TransportLayer:          p2p.TransportLayerNetherNet,
 		LanGame:                 false,

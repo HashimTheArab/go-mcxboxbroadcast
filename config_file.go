@@ -63,8 +63,11 @@ type ICEPortRangeFile struct {
 }
 
 type SessionInfoFile struct {
-	HostName   string `yaml:"hostName" toml:"hostName"`
-	WorldName  string `yaml:"worldName" toml:"worldName"`
+	HostName  string `yaml:"hostName" toml:"hostName"`
+	WorldName string `yaml:"worldName" toml:"worldName"`
+	// Protocol overrides the network protocol advertised in the session document.
+	// Zero uses the protocol library's current protocol.
+	Protocol   int32  `yaml:"protocol,omitempty" toml:"protocol,omitempty"`
 	Players    int    `yaml:"players" toml:"players"`
 	MaxPlayers int    `yaml:"maxPlayers" toml:"maxPlayers"`
 	IP         string `yaml:"ip" toml:"ip"`
@@ -296,6 +299,7 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 			HostName:         c.Session.SessionInfo.HostName,
 			WorldName:        c.Session.SessionInfo.WorldName,
 			WorldType:        c.Session.WorldType,
+			Protocol:         c.Session.SessionInfo.Protocol,
 			Version:          c.Session.SessionInfo.Version,
 			Players:          c.Session.SessionInfo.Players,
 			MaxPlayers:       c.Session.SessionInfo.MaxPlayers,
