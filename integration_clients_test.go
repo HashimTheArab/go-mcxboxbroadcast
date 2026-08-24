@@ -754,6 +754,7 @@ func (f fakeNotifier) Notify(ctx context.Context, message string) error {
 type fakeAnnouncer struct {
 	mu          sync.Mutex
 	announceErr error
+	closeErr    error
 	closed      bool
 	status      room.Status
 }
@@ -769,7 +770,7 @@ func (f *fakeAnnouncer) Close() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.closed = true
-	return nil
+	return f.closeErr
 }
 
 func (f *fakeAnnouncer) Status() room.Status {

@@ -118,7 +118,10 @@ func TestBroadcasterUpdateRefreshesSubAccountSession(t *testing.T) {
 
 func TestBroadcasterUpdateReplacesFailedSubAccountSession(t *testing.T) {
 	primary := &fakeAnnouncer{}
-	stale := &fakeAnnouncer{announceErr: errors.New("sub update failed")}
+	stale := &fakeAnnouncer{
+		announceErr: errors.New("sub update failed"),
+		closeErr:    errors.New("stale close failed"),
+	}
 	replacement := &fakeAnnouncer{}
 	client := &http.Client{Transport: broadcasterRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if req.URL.Host != "peoplehub.xboxlive.com" {
@@ -172,6 +175,56 @@ func TestBroadcasterUpdateReplacesFailedSubAccountSession(t *testing.T) {
 	}
 	if got := replacement.Status(); got.OwnerID != "sub" || got.LevelID != accountLevelID("sub") {
 		t.Fatalf("replacement published wrong ownership: %#v", got)
+	}
+}
+
+func TestBroadcasterRecoversSubAccountHealthWithoutClosingPrimary(t *testing.T) {
+	primary := &fakeAnnouncer{}
+	stale := &fakeAnnouncer{}
+	replacement := &fakeAnnouncer{}
+	client := &http.Client{Transport: broadcasterRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host != "peoplehub.xboxlive.com" {
+			t.Fatalf("unexpected social request: %s %s", req.Method, req.URL)
+		}
+		return broadcasterResponse(http.StatusOK, `{"people":[{"xuid":"primary","isFollowingCaller":true,"isFollowedByCaller":true}]}`), nil
+	})}
+	b := &Broadcaster{
+		log:       testBroadcasterLogger(),
+		announcer: primary,
+		subAnnouncers: []publishedSubAccount{{
+			id:        "sub1",
+			xuid:      "sub",
+			announcer: stale,
+		}},
+		subAnnouncersByID: map[string]room.Announcer{"sub1": stale},
+		conf: Config{
+			XBLClient:  &xsapi.Client{},
+			XUID:       "primary",
+			HTTPClient: client,
+			SubAccounts: []SubAccountConfig{{
+				ID:        "sub1",
+				Enabled:   true,
+				XBLClient: &xsapi.Client{},
+				XUID:      "sub",
+			}},
+		},
+		subAccountAnnouncerFactory: func(context.Context, SubAccountConfig, mpsd.SessionReference) (room.Announcer, error) {
+			return replacement, nil
+		},
+	}
+
+	issue := sessionHealthIssue{reason: "sub-account session lost", subAccountID: "sub1"}
+	if err := b.recoverSessionHealthIssue(context.Background(), issue); err != nil {
+		t.Fatal(err)
+	}
+	if primary.Closed() {
+		t.Fatal("targeted sub-account recovery closed the primary session")
+	}
+	if !stale.Closed() {
+		t.Fatal("targeted sub-account recovery did not close the stale session")
+	}
+	if len(b.subAnnouncers) != 1 {
+		t.Fatalf("sub-account announcers = %#v, want one replacement", b.subAnnouncers)
 	}
 }
 

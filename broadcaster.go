@@ -909,7 +909,6 @@ func (b *Broadcaster) startSubAccounts(ctx context.Context, status room.Status) 
 	return nil
 }
 
-// startSubAccount prepares one sub-account and publishes its own session.
 // startSubAccountBounded runs startSubAccount under the per-account timeout.
 // The context only scopes the publish requests; the sub-account's RTA
 // connection and session outlive it.
@@ -923,6 +922,7 @@ func (b *Broadcaster) startSubAccountBounded(ctx context.Context, account *SubAc
 	return b.startSubAccount(ctx, account, status)
 }
 
+// startSubAccount prepares one sub-account and publishes its own session.
 func (b *Broadcaster) startSubAccount(ctx context.Context, account *SubAccountConfig, status room.Status) error {
 	if _, err := b.subAccountXBLClient(ctx, account); err != nil {
 		return fmt.Errorf("prepare xbox live client: %w", err)
@@ -1560,37 +1560,68 @@ func (b *Broadcaster) updateLoop() {
 	}
 }
 
-// checkSessionHealth recreates the session when it is dead or nearly full and
-// reports whether a recreation was attempted.
+type sessionHealthIssue struct {
+	reason       string
+	subAccountID string
+}
+
+// checkSessionHealth recovers a session when it is dead or nearly full and
+// reports whether recovery was attempted.
 func (b *Broadcaster) checkSessionHealth() bool {
-	reason := b.sessionUnhealthyReason()
-	if reason == "" {
+	issue := b.sessionHealthIssue()
+	if issue.reason == "" {
 		return false
 	}
-	b.recreateAfterFailure(reason)
+	if issue.subAccountID == "" {
+		b.recreateAfterFailure(issue.reason)
+		return true
+	}
+	ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
+	defer cancel()
+	if err := b.recoverSessionHealthIssue(ctx, issue); err != nil {
+		b.log.Error("recover sub-account session health", "sub_account", issue.subAccountID, "reason", issue.reason, "err", err)
+		b.notify(ctx, "Sub-account "+issue.subAccountID+" session recovery failed: "+err.Error())
+		return true
+	}
+	b.info("sub-account session recovered", "sub_account", issue.subAccountID, "reason", issue.reason)
 	return true
 }
 
-// sessionUnhealthyReason reports why the published session needs recreation,
-// or an empty string when it is healthy.
-func (b *Broadcaster) sessionUnhealthyReason() string {
+// recoverSessionHealthIssue replaces the unhealthy sub-account session without
+// touching the primary session or shared signaling connection.
+func (b *Broadcaster) recoverSessionHealthIssue(ctx context.Context, issue sessionHealthIssue) error {
+	if issue.subAccountID == "" {
+		return errors.New("sub-account id is empty")
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	status, err := b.status(ctx)
+	if err != nil {
+		return fmt.Errorf("resolve session status: %w", err)
+	}
+	return b.replaceSubAccountSession(ctx, issue.subAccountID, status)
+}
+
+// sessionHealthIssue reports which published session needs recovery, or an
+// empty issue when every session is healthy.
+func (b *Broadcaster) sessionHealthIssue() sessionHealthIssue {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	announcer, ok := xblAnnouncer(b.announcer)
 	if !ok {
-		return ""
+		return sessionHealthIssue{}
 	}
 	announcer.Lock()
 	session := announcer.Session
 	announcer.Unlock()
 	if session == nil {
-		return ""
+		return sessionHealthIssue{}
 	}
 	if session.Context().Err() != nil {
-		return "mpsd session lost"
+		return sessionHealthIssue{reason: "mpsd session lost"}
 	}
 	if count := sessionMemberCount(session); count >= sessionMemberRestartThreshold {
-		return fmt.Sprintf("session has %d/30 members", count)
+		return sessionHealthIssue{reason: fmt.Sprintf("session has %d/30 members", count)}
 	}
 	for _, sub := range b.subAnnouncers {
 		xbl, ok := xblAnnouncer(sub.announcer)
@@ -1601,15 +1632,18 @@ func (b *Broadcaster) sessionUnhealthyReason() string {
 		session := xbl.Session
 		xbl.Unlock()
 		if session != nil && session.Context().Err() != nil {
-			return "sub-account session lost"
+			return sessionHealthIssue{reason: "sub-account session lost", subAccountID: sub.id}
 		}
 		if session != nil {
 			if count := sessionMemberCount(session); count >= sessionMemberRestartThreshold {
-				return fmt.Sprintf("sub-account %s session has %d/30 members", sub.id, count)
+				return sessionHealthIssue{
+					reason:       fmt.Sprintf("sub-account session has %d/30 members", count),
+					subAccountID: sub.id,
+				}
 			}
 		}
 	}
-	return ""
+	return sessionHealthIssue{}
 }
 
 // sessionMemberCount counts the members of an MPSD session.
@@ -1917,7 +1951,7 @@ func (b *Broadcaster) replaceSubAccountSession(ctx context.Context, id string, s
 	}
 	b.subAnnouncers = append(b.subAnnouncers[:oldIndex], b.subAnnouncers[oldIndex+1:]...)
 	if err := old.Close(); err != nil {
-		return fmt.Errorf("close stale session: %w", err)
+		b.warn("close stale sub-account session", "sub_account", id, "err", err)
 	}
 	return nil
 }
