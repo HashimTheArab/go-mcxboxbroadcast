@@ -52,8 +52,8 @@ type Config struct {
 	FriendSync *FriendSyncConfig
 	// FriendHistory records player activity for friend expiry.
 	FriendHistory HistoryStore
-	// SubAccounts contains additional accounts that join/publish the same MPSD
-	// session to extend friend-list visibility.
+	// SubAccounts contains additional accounts that publish independently owned
+	// MPSD sessions for the same NetherNet listener.
 	SubAccounts []SubAccountConfig
 
 	// Signaling is the NetherNet signaling connection used to accept clients.
@@ -61,9 +61,8 @@ type Config struct {
 	Signaling nethernet.Signaling
 	// SignalingFactory creates the NetherNet signaling connection.
 	SignalingFactory SignalingFactory
-	// SignalingMode controls the default NetherNet signaling transport. Empty
-	// uses JSON-RPC messaging for normal Live-token based signaling and
-	// preserves websocket signaling for injected Signaling/SignalingFactory.
+	// SignalingMode controls the NetherNet signaling transport. Empty uses
+	// websocket signaling so published sessions do not depend on PlayerMessaging.
 	SignalingMode SignalingMode
 
 	// ListenConfig customizes the gophertunnel listener.

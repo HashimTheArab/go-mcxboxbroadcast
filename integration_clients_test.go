@@ -637,24 +637,31 @@ func TestStartCleansUpWhenPrimaryAnnounceFails(t *testing.T) {
 	}
 }
 
-func TestStartFailsWhenSessionWouldPublishNoConnections(t *testing.T) {
+func TestStartAdvertisesWebSocketConnectionByDefault(t *testing.T) {
 	sig := &fakeSignaling{}
+	announcer := &fakeAnnouncer{}
 	b := &Broadcaster{
 		conf: Config{
-			Server:    ServerInfo{Host: "127.0.0.1", Port: 19132},
-			Signaling: sig,
-			Status:    Status{HostName: "Host", WorldName: "World"},
+			Server:         ServerInfo{Host: "127.0.0.1", Port: 19132},
+			Signaling:      sig,
+			Status:         Status{HostName: "Host", WorldName: "World"},
+			UpdateInterval: 30 * time.Second,
 		},
 		announcerFactory: func(*Broadcaster) room.Announcer {
-			return &fakeAnnouncer{}
+			return announcer
 		},
 	}
-	err := b.Start(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "unjoinable") {
-		t.Fatalf("Start() error = %v, want unjoinable session error", err)
+	if err := b.Start(context.Background()); err != nil {
+		t.Fatal(err)
 	}
-	if !sig.closed {
-		t.Fatal("signaling was not closed")
+	defer b.Close()
+
+	connections := announcer.Status().SupportedConnections
+	if len(connections) != 1 {
+		t.Fatalf("supported connections = %#v, want one", connections)
+	}
+	if connections[0].ConnectionType != p2p.ConnectionTypeSignalingOverWebSocket || connections[0].NetherNetID != "network" {
+		t.Fatalf("supported connection = %#v, want shared websocket network", connections[0])
 	}
 }
 

@@ -129,7 +129,7 @@ func DefaultConfigFile() ConfigFile {
 		DebugMode:     false,
 		Session: SessionFileConfig{
 			UpdateInterval:   30,
-			SignalingMode:    string(SignalingModeJSONRPC),
+			SignalingMode:    string(SignalingModeWebSocket),
 			QueryServer:      true,
 			WebQueryFallback: false,
 			ConfigFallback:   false,
@@ -356,10 +356,10 @@ func (r ICEPortRangeFile) listenConfig() (nethernet.ListenConfig, error) {
 
 func configSignalingMode(mode string) (SignalingMode, error) {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "", "jsonrpc", "json-rpc", "messaging":
+	case "jsonrpc", "json-rpc", "messaging":
 		return SignalingModeJSONRPC, nil
-	case "websocket", "websockets", "ws":
-		return "", errors.New("session.signalingMode websocket is not supported for Minecraft friend-list publishing; set session.signalingMode: jsonrpc")
+	case "", "websocket", "websockets", "ws":
+		return SignalingModeWebSocket, nil
 	default:
 		return "", fmt.Errorf("unknown session.signalingMode %q", mode)
 	}

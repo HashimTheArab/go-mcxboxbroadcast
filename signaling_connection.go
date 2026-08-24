@@ -18,9 +18,9 @@ type signalingConnectionAnnouncer struct {
 }
 
 func (a signalingConnectionAnnouncer) Announce(ctx context.Context, status room.Status) error {
-	// The session document must advertise exactly the JSON-RPC signaling
+	// The session document must advertise exactly the shared signaling
 	// connection clients can join through; any caller-provided connections are
-	// deliberately replaced, matching MCXboxBroadcast's single-connection doc.
+	// deliberately replaced.
 	status.SupportedConnections = []room.Connection{a.connection}
 	return a.Announcer.Announce(ctx, status)
 }
@@ -28,9 +28,6 @@ func (a signalingConnectionAnnouncer) Announce(ctx context.Context, status room.
 func (b *Broadcaster) signalingMode() (SignalingMode, error) {
 	mode := b.conf.SignalingMode
 	if mode == "" {
-		if b.conf.Signaling == nil && b.conf.SignalingFactory == nil {
-			return SignalingModeJSONRPC, nil
-		}
 		return SignalingModeWebSocket, nil
 	}
 	switch strings.ToLower(strings.TrimSpace(string(mode))) {
@@ -48,15 +45,18 @@ func (b *Broadcaster) signalingConnection(ctx context.Context, sig nethernet.Sig
 	if err != nil {
 		return nil, err
 	}
-	if mode != SignalingModeJSONRPC {
-		return nil, nil
-	}
 	if sig == nil {
-		return nil, errors.New("jsonrpc signaling connection: signaling is nil")
+		return nil, errors.New("signaling connection: signaling is nil")
 	}
 	networkID := sig.NetworkID()
 	if strings.TrimSpace(networkID) == "" {
-		return nil, errors.New("jsonrpc signaling connection: nethernet id is empty")
+		return nil, errors.New("signaling connection: nethernet id is empty")
+	}
+	if mode == SignalingModeWebSocket {
+		return &room.Connection{
+			ConnectionType: p2p.ConnectionTypeSignalingOverWebSocket,
+			NetherNetID:    p2p.NetherNetID(networkID),
+		}, nil
 	}
 	pmsgID, err := b.playerMessagingID(ctx)
 	if err != nil {
