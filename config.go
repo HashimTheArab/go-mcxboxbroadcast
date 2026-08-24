@@ -52,19 +52,15 @@ type Config struct {
 	FriendSync *FriendSyncConfig
 	// FriendHistory records player activity for friend expiry.
 	FriendHistory HistoryStore
-	// SubAccounts contains additional accounts that join/publish the same MPSD
-	// session to extend friend-list visibility.
+	// SubAccounts contains additional accounts that publish independently owned
+	// MPSD sessions for the same NetherNet listener.
 	SubAccounts []SubAccountConfig
 
-	// Signaling is the NetherNet signaling connection used to accept clients.
+	// Signaling is the WebSocket NetherNet signaling connection used to accept clients.
 	// If nil, SignalingFactory is called.
 	Signaling nethernet.Signaling
-	// SignalingFactory creates the NetherNet signaling connection.
+	// SignalingFactory creates the WebSocket NetherNet signaling connection.
 	SignalingFactory SignalingFactory
-	// SignalingMode controls the default NetherNet signaling transport. Empty
-	// uses JSON-RPC messaging for normal Live-token based signaling and
-	// preserves websocket signaling for injected Signaling/SignalingFactory.
-	SignalingMode SignalingMode
 
 	// ListenConfig customizes the gophertunnel listener.
 	ListenConfig minecraft.ListenConfig
@@ -91,13 +87,6 @@ type Config struct {
 }
 
 type SignalingFactory func(ctx context.Context, conf Config) (nethernet.Signaling, error)
-
-type SignalingMode string
-
-const (
-	SignalingModeJSONRPC   SignalingMode = "jsonrpc"
-	SignalingModeWebSocket SignalingMode = "websocket"
-)
 
 type ServerInfo struct {
 	Host string

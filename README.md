@@ -61,10 +61,7 @@ The config exposes the same operator-facing areas as MCXboxBroadcast:
 - Slack/Discord-compatible webhook notifications
 - primary and sub-account token cache paths
 - optional HTTP proxy URL through `http.proxy`
-- NetherNet signaling mode through `session.signalingMode`; `jsonrpc` is the
-  supported config value and matches MCXboxBroadcast's `ConnectionType=7`/
-  `PmsgId` session metadata required by current Minecraft friend-list
-  discovery.
+- WebSocket NetherNet signaling without a PlayerMessaging account dependency.
 
 ## Docker
 

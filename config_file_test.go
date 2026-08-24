@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -22,9 +21,6 @@ func TestLoadConfigFileCreatesDefaults(t *testing.T) {
 	}
 	if cfg.Session.UpdateInterval != 30 {
 		t.Fatalf("unexpected update interval %d", cfg.Session.UpdateInterval)
-	}
-	if cfg.Session.SignalingMode != string(SignalingModeJSONRPC) {
-		t.Fatalf("unexpected signaling mode %q", cfg.Session.SignalingMode)
 	}
 	if cfg.Gallery.ImagePath != "screenshot.jpg" {
 		t.Fatalf("unexpected image path %q", cfg.Gallery.ImagePath)
@@ -226,9 +222,6 @@ func TestConfigFileToConfigMapsOperatorSettings(t *testing.T) {
 	if runtime.Status.Broadcast != int32(BroadcastSettingFriendsOnly) {
 		t.Fatalf("unexpected broadcast setting %d", runtime.Status.Broadcast)
 	}
-	if runtime.SignalingMode != SignalingModeJSONRPC {
-		t.Fatalf("unexpected signaling mode %q", runtime.SignalingMode)
-	}
 	if runtime.Gallery == nil || runtime.Gallery.ImagePath != "images/showcase.jpg" {
 		t.Fatalf("gallery config not mapped: %#v", runtime.Gallery)
 	}
@@ -298,20 +291,6 @@ func TestRuntimeConfigRejectsInvalidICEUDPPortRange(t *testing.T) {
 				t.Fatal("expected invalid ICE UDP port range error")
 			}
 		})
-	}
-}
-
-func TestConfigFileRejectsWebSocketSignalingMode(t *testing.T) {
-	cfg := DefaultConfigFile()
-	cfg.Session.SignalingMode = "websocket"
-	_, err := cfg.RuntimeConfig(RuntimeConfigInput{
-		XBLTokenSource: staticTokenSource{},
-	})
-	if err == nil {
-		t.Fatal("expected websocket signaling mode error")
-	}
-	if !strings.Contains(err.Error(), "session.signalingMode websocket is not supported") {
-		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

@@ -119,6 +119,7 @@ func TestBroadcasterPresenceClientsIncludeEnabledSubAccounts(t *testing.T) {
 		HTTPClient: httpClient,
 		SubAccounts: []SubAccountConfig{
 			{ID: "enabled", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "enabled"},
+			{ID: "enabled", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "duplicate"},
 			{ID: "xuid-only", Enabled: true, XUID: "xuid-only"},
 			{ID: "disabled", Enabled: false, XUID: "disabled"},
 			{ID: "missing-token", Enabled: true},
