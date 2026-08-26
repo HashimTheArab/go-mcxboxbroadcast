@@ -362,9 +362,9 @@ func TestRoomListenerDoesNotOverridePublishedStatusWithMinecraftPong(t *testing.
 	b := &Broadcaster{
 		announcer: signalingConnectionAnnouncer{
 			Announcer: inner,
-			connection: room.Connection{
-				ConnectionType: p2p.ConnectionTypeSignalingOverWebSocket,
-				NetherNetID:    p2p.NetherNetID("123456789"),
+			connection: p2p.Connection{
+				Type:        p2p.ConnectionTypeSignalingOverWebSocket,
+				NetherNetID: p2p.NetherNetID("123456789"),
 			},
 		},
 	}
@@ -397,9 +397,9 @@ func TestRoomListenerDoesNotOverridePublishedStatusWithMinecraftPong(t *testing.
 		t.Fatalf("unexpected supported connections: %#v", status.SupportedConnections)
 	}
 	connection := status.SupportedConnections[0]
-	if connection.ConnectionType != p2p.ConnectionTypeSignalingOverWebSocket ||
+	if connection.Type != p2p.ConnectionTypeSignalingOverWebSocket ||
 		connection.NetherNetID != p2p.NetherNetID("123456789") ||
-		connection.PmsgID != uuid.Nil {
+		connection.PlayerMessagingID != uuid.Nil {
 		t.Fatalf("websocket connection was not preserved: %#v", connection)
 	}
 }
@@ -408,16 +408,16 @@ func TestSignalingConnectionAnnouncerPublishesWebSocketConnection(t *testing.T) 
 	inner := &fakeAnnouncer{}
 	announcer := signalingConnectionAnnouncer{
 		Announcer: inner,
-		connection: room.Connection{
-			ConnectionType: p2p.ConnectionTypeSignalingOverWebSocket,
-			NetherNetID:    p2p.NetherNetID("123456789"),
+		connection: p2p.Connection{
+			Type:        p2p.ConnectionTypeSignalingOverWebSocket,
+			NetherNetID: p2p.NetherNetID("123456789"),
 		},
 	}
 
 	err := announcer.Announce(context.Background(), room.Status{
-		SupportedConnections: []room.Connection{{
-			ConnectionType: 99,
-			NetherNetID:    p2p.NetherNetID("old"),
+		SupportedConnections: []p2p.Connection{{
+			Type:        99,
+			NetherNetID: p2p.NetherNetID("old"),
 		}},
 	})
 	if err != nil {
@@ -428,14 +428,14 @@ func TestSignalingConnectionAnnouncerPublishesWebSocketConnection(t *testing.T) 
 		t.Fatalf("unexpected connections: %#v", status.SupportedConnections)
 	}
 	got := status.SupportedConnections[0]
-	if got.ConnectionType != p2p.ConnectionTypeSignalingOverWebSocket {
-		t.Fatalf("connection type = %d, want %d", got.ConnectionType, p2p.ConnectionTypeSignalingOverWebSocket)
+	if got.Type != p2p.ConnectionTypeSignalingOverWebSocket {
+		t.Fatalf("connection type = %d, want %d", got.Type, p2p.ConnectionTypeSignalingOverWebSocket)
 	}
 	if got.NetherNetID != p2p.NetherNetID("123456789") {
 		t.Fatalf("nethernet id = %q", got.NetherNetID)
 	}
-	if got.PmsgID != uuid.Nil {
-		t.Fatalf("pmsg id = %s, want nil", got.PmsgID)
+	if got.PlayerMessagingID != uuid.Nil {
+		t.Fatalf("pmsg id = %s, want nil", got.PlayerMessagingID)
 	}
 }
 
@@ -468,14 +468,14 @@ func TestStartAlwaysAdvertisesWebSocketForInjectedSignaling(t *testing.T) {
 		t.Fatalf("unexpected connections: %#v", status.SupportedConnections)
 	}
 	got := status.SupportedConnections[0]
-	if got.ConnectionType != p2p.ConnectionTypeSignalingOverWebSocket {
-		t.Fatalf("connection type = %d, want %d", got.ConnectionType, p2p.ConnectionTypeSignalingOverWebSocket)
+	if got.Type != p2p.ConnectionTypeSignalingOverWebSocket {
+		t.Fatalf("connection type = %d, want %d", got.Type, p2p.ConnectionTypeSignalingOverWebSocket)
 	}
 	if got.NetherNetID != p2p.NetherNetID("123456789") {
 		t.Fatalf("nethernet id = %q", got.NetherNetID)
 	}
-	if got.PmsgID != uuid.Nil {
-		t.Fatalf("pmsg id = %s, want nil", got.PmsgID)
+	if got.PlayerMessagingID != uuid.Nil {
+		t.Fatalf("pmsg id = %s, want nil", got.PlayerMessagingID)
 	}
 	if status.OwnerID != "123" {
 		t.Fatalf("owner id = %q", status.OwnerID)
@@ -611,9 +611,9 @@ func TestStartCleansUpWhenPrimaryAnnounceFails(t *testing.T) {
 			StatusProvider: room.NewStatusProvider(room.Status{
 				HostName:  "Host",
 				WorldName: "World",
-				SupportedConnections: []room.Connection{{
-					ConnectionType: p2p.ConnectionTypeSignalingOverWebSocket,
-					NetherNetID:    p2p.NetherNetID("123"),
+				SupportedConnections: []p2p.Connection{{
+					Type:        p2p.ConnectionTypeSignalingOverWebSocket,
+					NetherNetID: p2p.NetherNetID("123"),
 				}},
 			}),
 		},
@@ -659,7 +659,7 @@ func TestStartAdvertisesWebSocketConnectionByDefault(t *testing.T) {
 	if len(connections) != 1 {
 		t.Fatalf("supported connections = %#v, want one", connections)
 	}
-	if connections[0].ConnectionType != p2p.ConnectionTypeSignalingOverWebSocket || connections[0].NetherNetID != "123456789" {
+	if connections[0].Type != p2p.ConnectionTypeSignalingOverWebSocket || connections[0].NetherNetID != "123456789" {
 		t.Fatalf("supported connection = %#v, want shared websocket network", connections[0])
 	}
 }

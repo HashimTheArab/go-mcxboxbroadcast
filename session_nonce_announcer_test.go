@@ -25,9 +25,9 @@ func TestMarshalStatusWithNoncesIncludesJavaSessionFields(t *testing.T) {
 		TitleID:        0,
 		LevelID:        "level",
 		TransportLayer: p2p.TransportLayerNetherNet,
-		SupportedConnections: []room.Connection{{
-			ConnectionType: p2p.ConnectionTypeSignalingOverWebSocket,
-			NetherNetID:    p2p.NetherNetID("123456789"),
+		SupportedConnections: []p2p.Connection{{
+			Type:        p2p.ConnectionTypeSignalingOverWebSocket,
+			NetherNetID: p2p.NetherNetID("123456789"),
 		}},
 	}, map[string]string{"200": "0102030405060708"})
 	if err != nil {
@@ -73,10 +73,10 @@ func TestMarshalStatusWithNoncesKeepsOpaqueNetherNetIDAsString(t *testing.T) {
 	pmid := uuid.MustParse("11111111-2222-3333-4444-555555555555")
 	custom, err := marshalStatusWithNonces(room.Status{
 		WorldName: "World",
-		SupportedConnections: []room.Connection{{
-			ConnectionType: p2p.ConnectionTypeSignalingOverJSONRPC,
-			NetherNetID:    p2p.NetherNetID("opaque-id"),
-			PmsgID:         pmid,
+		SupportedConnections: []p2p.Connection{{
+			Type:              p2p.ConnectionTypeSignalingOverJSONRPC,
+			NetherNetID:       p2p.NetherNetID("opaque-id"),
+			PlayerMessagingID: pmid,
 		}},
 	}, nil)
 	if err != nil {

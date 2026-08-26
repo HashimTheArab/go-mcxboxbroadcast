@@ -272,7 +272,7 @@ func generateSessionNonce() (string, error) {
 type statusWithNonces struct {
 	room.Status
 	IsHardcore           bool              `json:"isHardcore"`
-	SupportedConnections []room.Connection `json:"SupportedConnections"`
+	SupportedConnections []p2p.Connection  `json:"SupportedConnections"`
 	Nonces               map[string]string `json:"nonces"`
 }
 

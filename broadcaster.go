@@ -19,6 +19,7 @@ import (
 	"github.com/go-gl/mathgl/mgl32"
 	"github.com/google/uuid"
 	"github.com/sandertv/gophertunnel/minecraft"
+	"github.com/sandertv/gophertunnel/minecraft/p2p"
 	"github.com/sandertv/gophertunnel/minecraft/protocol"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/login"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
@@ -46,7 +47,7 @@ type Broadcaster struct {
 	listener                   *minecraft.Listener
 	signaling                  nethernet.Signaling
 	sessionRef                 mpsd.SessionReference
-	sessionConnection          *room.Connection
+	sessionConnection          *p2p.Connection
 	subAnnouncers              []publishedSubAccount
 	subAnnouncersByID          map[string]room.Announcer
 	staleSubAnnouncers         []room.Announcer
@@ -194,7 +195,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	if connection != nil {
 		b.sessionConnection = connection
 		b.announcer = signalingConnectionAnnouncer{Announcer: b.announcer, connection: *b.sessionConnection}
-		b.debug("using session signaling connection", "connection_type", connection.ConnectionType, "nethernet_id", connection.NetherNetID, "pmsg_id", connection.PmsgID)
+		b.debug("using session signaling connection", "connection_type", connection.Type, "nethernet_id", connection.NetherNetID, "pmsg_id", connection.PlayerMessagingID)
 	} else if len(status.SupportedConnections) == 0 {
 		// Without a signaling connection or caller-provided connections the
 		// session would publish SupportedConnections: null and be unjoinable.
@@ -1288,19 +1289,19 @@ type roomConnectionLogValue struct {
 }
 
 // roomConnectionLogValues converts room connections to loggable values.
-func roomConnectionLogValues(connections []room.Connection) []roomConnectionLogValue {
+func roomConnectionLogValues(connections []p2p.Connection) []roomConnectionLogValue {
 	values := make([]roomConnectionLogValue, 0, len(connections))
 	for _, connection := range connections {
 		netherNetID := string(connection.NetherNetID)
 		values = append(values, roomConnectionLogValue{
-			ConnectionType: connection.ConnectionType,
+			ConnectionType: connection.Type,
 			HostIPAddress:  connection.HostIPAddress,
 			HostPort:       connection.HostPort,
 			NetherNetID:    netherNetID,
 			NetherNetIDSet: netherNetID != "" && netherNetID != "0",
 			RakNetGUIDSet:  connection.RakNetGUID != "",
-			PmsgID:         connection.PmsgID.String(),
-			PmsgIDSet:      connection.PmsgID != uuid.Nil,
+			PmsgID:         connection.PlayerMessagingID.String(),
+			PmsgIDSet:      connection.PlayerMessagingID != uuid.Nil,
 		})
 	}
 	return values

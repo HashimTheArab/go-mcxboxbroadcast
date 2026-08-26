@@ -13,14 +13,14 @@ import (
 
 type signalingConnectionAnnouncer struct {
 	room.Announcer
-	connection room.Connection
+	connection p2p.Connection
 }
 
 func (a signalingConnectionAnnouncer) Announce(ctx context.Context, status room.Status) error {
 	// The session document must advertise exactly the shared signaling
 	// connection clients can join through; any caller-provided connections are
 	// deliberately replaced.
-	status.SupportedConnections = []room.Connection{a.connection}
+	status.SupportedConnections = []p2p.Connection{a.connection}
 	return a.Announcer.Announce(ctx, status)
 }
 
@@ -46,7 +46,7 @@ func (b *Broadcaster) signalingMode() (SignalingMode, error) {
 
 // signalingConnection builds the discriminator-aware MPSD connection entry
 // for the active signaling transport.
-func (b *Broadcaster) signalingConnection(sig nethernet.Signaling) (*room.Connection, error) {
+func (b *Broadcaster) signalingConnection(sig nethernet.Signaling) (*p2p.Connection, error) {
 	mode, err := b.signalingMode()
 	if err != nil {
 		return nil, err
@@ -66,10 +66,7 @@ func (b *Broadcaster) signalingConnection(sig nethernet.Signaling) (*room.Connec
 		if err := connection.Validate(); err != nil {
 			return nil, fmt.Errorf("validate websocket signaling connection: %w", err)
 		}
-		return &room.Connection{
-			ConnectionType: connection.Type,
-			NetherNetID:    connection.NetherNetID,
-		}, nil
+		return &connection, nil
 	}
 	jsonRPCSignaling, ok := sig.(p2p.JSONRPCSignaling)
 	if !ok {
@@ -79,9 +76,5 @@ func (b *Broadcaster) signalingConnection(sig nethernet.Signaling) (*room.Connec
 	if err != nil {
 		return nil, fmt.Errorf("validate jsonrpc signaling connection: %w", err)
 	}
-	return &room.Connection{
-		ConnectionType: connection.Type,
-		NetherNetID:    connection.NetherNetID,
-		PmsgID:         connection.PlayerMessagingID,
-	}, nil
+	return &connection, nil
 }

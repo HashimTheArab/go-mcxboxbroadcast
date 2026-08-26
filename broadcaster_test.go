@@ -286,8 +286,8 @@ func TestXBLAnnouncerUnwrapsDiagnosticsWrappers(t *testing.T) {
 	inner := &room.XBLAnnouncer{}
 	wrapped := signalingConnectionAnnouncer{
 		Announcer: loggingAnnouncer{Announcer: inner},
-		connection: room.Connection{
-			ConnectionType: p2p.ConnectionTypeSignalingOverWebSocket,
+		connection: p2p.Connection{
+			Type: p2p.ConnectionTypeSignalingOverWebSocket,
 		},
 	}
 	got, ok := xblAnnouncer(wrapped)
@@ -322,14 +322,14 @@ func TestBroadcasterBuildsWebSocketSignalingConnection(t *testing.T) {
 	if connection == nil {
 		t.Fatal("websocket signaling connection is nil")
 	}
-	if connection.ConnectionType != p2p.ConnectionTypeSignalingOverWebSocket {
-		t.Fatalf("connection type = %d, want websocket", connection.ConnectionType)
+	if connection.Type != p2p.ConnectionTypeSignalingOverWebSocket {
+		t.Fatalf("connection type = %d, want websocket", connection.Type)
 	}
 	if connection.NetherNetID != "123456789" {
 		t.Fatalf("nethernet id = %q, want shared signaling id", connection.NetherNetID)
 	}
-	if connection.PmsgID != uuid.Nil {
-		t.Fatalf("pmsg id = %s, want nil for websocket signaling", connection.PmsgID)
+	if connection.PlayerMessagingID != uuid.Nil {
+		t.Fatalf("pmsg id = %s, want nil for websocket signaling", connection.PlayerMessagingID)
 	}
 }
 
@@ -360,14 +360,14 @@ func TestBroadcasterBuildsJSONRPCSignalingConnection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if connection.ConnectionType != p2p.ConnectionTypeSignalingOverJSONRPC {
-		t.Fatalf("connection type = %d, want JSON-RPC", connection.ConnectionType)
+	if connection.Type != p2p.ConnectionTypeSignalingOverJSONRPC {
+		t.Fatalf("connection type = %d, want JSON-RPC", connection.Type)
 	}
 	if connection.NetherNetID != "123456789" {
 		t.Fatalf("nethernet id = %q, want shared signaling id", connection.NetherNetID)
 	}
-	if connection.PmsgID != pmid {
-		t.Fatalf("pmsg id = %s, want %s", connection.PmsgID, pmid)
+	if connection.PlayerMessagingID != pmid {
+		t.Fatalf("pmsg id = %s, want %s", connection.PlayerMessagingID, pmid)
 	}
 }
 
@@ -385,8 +385,8 @@ func TestBroadcasterJSONRPCUsesActiveSignalingIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if connection.PmsgID != activePMID {
-		t.Fatalf("PmsgID = %s, want active signaling identity %s", connection.PmsgID, activePMID)
+	if connection.PlayerMessagingID != activePMID {
+		t.Fatalf("PmsgID = %s, want active signaling identity %s", connection.PlayerMessagingID, activePMID)
 	}
 }
 
