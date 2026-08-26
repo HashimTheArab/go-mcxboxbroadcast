@@ -22,9 +22,6 @@ func TestLoadConfigFileCreatesDefaults(t *testing.T) {
 	if cfg.Session.UpdateInterval != 30 {
 		t.Fatalf("unexpected update interval %d", cfg.Session.UpdateInterval)
 	}
-	if cfg.Session.SignalingMode != string(SignalingModeJSONRPC) {
-		t.Fatalf("unexpected signaling mode %q", cfg.Session.SignalingMode)
-	}
 	if cfg.Gallery.ImagePath != "screenshot.jpg" {
 		t.Fatalf("unexpected image path %q", cfg.Gallery.ImagePath)
 	}
@@ -47,24 +44,8 @@ func TestExampleConfigLoads(t *testing.T) {
 	if cfg.Gallery.ImagePath != "screenshot.jpg" {
 		t.Fatalf("unexpected gallery image path %q", cfg.Gallery.ImagePath)
 	}
-	runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{XBLTokenSource: staticTokenSource{}})
-	if err != nil {
+	if _, err := cfg.RuntimeConfig(RuntimeConfigInput{XBLTokenSource: staticTokenSource{}}); err != nil {
 		t.Fatalf("example config does not produce a valid runtime config: %v", err)
-	}
-	if runtime.SignalingMode != SignalingModeJSONRPC {
-		t.Fatalf("example signaling mode = %q, want JSON-RPC", runtime.SignalingMode)
-	}
-}
-
-func TestConfigFileAcceptsWebSocketSignalingMode(t *testing.T) {
-	cfg := DefaultConfigFile()
-	cfg.Session.SignalingMode = "websocket"
-	runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{XBLTokenSource: staticTokenSource{}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runtime.SignalingMode != SignalingModeWebSocket {
-		t.Fatalf("signaling mode = %q, want WebSocket", runtime.SignalingMode)
 	}
 }
 

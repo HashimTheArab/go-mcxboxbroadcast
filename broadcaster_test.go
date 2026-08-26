@@ -314,7 +314,7 @@ func TestBroadcasterInviteRequiresActiveBroadcaster(t *testing.T) {
 }
 
 func TestBroadcasterBuildsWebSocketSignalingConnection(t *testing.T) {
-	b := &Broadcaster{conf: Config{SignalingMode: SignalingModeWebSocket}}
+	b := &Broadcaster{}
 	connection, err := b.signalingConnection(&fakeSignaling{networkID: "123456789"})
 	if err != nil {
 		t.Fatal(err)
@@ -340,53 +340,11 @@ func TestBroadcasterRejectsInvalidWebSocketNetworkID(t *testing.T) {
 		networkID := networkID
 		t.Run(networkID, func(t *testing.T) {
 			t.Parallel()
-			b := &Broadcaster{conf: Config{SignalingMode: SignalingModeWebSocket}}
+			b := &Broadcaster{}
 			if _, err := b.signalingConnection(&fakeSignaling{networkID: networkID}); err == nil {
 				t.Fatalf("signalingConnection() accepted network ID %q", networkID)
 			}
 		})
-	}
-}
-
-func TestBroadcasterBuildsJSONRPCSignalingConnection(t *testing.T) {
-	pmid := uuid.MustParse("11111111-2222-3333-4444-555555555555")
-	b := &Broadcaster{conf: Config{
-		SignalingMode: SignalingModeJSONRPC,
-	}}
-	connection, err := b.signalingConnection(&jsonRPCFakeSignaling{
-		fakeSignaling: fakeSignaling{networkID: "123456789"},
-		pmid:          pmid,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if connection.Type != p2p.ConnectionTypeSignalingOverJSONRPC {
-		t.Fatalf("connection type = %d, want JSON-RPC", connection.Type)
-	}
-	if connection.NetherNetID != "123456789" {
-		t.Fatalf("nethernet id = %q, want shared signaling id", connection.NetherNetID)
-	}
-	if connection.PlayerMessagingID != pmid {
-		t.Fatalf("pmsg id = %s, want %s", connection.PlayerMessagingID, pmid)
-	}
-}
-
-func TestBroadcasterJSONRPCUsesActiveSignalingIdentity(t *testing.T) {
-	activePMID := uuid.MustParse("11111111-2222-3333-4444-555555555555")
-	tokenPMID := uuid.MustParse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
-	b := &Broadcaster{conf: Config{
-		SignalingMode:        SignalingModeJSONRPC,
-		MinecraftTokenSource: minecraftTokenSourceWithPMID{pmid: tokenPMID},
-	}}
-	connection, err := b.signalingConnection(&jsonRPCFakeSignaling{
-		fakeSignaling: fakeSignaling{networkID: "123456789"},
-		pmid:          activePMID,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if connection.PlayerMessagingID != activePMID {
-		t.Fatalf("PmsgID = %s, want active signaling identity %s", connection.PlayerMessagingID, activePMID)
 	}
 }
 

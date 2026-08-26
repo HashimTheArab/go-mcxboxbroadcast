@@ -47,7 +47,6 @@ type HTTPFileConfig struct {
 // absent; the broadcast target always comes from sessionInfo.
 type SessionFileConfig struct {
 	UpdateInterval   int              `yaml:"updateInterval" toml:"updateInterval"`
-	SignalingMode    string           `yaml:"signalingMode" toml:"signalingMode"`
 	QueryServer      bool             `yaml:"queryServer" toml:"queryServer"`
 	WebQueryFallback bool             `yaml:"webQueryFallback" toml:"webQueryFallback"`
 	ConfigFallback   bool             `yaml:"configFallback" toml:"configFallback"`
@@ -129,7 +128,6 @@ func DefaultConfigFile() ConfigFile {
 		DebugMode:     false,
 		Session: SessionFileConfig{
 			UpdateInterval:   30,
-			SignalingMode:    string(SignalingModeJSONRPC),
 			QueryServer:      true,
 			WebQueryFallback: false,
 			ConfigFallback:   false,
@@ -278,10 +276,6 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 		in.BaseDir = "."
 	}
 	server := ServerInfo{Host: c.Session.SessionInfo.IP, Port: c.Session.SessionInfo.Port}
-	signalingMode, err := configSignalingMode(c.Session.SignalingMode)
-	if err != nil {
-		return Config{}, err
-	}
 	netherNetListenConfig, err := c.Session.ICEPortRange.listenConfig()
 	if err != nil {
 		return Config{}, err
@@ -305,7 +299,6 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 			QueryFallback:    c.Session.ConfigFallback,
 			WebQueryClient:   in.HTTPClient,
 		},
-		SignalingMode: signalingMode,
 		ListenConfig: minecraft.ListenConfig{
 			HTTPClient: in.HTTPClient,
 		},
@@ -335,19 +328,6 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 		}
 	}
 	return cfg, nil
-}
-
-// configSignalingMode parses the standalone configuration spelling into the
-// runtime signaling mode.
-func configSignalingMode(mode string) (SignalingMode, error) {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "", "jsonrpc", "json-rpc", "messaging":
-		return SignalingModeJSONRPC, nil
-	case "websocket", "websockets", "ws":
-		return SignalingModeWebSocket, nil
-	default:
-		return "", fmt.Errorf("unknown session.signalingMode %q", mode)
-	}
 }
 
 func (r ICEPortRangeFile) listenConfig() (nethernet.ListenConfig, error) {
