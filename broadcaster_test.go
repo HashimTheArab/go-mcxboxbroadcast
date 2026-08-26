@@ -395,6 +395,20 @@ func TestMinecraftListenConfigKeepsFullLoginFlow(t *testing.T) {
 	}
 }
 
+func TestMinecraftListenConfigAcceptsRetail2168Dialects(t *testing.T) {
+	b := &Broadcaster{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	conf := b.minecraftListenConfig(room.Status{})
+	if len(conf.AcceptedProtocols) != 2 {
+		t.Fatalf("AcceptedProtocols length = %d, want 2 legacy dialects", len(conf.AcceptedProtocols))
+	}
+	want := []string{"1.26.40", "1.26.44"}
+	for i, accepted := range conf.AcceptedProtocols {
+		if got := accepted.Ver(); got != want[i] {
+			t.Fatalf("AcceptedProtocols[%d] = %q, want %q", i, got, want[i])
+		}
+	}
+}
+
 func TestMinecraftListenConfigKeepsCustomPacketFunc(t *testing.T) {
 	customCalled := false
 	custom := func(packet.Header, []byte, net.Addr, net.Addr) {

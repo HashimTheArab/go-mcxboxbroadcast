@@ -57,6 +57,10 @@ func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 		}
 	}
 
+	advertisedProtocol := st.Protocol
+	if advertisedProtocol == 0 {
+		advertisedProtocol = protocol.CurrentProtocol
+	}
 	return normalizeStatus(room.Status{
 		HostName:         stripColour(defaultString(st.HostName, b.hostNameFallback())),
 		WorldName:        stripColour(defaultString(st.WorldName, defaultString(st.HostName, b.hostNameFallback()))),
@@ -68,7 +72,7 @@ func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 		// Always joinable_by_friends, matching MCXboxBroadcast; any other
 		// value makes clients hide the world from the friend list.
 		Joinability:             p2p.JoinabilityFriends,
-		Protocol:                protocol.CurrentProtocol,
+		Protocol:                advertisedProtocol,
 		Version:                 defaultString(st.Version, protocol.CurrentVersion),
 		TransportLayer:          p2p.TransportLayerNetherNet,
 		LanGame:                 false,

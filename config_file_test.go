@@ -198,6 +198,8 @@ func TestConfigFileToConfigMapsOperatorSettings(t *testing.T) {
 	cfg.Session.SessionInfo.Port = 19133
 	cfg.Session.SessionInfo.HostName = "Host"
 	cfg.Session.SessionInfo.WorldName = "World"
+	cfg.Session.SessionInfo.Version = "1.26.44"
+	cfg.Session.SessionInfo.Protocol = 2168
 	cfg.Session.BroadcastSetting = int32(BroadcastSettingFriendsOnly)
 	cfg.Session.WorldType = WorldTypeSurvival
 	cfg.Session.QueryServer = false
@@ -221,6 +223,9 @@ func TestConfigFileToConfigMapsOperatorSettings(t *testing.T) {
 	}
 	if runtime.Status.Broadcast != int32(BroadcastSettingFriendsOnly) {
 		t.Fatalf("unexpected broadcast setting %d", runtime.Status.Broadcast)
+	}
+	if runtime.Status.Version != "1.26.44" || runtime.Status.Protocol != 2168 {
+		t.Fatalf("advertised pair = %s/%d, want 1.26.44/2168", runtime.Status.Version, runtime.Status.Protocol)
 	}
 	if runtime.Gallery == nil || runtime.Gallery.ImagePath != "images/showcase.jpg" {
 		t.Fatalf("gallery config not mapped: %#v", runtime.Gallery)

@@ -68,6 +68,9 @@ type SessionInfoFile struct {
 	MaxPlayers int    `yaml:"maxPlayers" toml:"maxPlayers"`
 	IP         string `yaml:"ip" toml:"ip"`
 	Port       uint16 `yaml:"port" toml:"port"`
+	// Protocol overrides the network protocol advertised in the session.
+	// Zero uses the protocol library's current protocol.
+	Protocol int32 `yaml:"protocol,omitempty" toml:"protocol,omitempty"`
 	// Version overrides the game version advertised in the session document.
 	// Empty uses the protocol library's version. Clients hide friend worlds
 	// older than their own game version, so set this when a client update
@@ -290,6 +293,7 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 			HostName:         c.Session.SessionInfo.HostName,
 			WorldName:        c.Session.SessionInfo.WorldName,
 			WorldType:        c.Session.WorldType,
+			Protocol:         c.Session.SessionInfo.Protocol,
 			Version:          c.Session.SessionInfo.Version,
 			Players:          c.Session.SessionInfo.Players,
 			MaxPlayers:       c.Session.SessionInfo.MaxPlayers,
