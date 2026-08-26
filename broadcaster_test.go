@@ -333,6 +333,49 @@ func TestBroadcasterBuildsWebSocketSignalingConnection(t *testing.T) {
 	}
 }
 
+func TestNewRejectsJSONRPCWithEnabledSubAccounts(t *testing.T) {
+	_, err := New(Config{
+		Server:        ServerInfo{Host: "127.0.0.1", Port: 19132},
+		SignalingMode: SignalingModeJSONRPC,
+		SubAccounts: []SubAccountConfig{{
+			ID:      "sub",
+			Enabled: true,
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "jsonrpc signaling does not support sub-accounts") {
+		t.Fatalf("New() error = %v, want JSON-RPC sub-account rejection", err)
+	}
+}
+
+func TestNewAllowsWebSocketWithEnabledSubAccounts(t *testing.T) {
+	if _, err := New(Config{
+		Server:         ServerInfo{Host: "127.0.0.1", Port: 19132},
+		XBLTokenSource: staticTokenSource{},
+		SignalingMode:  SignalingModeWebSocket,
+		SubAccounts: []SubAccountConfig{{
+			ID:      "sub",
+			Enabled: true,
+		}},
+	}); err != nil {
+		t.Fatalf("New() error = %v, want WebSocket sub-accounts accepted", err)
+	}
+}
+
+func TestBroadcasterBuildsJSONRPCSignalingConnection(t *testing.T) {
+	pmid := uuid.MustParse("11111111-2222-3333-4444-555555555555")
+	b := &Broadcaster{conf: Config{SignalingMode: SignalingModeJSONRPC}}
+	connection, err := b.signalingConnection(&jsonRPCFakeSignaling{
+		fakeSignaling: fakeSignaling{networkID: "123456789"},
+		pmid:          pmid,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if connection.Type != p2p.ConnectionTypeSignalingOverJSONRPC || connection.NetherNetID != "123456789" || connection.PlayerMessagingID != pmid {
+		t.Fatalf("JSON-RPC connection = %#v", connection)
+	}
+}
+
 func TestBroadcasterRejectsInvalidWebSocketNetworkID(t *testing.T) {
 	t.Parallel()
 

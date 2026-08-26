@@ -61,6 +61,9 @@ type Config struct {
 	Signaling nethernet.Signaling
 	// SignalingFactory creates the NetherNet signaling connection.
 	SignalingFactory SignalingFactory
+	// SignalingMode controls the signaling transport. Empty uses direct
+	// WebSocket signaling.
+	SignalingMode SignalingMode
 
 	// ListenConfig customizes the gophertunnel listener.
 	ListenConfig minecraft.ListenConfig
@@ -87,6 +90,17 @@ type Config struct {
 }
 
 type SignalingFactory func(ctx context.Context, conf Config) (nethernet.Signaling, error)
+
+// SignalingMode identifies the service transport used to exchange WebRTC
+// signaling messages.
+type SignalingMode string
+
+const (
+	// SignalingModeWebSocket exchanges messages through the direct signaling service.
+	SignalingModeWebSocket SignalingMode = "websocket"
+	// SignalingModeJSONRPC exchanges messages through Player Messaging JSON-RPC.
+	SignalingModeJSONRPC SignalingMode = "jsonrpc"
+)
 
 type ServerInfo struct {
 	Host string

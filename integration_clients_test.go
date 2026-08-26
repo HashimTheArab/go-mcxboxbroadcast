@@ -799,6 +799,14 @@ type fakeSignaling struct {
 	networkID string
 }
 
+type jsonRPCFakeSignaling struct {
+	fakeSignaling
+	pmid uuid.UUID
+}
+
+// PlayerMessagingID returns the fake transport's Player Messaging identity.
+func (f *jsonRPCFakeSignaling) PlayerMessagingID() uuid.UUID { return f.pmid }
+
 func (f *fakeSignaling) Signal(context.Context, *nethernet.Signal) error { return nil }
 func (f *fakeSignaling) Notify(nethernet.Notifier) func() {
 	return func() {}

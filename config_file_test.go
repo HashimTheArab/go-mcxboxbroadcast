@@ -22,6 +22,9 @@ func TestLoadConfigFileCreatesDefaults(t *testing.T) {
 	if cfg.Session.UpdateInterval != 30 {
 		t.Fatalf("unexpected update interval %d", cfg.Session.UpdateInterval)
 	}
+	if cfg.Session.SignalingMode != string(SignalingModeWebSocket) {
+		t.Fatalf("default signaling mode = %q, want websocket", cfg.Session.SignalingMode)
+	}
 	if cfg.Gallery.ImagePath != "screenshot.jpg" {
 		t.Fatalf("unexpected image path %q", cfg.Gallery.ImagePath)
 	}
@@ -46,6 +49,18 @@ func TestExampleConfigLoads(t *testing.T) {
 	}
 	if _, err := cfg.RuntimeConfig(RuntimeConfigInput{XBLTokenSource: staticTokenSource{}}); err != nil {
 		t.Fatalf("example config does not produce a valid runtime config: %v", err)
+	}
+}
+
+func TestConfigFileMapsJSONRPCSignalingMode(t *testing.T) {
+	cfg := DefaultConfigFile()
+	cfg.Session.SignalingMode = "jsonrpc"
+	runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{XBLTokenSource: staticTokenSource{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.SignalingMode != SignalingModeJSONRPC {
+		t.Fatalf("signaling mode = %q, want jsonrpc", runtime.SignalingMode)
 	}
 }
 
