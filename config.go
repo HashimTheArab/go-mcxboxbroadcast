@@ -56,11 +56,16 @@ type Config struct {
 	// MPSD sessions for the same NetherNet listener.
 	SubAccounts []SubAccountConfig
 
-	// Signaling is the WebSocket NetherNet signaling connection used to accept clients.
+	// Signaling is the NetherNet signaling connection used to accept clients.
 	// If nil, SignalingFactory is called.
 	Signaling nethernet.Signaling
-	// SignalingFactory creates the WebSocket NetherNet signaling connection.
+	// SignalingFactory creates the NetherNet signaling connection.
 	SignalingFactory SignalingFactory
+	// SignalingMode controls the default NetherNet signaling transport. Empty
+	// uses JSON-RPC messaging for normal Live-token based signaling and
+	// preserves WebSocket signaling for an injected Signaling or
+	// SignalingFactory.
+	SignalingMode SignalingMode
 
 	// ListenConfig customizes the gophertunnel listener.
 	ListenConfig minecraft.ListenConfig
@@ -87,6 +92,17 @@ type Config struct {
 }
 
 type SignalingFactory func(ctx context.Context, conf Config) (nethernet.Signaling, error)
+
+// SignalingMode identifies the service transport used to exchange WebRTC
+// signaling messages.
+type SignalingMode string
+
+const (
+	// SignalingModeJSONRPC exchanges signaling through Player Messaging JSON-RPC.
+	SignalingModeJSONRPC SignalingMode = "jsonrpc"
+	// SignalingModeWebSocket exchanges signaling through the direct signaling WebSocket.
+	SignalingModeWebSocket SignalingMode = "websocket"
+)
 
 type ServerInfo struct {
 	Host string

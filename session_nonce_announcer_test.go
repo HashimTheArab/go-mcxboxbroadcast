@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/df-mc/go-xsapi/v2/mpsd"
+	"github.com/google/uuid"
 	"github.com/sandertv/gophertunnel/minecraft/p2p"
 	"github.com/sandertv/gophertunnel/minecraft/room"
 )
@@ -55,9 +56,12 @@ func TestMarshalStatusWithNoncesIncludesJavaSessionFields(t *testing.T) {
 	if _, ok := connection["PmsgId"]; ok {
 		t.Fatalf("websocket connection unexpectedly contains PmsgId: %#v", connection)
 	}
-	// Java serializes NetherNetId as a number and always sends isHardcore.
-	if connection["NetherNetId"] != float64(123456789) {
-		t.Fatalf("NetherNetId should be a JSON number: %#v", connection)
+	// Vanilla stores direct WebSocket network IDs in the legacy RakNetGUID field.
+	if connection["RakNetGUID"] != "123456789" {
+		t.Fatalf("RakNetGUID should contain the WebSocket network ID: %#v", connection)
+	}
+	if _, ok := connection["NetherNetId"]; ok {
+		t.Fatalf("websocket connection unexpectedly contains NetherNetId: %#v", connection)
 	}
 	hardcore, ok := got["isHardcore"].(bool)
 	if !ok || hardcore {
@@ -66,10 +70,13 @@ func TestMarshalStatusWithNoncesIncludesJavaSessionFields(t *testing.T) {
 }
 
 func TestMarshalStatusWithNoncesKeepsOpaqueNetherNetIDAsString(t *testing.T) {
+	pmid := uuid.MustParse("11111111-2222-3333-4444-555555555555")
 	custom, err := marshalStatusWithNonces(room.Status{
 		WorldName: "World",
 		SupportedConnections: []room.Connection{{
-			NetherNetID: p2p.NetherNetID("opaque-id"),
+			ConnectionType: p2p.ConnectionTypeSignalingOverJSONRPC,
+			NetherNetID:    p2p.NetherNetID("opaque-id"),
+			PmsgID:         pmid,
 		}},
 	}, nil)
 	if err != nil {
@@ -83,6 +90,9 @@ func TestMarshalStatusWithNoncesKeepsOpaqueNetherNetIDAsString(t *testing.T) {
 	}
 	if got.SupportedConnections[0]["NetherNetId"] != "opaque-id" {
 		t.Fatalf("opaque NetherNetId should stay a string: %s", custom)
+	}
+	if got.SupportedConnections[0]["PmsgId"] != pmid.String() {
+		t.Fatalf("JSON-RPC PmsgId missing: %s", custom)
 	}
 }
 

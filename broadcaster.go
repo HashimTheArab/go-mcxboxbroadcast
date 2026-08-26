@@ -25,6 +25,7 @@ import (
 	"github.com/sandertv/gophertunnel/minecraft/room"
 	"github.com/sandertv/gophertunnel/minecraft/service"
 	websocketsignaling "github.com/sandertv/gophertunnel/minecraft/service/signaling"
+	"github.com/sandertv/gophertunnel/minecraft/service/signaling/messaging"
 )
 
 const (
@@ -107,6 +108,7 @@ type defaultSignalingResult struct {
 
 // defaultSignalingConfig holds the inputs for creating a default signaling connection.
 type defaultSignalingConfig struct {
+	mode            SignalingMode
 	log             *slog.Logger
 	httpClient      *http.Client
 	xblClient       *xsapi.Client
@@ -151,9 +153,14 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	}
 	b.ctx, b.cancel = context.WithCancel(ctx)
 	b.done = make(chan struct{})
+	mode, err := b.signalingMode()
+	if err != nil {
+		b.cancel()
+		return errors.Join(err, b.cleanupStartupFailure(false))
+	}
 
 	b.debug("starting broadcaster",
-		"signaling_mode", "websocket",
+		"signaling_mode", mode,
 		"status_provider", b.conf.StatusProvider != nil,
 		"sub_accounts", len(b.conf.SubAccounts),
 		"friend_sync", b.conf.FriendSync != nil,
@@ -165,7 +172,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 		return errors.Join(err, b.cleanupStartupFailure(false))
 	}
 	b.signaling = sig
-	b.debug("nethernet signaling ready", "signaling_mode", "websocket", "signaling_type", fmt.Sprintf("%T", sig), "network_id", signalingNetworkID(sig))
+	b.debug("nethernet signaling ready", "signaling_mode", mode, "signaling_type", fmt.Sprintf("%T", sig), "network_id", signalingNetworkID(sig))
 
 	status, err := b.status(b.ctx)
 	if err != nil {
@@ -227,7 +234,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	}
 	b.listener = l
 	b.started = true
-	b.info("nethernet broadcaster started", "network_id", signalingNetworkID(sig), "signaling_mode", "websocket", "target", b.conf.Server.Address())
+	b.info("nethernet broadcaster started", "network_id", signalingNetworkID(sig), "signaling_mode", mode, "target", b.conf.Server.Address())
 
 	startListener := b.listener
 	b.acceptWg.Add(1)
@@ -679,11 +686,15 @@ func (b *Broadcaster) signalingFor(ctx context.Context) (nethernet.Signaling, er
 		}
 		return sig, err
 	}
+	mode, err := b.signalingMode()
+	if err != nil {
+		return nil, err
+	}
 	timeout := b.signalingDialTimeout()
 	dialCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	b.debug("dialing nethernet signaling", "signaling_mode", "websocket", "timeout", timeout)
-	conf := b.defaultSignalingConfig()
+	b.debug("dialing nethernet signaling", "signaling_mode", mode, "timeout", timeout)
+	conf := b.defaultSignalingConfig(mode)
 	conf.httpClient = signalingStartupHTTPClient(conf.httpClient, timeout)
 	resultCh := make(chan defaultSignalingResult)
 	go func() {
@@ -714,7 +725,7 @@ func (b *Broadcaster) signalingFor(ctx context.Context) (nethernet.Signaling, er
 }
 
 // defaultSignalingConfig builds the signaling config from the broadcaster's current state.
-func (b *Broadcaster) defaultSignalingConfig() defaultSignalingConfig {
+func (b *Broadcaster) defaultSignalingConfig(mode SignalingMode) defaultSignalingConfig {
 	client := b.conf.XBLClient
 	if client == nil {
 		client = b.xblClient
@@ -724,6 +735,7 @@ func (b *Broadcaster) defaultSignalingConfig() defaultSignalingConfig {
 		tokens = b.minecraftTokens
 	}
 	return defaultSignalingConfig{
+		mode:            mode,
 		log:             b.log,
 		httpClient:      b.conf.HTTPClient,
 		xblClient:       client,
@@ -740,6 +752,18 @@ func dialDefaultSignaling(ctx context.Context, conf defaultSignalingConfig) defa
 		return defaultSignalingResult{createdClient: createdClient, err: err}
 	}
 	debugLog(conf.log, "created minecraft token source for signaling")
+	if conf.mode == SignalingModeJSONRPC {
+		debugLog(conf.log, "dialing jsonrpc messaging signaling websocket")
+		d := messaging.Dialer{
+			Log:        conf.log,
+			HTTPClient: conf.httpClient,
+		}
+		sig, err := d.DialContext(ctx, src)
+		if err != nil {
+			return defaultSignalingResult{createdClient: createdClient, err: err}
+		}
+		return defaultSignalingResult{signaling: sig, minecraft: src, createdClient: createdClient}
+	}
 	debugLog(conf.log, "dialing websocket signaling websocket")
 	d := websocketsignaling.Dialer{
 		Log:        conf.log,
@@ -1831,7 +1855,11 @@ func (b *Broadcaster) recreateSession() error {
 		return errors.New("re-create signaling: factory returned signaling with dead context")
 	}
 	b.signaling = sig
-	b.debug("nethernet signaling re-created", "signaling_mode", "websocket", "network_id", signalingNetworkID(sig))
+	mode, err := b.signalingMode()
+	if err != nil {
+		return err
+	}
+	b.debug("nethernet signaling re-created", "signaling_mode", mode, "network_id", signalingNetworkID(sig))
 
 	closeSignaling := func() {
 		if c, ok := sig.(interface{ Close() error }); ok {
@@ -1880,7 +1908,7 @@ func (b *Broadcaster) recreateSession() error {
 		return fmt.Errorf("re-listen nethernet: %w", err)
 	}
 	b.listener = l
-	b.debug("nethernet listener restarted", "network_id", signalingNetworkID(sig), "signaling_mode", "websocket", "target", b.conf.Server.Address())
+	b.debug("nethernet listener restarted", "network_id", signalingNetworkID(sig), "signaling_mode", mode, "target", b.conf.Server.Address())
 
 	reconnectDone = true
 	go func() {

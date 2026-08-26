@@ -96,7 +96,7 @@ func TestPterodactylArtifacts(t *testing.T) {
 		}
 	}
 	if strings.Contains(egg.Scripts.Installation.Script, "signalingMode:") {
-		t.Fatal("installation script should not expose a signaling mode")
+		t.Fatal("installation script should rely on the default signaling mode")
 	}
 
 	dockerfile, err := os.ReadFile("Dockerfile")

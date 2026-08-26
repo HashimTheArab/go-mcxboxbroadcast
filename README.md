@@ -61,7 +61,26 @@ The config exposes the same operator-facing areas as MCXboxBroadcast:
 - Slack/Discord-compatible webhook notifications
 - primary and sub-account token cache paths
 - optional HTTP proxy URL through `http.proxy`
-- WebSocket NetherNet signaling without a PlayerMessaging account dependency.
+- selectable NetherNet signaling through `session.signalingMode`: `jsonrpc`
+  (the default used by current vanilla hosts) or `websocket` (direct signaling
+  with no Player Messaging envelope).
+
+### Signaling modes
+
+Both modes exchange the same WebRTC offer, answer, and ICE-candidate messages.
+They differ only in how those messages reach the other player:
+
+- `jsonrpc` connects to the Player Messaging WebSocket, wraps each signaling
+  message in a JSON-RPC envelope, and addresses the host by its Player
+  Messaging ID. Xbox sessions advertise connection type `7` with `PmsgId` and
+  `NetherNetId`. This is the default used by current vanilla hosts.
+- `websocket` connects directly to the signaling-service WebSocket and
+  addresses the host by its numeric NetherNet network ID. Xbox sessions
+  advertise connection type `3`; vanilla stores that network ID in the legacy
+  `RakNetGUID` property.
+
+Use `jsonrpc` unless direct WebSocket signaling is required and has been
+validated with the target client platforms.
 
 ## Docker
 

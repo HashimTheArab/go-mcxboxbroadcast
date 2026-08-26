@@ -7,6 +7,7 @@ http:
 
 session:
   updateInterval: 30
+  signalingMode: jsonrpc
   queryServer: true
   webQueryFallback: false
   # false keeps the last successful query result when a query fails;

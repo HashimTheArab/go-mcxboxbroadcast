@@ -659,7 +659,7 @@ func TestStartAdvertisesWebSocketConnectionByDefault(t *testing.T) {
 	if len(connections) != 1 {
 		t.Fatalf("supported connections = %#v, want one", connections)
 	}
-	if connections[0].ConnectionType != p2p.ConnectionTypeSignalingOverWebSocket || connections[0].NetherNetID != "network" {
+	if connections[0].ConnectionType != p2p.ConnectionTypeSignalingOverWebSocket || connections[0].NetherNetID != "123456789" {
 		t.Fatalf("supported connection = %#v, want shared websocket network", connections[0])
 	}
 }
@@ -799,6 +799,14 @@ type fakeSignaling struct {
 	networkID string
 }
 
+type jsonRPCFakeSignaling struct {
+	fakeSignaling
+	pmid uuid.UUID
+}
+
+// PlayerMessagingID returns the identity used by the fake JSON-RPC transport.
+func (f *jsonRPCFakeSignaling) PlayerMessagingID() uuid.UUID { return f.pmid }
+
 func (f *fakeSignaling) Signal(context.Context, *nethernet.Signal) error { return nil }
 func (f *fakeSignaling) Notify(nethernet.Notifier) func() {
 	return func() {}
@@ -811,7 +819,7 @@ func (f *fakeSignaling) NetworkID() string {
 	if f.networkID != "" {
 		return f.networkID
 	}
-	return "network"
+	return "123456789"
 }
 func (f *fakeSignaling) PongData([]byte) {}
 func (f *fakeSignaling) Close() error {
