@@ -47,6 +47,13 @@ gallery:
   imagePath: screenshot.jpg
   deleteOtherImages: true
 
+# Keep joined players inside the NetherNet session and relay their traffic to
+# sessionInfo.ip:port instead of transferring them. Players stay session
+# members while they play, so their friends can discover the world too. The
+# backend must trust this relay's unsigned login chain (see README).
+relay:
+  enabled: false
+
 accounts:
   primaryCachePath: cache/live_token.json
   subAccounts: []

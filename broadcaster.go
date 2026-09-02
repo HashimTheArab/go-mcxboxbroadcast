@@ -72,6 +72,10 @@ type Broadcaster struct {
 	lastQuery *minecraft.ServerStatus
 
 	transferCloseTimeout time.Duration
+	// relays tracks clients currently relayed to the backend.
+	relays relaySet
+	// relayDial overrides the backend dial; nil dials with the configured Dialer.
+	relayDial relayDialFunc
 	// subAccountStartTimeout bounds each sub-account's session publish so a hung
 	// directory or RTA call degrades to a skipped sub-account instead of
 	// blocking broadcaster startup. Zero uses the default.
@@ -120,6 +124,9 @@ type defaultSignalingConfig struct {
 // New validates conf and returns a Broadcaster.
 func New(conf Config) (*Broadcaster, error) {
 	if err := conf.Server.validate(); err != nil {
+		return nil, err
+	}
+	if err := conf.Relay.validate(); err != nil {
 		return nil, err
 	}
 	mode, err := normalizeSignalingMode(conf.SignalingMode)
@@ -441,7 +448,17 @@ func (b *Broadcaster) minecraftListenConfig(status room.Status) minecraft.Listen
 			minecraft.Protocol12644(),
 		}
 	}
-	conf.CompressionThreshold = -1
+	if b.conf.Relay != nil {
+		// Accept right after login so the backend owns the rest of the login
+		// sequence, including resource packs, end to end with the real client.
+		conf.DisablePacketHandling = true
+		conf.EnableBatchReading = true
+		conf.FlushRate = -1 // relayPump flushes once per forwarded batch
+		conf.AllowUnknownPackets = true
+		conf.AllowInvalidPackets = true
+	} else {
+		conf.CompressionThreshold = -1
+	}
 	conf.ForceDisableVibrantVisuals = true
 	conf.ResourcePackWorldTemplateUUID = uuid.Nil
 	conf.ResourcePackWorldTemplateVersion = ""
@@ -1368,7 +1385,7 @@ func (b *Broadcaster) notifySessionUpdateFailure(ctx context.Context, err error)
 	b.notify(ctx, "Xbox session update failed: "+err.Error())
 }
 
-// acceptListener accepts connections from the given listener and transfers each to the target server.
+// acceptListener accepts connections from the given listener and hands each to handleClient.
 func (b *Broadcaster) acceptListener(l *minecraft.Listener) {
 	for {
 		conn, err := l.Accept()
@@ -1384,7 +1401,7 @@ func (b *Broadcaster) acceptListener(l *minecraft.Listener) {
 			_ = conn.Close()
 			continue
 		}
-		go b.transfer(mcConn)
+		go b.handleClient(mcConn)
 	}
 }
 
@@ -1681,8 +1698,8 @@ func (b *Broadcaster) sessionHealthIssue() sessionHealthIssue {
 	if session.Context().Err() != nil {
 		return sessionHealthIssue{reason: "mpsd session lost"}
 	}
-	if count := sessionMemberCount(session); count >= sessionMemberRestartThreshold {
-		return sessionHealthIssue{reason: fmt.Sprintf("session has %d/30 members", count)}
+	if count := b.staleSessionMembers(session.Members()); count >= sessionMemberRestartThreshold {
+		return sessionHealthIssue{reason: fmt.Sprintf("session has %d/30 non-relayed members", count)}
 	}
 	for _, sub := range b.subAnnouncers {
 		xbl, ok := xblAnnouncer(sub.announcer)
@@ -1696,24 +1713,15 @@ func (b *Broadcaster) sessionHealthIssue() sessionHealthIssue {
 			return sessionHealthIssue{reason: "sub-account session lost", subAccountID: sub.id}
 		}
 		if session != nil {
-			if count := sessionMemberCount(session); count >= sessionMemberRestartThreshold {
+			if count := b.staleSessionMembers(session.Members()); count >= sessionMemberRestartThreshold {
 				return sessionHealthIssue{
-					reason:       fmt.Sprintf("sub-account session has %d/30 members", count),
+					reason:       fmt.Sprintf("sub-account session has %d/30 non-relayed members", count),
 					subAccountID: sub.id,
 				}
 			}
 		}
 	}
 	return sessionHealthIssue{}
-}
-
-// sessionMemberCount counts the members of an MPSD session.
-func sessionMemberCount(session *mpsd.Session) int {
-	count := 0
-	for range session.Members() {
-		count++
-	}
-	return count
 }
 
 // recreateAfterFailure rebuilds the whole session stack after a health-check

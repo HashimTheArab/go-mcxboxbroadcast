@@ -31,8 +31,11 @@ type Config struct {
 	// signaling and gallery/profile image requests.
 	MinecraftTokenSource service.TokenSource
 
-	// Server is the target Bedrock server clients are transferred to.
+	// Server is the target Bedrock server clients are transferred or relayed to.
 	Server ServerInfo
+	// Relay keeps joined clients inside the NetherNet session and relays them
+	// to the backend instead of transferring them. Nil transfers.
+	Relay *RelayConfig
 
 	// SessionName is the MPSD session name. If empty, a random UUID is used.
 	SessionName string

@@ -31,6 +31,7 @@ type ConfigFile struct {
 	FriendSync                   FriendFileConfig   `yaml:"friendSync" toml:"friendSync"`
 	Notifications                NotificationConfig `yaml:"notifications" toml:"notifications"`
 	Gallery                      GalleryFileConfig  `yaml:"gallery" toml:"gallery"`
+	Relay                        RelayFileConfig    `yaml:"relay" toml:"relay"`
 	Accounts                     AccountsConfig     `yaml:"accounts" toml:"accounts"`
 
 	// Notes lists adjustments applied while loading, such as out-of-range
@@ -97,6 +98,11 @@ type FriendExpiryFile struct {
 type NotificationConfig struct {
 	Enabled    bool   `yaml:"enabled" toml:"enabled"`
 	WebhookURL string `yaml:"webhookUrl" toml:"webhookUrl"`
+}
+
+// RelayFileConfig enables relay mode; see RelayConfig for the trust model.
+type RelayFileConfig struct {
+	Enabled bool `yaml:"enabled" toml:"enabled"`
 }
 
 type GalleryFileConfig struct {
@@ -322,6 +328,9 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 	}
 	if c.FriendSync.Expiry.Enabled {
 		cfg.FriendHistory = NewFileHistoryStore(resolvePath(in.BaseDir, c.FriendSync.Expiry.HistoryPath))
+	}
+	if c.Relay.Enabled {
+		cfg.Relay = &RelayConfig{}
 	}
 	if c.Gallery.Enabled {
 		cfg.Gallery = &GalleryConfig{
