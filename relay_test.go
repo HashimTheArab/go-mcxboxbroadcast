@@ -134,7 +134,7 @@ func TestRelayPumpForwardsEachBatchWithOneFlush(t *testing.T) {
 func TestBroadcasterRelayDialsWithClientIdentityAndForwardsBothWays(t *testing.T) {
 	client := newFakeRelayConn([]packet.Packet{&packet.Text{Message: "from client"}})
 	client.identity = login.IdentityData{XUID: "visitor", DisplayName: "Visitor"}
-	client.client = login.ClientData{GameVersion: "1.26.45", ServerAddress: "nethernet"}
+	client.client = login.ClientData{GameVersion: "1.26.45", ServerAddress: "nethernet", PlatformOnlineID: "forged", SelfSignedID: "device-uuid"}
 	server := newFakeRelayConn([]packet.Packet{&packet.Text{Message: "from server"}})
 
 	var (
@@ -177,6 +177,9 @@ func TestBroadcasterRelayDialsWithClientIdentityAndForwardsBothWays(t *testing.T
 	}
 	if gotDialer.ClientData.GameVersion != "1.26.45" || gotDialer.ClientData.ServerAddress != "backend.example.net:19133" {
 		t.Fatalf("dialer client data %#v, want the client's data pointed at the backend", gotDialer.ClientData)
+	}
+	if gotDialer.ClientData.PlatformOnlineID != "visitor" || gotDialer.ClientData.SelfSignedID != "device-uuid" {
+		t.Fatalf("dialer platform ids online=%q self=%q, want the verified XUID and the client's own self-signed id", gotDialer.ClientData.PlatformOnlineID, gotDialer.ClientData.SelfSignedID)
 	}
 	if !gotDialer.DisablePacketHandling || !gotDialer.EnableBatchReading || gotDialer.FlushRate != -1 {
 		t.Fatalf("dialer passthrough flags = %v/%v/%v, want passthrough batch reading with relay-owned flushing", gotDialer.DisablePacketHandling, gotDialer.EnableBatchReading, gotDialer.FlushRate)

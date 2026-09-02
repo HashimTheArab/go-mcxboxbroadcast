@@ -222,6 +222,13 @@ func (b *Broadcaster) dialRelayTarget(ctx context.Context, conn relayClientConn,
 	d.IdentityData = conn.IdentityData()
 	d.ClientData = conn.ClientData()
 	d.ClientData.ServerAddress = target
+	if d.IdentityData.XUID != "" {
+		// Backends that trust the relay key player data on the client-supplied
+		// platform id once the XUID is gone from the chain. Binding it to the
+		// verified XUID keeps the record stable and stops a client claiming another
+		// player's data.
+		d.ClientData.PlatformOnlineID = d.IdentityData.XUID
+	}
 	d.KeepXBLIdentityData = true
 	d.DisablePacketHandling = true
 	d.EnableBatchReading = true
