@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -66,6 +67,8 @@ type Broadcaster struct {
 	galleryMu sync.Mutex
 	started   bool
 	acceptWg  sync.WaitGroup
+	// recreateFailures counts consecutive recreateSession failures; guarded by mu.
+	recreateFailures int
 
 	// lastQuery is the most recent successful target-server query, kept so
 	// query failures fall back to real data instead of failing the update.
@@ -1831,11 +1834,58 @@ func retryWithBackoff(ctx context.Context, base, max time.Duration, attempt func
 	}
 }
 
-// recreateSession tears down and rebuilds signaling, session, and listener after a drop.
+// recreateSession tears down and rebuilds signaling, session, and listener
+// after a drop. Once a rebuild has already failed, the next one first discards
+// the primary Xbox Live client: a client whose RTA connection is gone fails
+// every publish the same way, and only a fresh client recovers.
 func (b *Broadcaster) recreateSession() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	if b.recreateFailures > 0 {
+		b.discardPrimaryXBLClientLocked()
+	}
+	if err := b.recreateSessionLocked(); err != nil {
+		b.recreateFailures++
+		return err
+	}
+	b.recreateFailures = 0
+	return nil
+}
+
+// closeXBLClient is a test seam for discarding a created client.
+var closeXBLClient = func(ctx context.Context, client *xsapi.Client) error {
+	return client.CloseContext(ctx)
+}
+
+// discardPrimaryXBLClientLocked closes and forgets the primary Xbox Live
+// client when the broadcaster created it, so the next rebuild dials a new one.
+// A caller-owned client is left alone.
+func (b *Broadcaster) discardPrimaryXBLClientLocked() {
+	client := b.conf.XBLClient
+	if client == nil {
+		client = b.xblClient
+	}
+	if client == nil {
+		return
+	}
+	created := createdXBLClientSet(b.createdXBLClients)
+	if !xblClientCreated(client, created) {
+		b.debug("primary xbox live client is caller-owned; keeping it across the re-create")
+		return
+	}
+	b.warn("discarding primary xbox live client after a failed session re-create")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := closeXBLClient(ctx, client); err != nil {
+		b.debug("close discarded xbox live client", "err", err)
+	}
+	b.clearCreatedXBLClientReferences(map[*xsapi.Client]struct{}{client: {}})
+	b.createdXBLClients = slices.DeleteFunc(b.createdXBLClients, func(c *xsapi.Client) bool { return c == client })
+}
+
+// recreateSessionLocked does the rebuild; the caller holds mu.
+func (b *Broadcaster) recreateSessionLocked() error {
 	if b.ctx.Err() != nil || !b.started {
 		return errors.New("broadcaster is shut down")
 	}

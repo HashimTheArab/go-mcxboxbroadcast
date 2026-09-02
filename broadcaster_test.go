@@ -984,3 +984,61 @@ func TestStartSubAccountsTimeoutDoesNotBlockStartup(t *testing.T) {
 		t.Fatal("startSubAccounts blocked on a hung sub-account publish")
 	}
 }
+
+// A rebuild that fails twice in a row discards the client the broadcaster
+// created, so the third attempt dials Xbox Live afresh instead of reusing a
+// dead RTA connection. A caller-owned client is never touched.
+func TestRecreateSessionDiscardsCreatedPrimaryClientAfterRepeatedFailure(t *testing.T) {
+	closed := 0
+	oldClose := closeXBLClient
+	closeXBLClient = func(context.Context, *xsapi.Client) error {
+		closed++
+		return nil
+	}
+	t.Cleanup(func() { closeXBLClient = oldClose })
+
+	newBroadcaster := func(primary *xsapi.Client, created bool) *Broadcaster {
+		b := &Broadcaster{
+			ctx:     context.Background(),
+			started: true,
+			log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+			conf: Config{
+				XBLClient: primary,
+				SignalingFactory: func(context.Context, Config) (nethernet.Signaling, error) {
+					return nil, errors.New("signaling down")
+				},
+			},
+		}
+		if created {
+			b.xblClient = primary
+			b.createdXBLClients = []*xsapi.Client{primary}
+		}
+		return b
+	}
+
+	primary := &xsapi.Client{}
+	b := newBroadcaster(primary, true)
+	if err := b.recreateSession(); err == nil {
+		t.Fatal("first recreateSession succeeded unexpectedly")
+	}
+	if closed != 0 || b.conf.XBLClient != primary {
+		t.Fatalf("first failure discarded the client: closed=%d client=%v", closed, b.conf.XBLClient)
+	}
+	if err := b.recreateSession(); err == nil {
+		t.Fatal("second recreateSession succeeded unexpectedly")
+	}
+	if closed != 1 {
+		t.Fatalf("closed = %d, want 1 after the second consecutive failure", closed)
+	}
+	if b.conf.XBLClient != nil || b.xblClient != nil || len(b.createdXBLClients) != 0 {
+		t.Fatalf("created client was not forgotten: conf=%v cached=%v created=%d", b.conf.XBLClient, b.xblClient, len(b.createdXBLClients))
+	}
+
+	external := &xsapi.Client{}
+	b = newBroadcaster(external, false)
+	_ = b.recreateSession()
+	_ = b.recreateSession()
+	if closed != 1 || b.conf.XBLClient != external {
+		t.Fatalf("caller-owned client was discarded: closed=%d client=%v", closed, b.conf.XBLClient)
+	}
+}
