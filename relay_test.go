@@ -11,6 +11,7 @@ import (
 
 	"github.com/df-mc/go-xsapi/v2/mpsd"
 	"github.com/sandertv/gophertunnel/minecraft"
+	"github.com/sandertv/gophertunnel/minecraft/protocol"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/login"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
 	"github.com/sandertv/gophertunnel/minecraft/room"
@@ -27,15 +28,17 @@ func (relayOAuthTokenSource) Token() (*oauth2.Token, error) {
 type fakeRelayConn struct {
 	mu       sync.Mutex
 	batches  chan []packet.Packet
+	readErrs chan error
 	written  []packet.Packet
 	flushes  int
+	gameData []minecraft.GameData
 	closed   chan struct{}
 	identity login.IdentityData
 	client   login.ClientData
 }
 
 func newFakeRelayConn(batches ...[]packet.Packet) *fakeRelayConn {
-	c := &fakeRelayConn{batches: make(chan []packet.Packet, len(batches)), closed: make(chan struct{})}
+	c := &fakeRelayConn{batches: make(chan []packet.Packet, len(batches)), readErrs: make(chan error, 1), closed: make(chan struct{})}
 	for _, batch := range batches {
 		c.batches <- batch
 	}
@@ -46,6 +49,8 @@ func (c *fakeRelayConn) ReadBatch() ([]packet.Packet, error) {
 	select {
 	case batch := <-c.batches:
 		return batch, nil
+	case err := <-c.readErrs:
+		return nil, err
 	case <-c.closed:
 		return nil, net.ErrClosed
 	}
@@ -77,10 +82,25 @@ func (c *fakeRelayConn) Close() error {
 }
 
 func (c *fakeRelayConn) ReadPacket() (packet.Packet, error) { return nil, net.ErrClosed }
-func (c *fakeRelayConn) SetReadDeadline(time.Time) error    { return nil }
-func (c *fakeRelayConn) IdentityData() login.IdentityData   { return c.identity }
-func (c *fakeRelayConn) ClientData() login.ClientData       { return c.client }
-func (c *fakeRelayConn) Proto() minecraft.Protocol          { return minecraft.DefaultProtocol }
+func (c *fakeRelayConn) SetReadDeadline(t time.Time) error {
+	if !t.IsZero() {
+		time.AfterFunc(time.Until(t), func() {
+			select {
+			case c.readErrs <- context.DeadlineExceeded:
+			default:
+			}
+		})
+	}
+	return nil
+}
+func (c *fakeRelayConn) SetGameData(data minecraft.GameData) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.gameData = append(c.gameData, data)
+}
+func (c *fakeRelayConn) IdentityData() login.IdentityData { return c.identity }
+func (c *fakeRelayConn) ClientData() login.ClientData     { return c.client }
+func (c *fakeRelayConn) Proto() minecraft.Protocol        { return minecraft.DefaultProtocol }
 func (c *fakeRelayConn) isClosed() bool {
 	select {
 	case <-c.closed:
@@ -105,9 +125,10 @@ func (c *fakeRelayConn) waitClosed(t *testing.T, what string) {
 
 func relayTestBroadcaster(relay *RelayConfig, dial relayDialFunc) *Broadcaster {
 	return &Broadcaster{
-		log:       testBroadcasterLogger(),
-		conf:      Config{Server: ServerInfo{Host: "backend.example.net", Port: 19133}, Relay: relay},
-		relayDial: dial,
+		log:                  testBroadcasterLogger(),
+		conf:                 Config{Server: ServerInfo{Host: "backend.example.net", Port: 19133}, Relay: relay},
+		relayDial:            dial,
+		transferCloseTimeout: -1,
 	}
 }
 
@@ -121,7 +142,7 @@ func TestRelayPumpForwardsEachBatchWithOneFlush(t *testing.T) {
 		src.Close()
 	}()
 
-	err := relayPump(src, dst)
+	err := relayPump(src, dst, nil)
 	if !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("pump error = %v, want net.ErrClosed", err)
 	}
@@ -183,6 +204,9 @@ func TestBroadcasterRelayDialsWithClientIdentityAndForwardsBothWays(t *testing.T
 	}
 	if gotDialer.Protocol == nil || gotDialer.Protocol.ID() != minecraft.DefaultProtocol.ID() {
 		t.Fatalf("dialer protocol %v, want the client's", gotDialer.Protocol)
+	}
+	if !gotDialer.ForwardClientCacheStatus || gotDialer.DisconnectOnUnknownPackets || gotDialer.DisconnectOnInvalidPackets {
+		t.Fatal("dialer must forward the client's cache status and pass unknown/invalid packets through")
 	}
 	if b.relays.count() != 0 {
 		t.Fatalf("relayed clients = %d after the relay ended, want 0", b.relays.count())
@@ -261,6 +285,74 @@ func assertDisconnected(t *testing.T, client *fakeRelayConn) {
 	}
 }
 
+func TestBroadcasterRelayShowsBackendDisconnectToClient(t *testing.T) {
+	client := newFakeRelayConn()
+	server := newFakeRelayConn()
+	server.readErrs <- &minecraft.DisconnectPacketError{Reason: packet.DisconnectReasonKicked, Message: "You are banned"}
+	b := relayTestBroadcaster(&RelayConfig{}, func(context.Context, minecraft.Dialer, string, string) (relayServerConn, error) {
+		return server, nil
+	})
+
+	b.relay(client)
+	written, _ := client.snapshot()
+	if len(written) != 1 {
+		t.Fatalf("client received %d packets, want the backend's Disconnect", len(written))
+	}
+	disconnect, ok := written[0].(*packet.Disconnect)
+	if !ok || disconnect.Message != "You are banned" || disconnect.Reason != packet.DisconnectReasonKicked {
+		t.Fatalf("client received %#v, want the backend's Disconnect", written[0])
+	}
+	if !client.isClosed() || !server.isClosed() {
+		t.Fatal("both legs must be closed after the backend disconnects")
+	}
+}
+
+func TestBroadcasterRelayLearnsItemTableFromItemRegistry(t *testing.T) {
+	items := []protocol.ItemEntry{{Name: "minecraft:shield", RuntimeID: 355}}
+	client := newFakeRelayConn()
+	server := newFakeRelayConn([]packet.Packet{&packet.ItemRegistry{Items: items}})
+	b := relayTestBroadcaster(&RelayConfig{}, func(context.Context, minecraft.Dialer, string, string) (relayServerConn, error) {
+		return server, nil
+	})
+
+	done := make(chan struct{})
+	go func() {
+		b.relay(client)
+		close(done)
+	}()
+	waitFor(t, func() bool {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		return len(client.gameData) == 1
+	}, "client did not learn the item table")
+	server.Close()
+	<-done
+
+	for name, conn := range map[string]*fakeRelayConn{"client": client, "server": server} {
+		conn.mu.Lock()
+		got := conn.gameData
+		conn.mu.Unlock()
+		if len(got) != 1 || len(got[0].Items) != 1 || got[0].Items[0].RuntimeID != 355 {
+			t.Fatalf("%s game data = %#v, want the relayed item table", name, got)
+		}
+	}
+}
+
+func TestDisconnectRelayClientWaitsForClientToLeave(t *testing.T) {
+	client := newFakeRelayConn()
+	b := relayTestBroadcaster(&RelayConfig{}, nil)
+	b.transferCloseTimeout = 30 * time.Millisecond
+
+	start := time.Now()
+	b.disconnectRelayClient(client, &packet.Disconnect{Message: "bye"})
+	if elapsed := time.Since(start); elapsed < 30*time.Millisecond {
+		t.Fatalf("closed after %s without waiting for the client to leave", elapsed)
+	}
+	if !client.isClosed() {
+		t.Fatal("client was not closed after the disconnect wait")
+	}
+}
+
 func TestHandleClientTransfersWithoutRelayConfig(t *testing.T) {
 	client := newFakeRelayConn()
 	b := relayTestBroadcaster(nil, func(context.Context, minecraft.Dialer, string, string) (relayServerConn, error) {
@@ -286,6 +378,7 @@ func TestStaleSessionMembersIgnoresRelayedPlayers(t *testing.T) {
 	b := relayTestBroadcaster(&RelayConfig{}, nil)
 	live := newFakeRelayConn()
 	b.relays.add(live, "relayed")
+	b.relays.add(newFakeRelayConn(), "") // must not match members without a XUID
 
 	members := func(yield func(string, mpsd.MemberDescription) bool) {
 		for _, xuid := range []string{"relayed", "stale", "host"} {

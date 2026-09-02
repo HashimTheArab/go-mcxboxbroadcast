@@ -80,6 +80,9 @@ type relayServerConn interface {
 	WritePacket(packet.Packet) error
 	Flush() error
 	Close() error
+	// SetGameData teaches a passthrough conn the item table, which the codec
+	// needs to frame shield items correctly.
+	SetGameData(minecraft.GameData)
 }
 
 // relayDialFunc dials the backend for one client. The broadcaster's default uses d.DialContext.
@@ -119,7 +122,9 @@ func (s *relaySet) xuids() map[string]struct{} {
 	defer s.mu.Unlock()
 	xuids := make(map[string]struct{}, len(s.clients))
 	for _, xuid := range s.clients {
-		xuids[xuid] = struct{}{}
+		if xuid != "" {
+			xuids[xuid] = struct{}{}
+		}
 	}
 	return xuids
 }
@@ -151,34 +156,23 @@ func (b *Broadcaster) handleClient(conn relayClientConn) {
 }
 
 // relay logs conn's player into the backend with their own identity and pumps
-// packets both ways until either side disconnects.
+// packets both ways until either side disconnects. A Disconnect from the
+// backend is shown to the player rather than degrading to a dropped connection.
 func (b *Broadcaster) relay(conn relayClientConn) {
-	cfg := b.conf.Relay
 	id := conn.IdentityData()
 	b.relays.add(conn, id.XUID)
-	defer b.relays.remove(conn)
-	defer conn.Close()
 
 	ctx := b.ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	dialCtx, cancel := context.WithTimeout(ctx, cfg.dialTimeout())
-	target, err := b.resolveRelayTarget(dialCtx, id, conn.ClientData())
+	server, target, err := b.connectRelay(ctx, conn, id)
 	if err != nil {
-		cancel()
-		b.log.Error("resolve relay target", "xuid", id.XUID, "name", id.DisplayName, "err", err)
-		b.disconnectRelayClient(conn, "The server is not available right now.")
+		// Bookkeeping first: closing can block on a stalled peer.
+		b.relays.remove(conn)
+		b.disconnectRelayClient(conn, &packet.Disconnect{Message: text.Colourf("<red>%v</red>", err)})
 		return
 	}
-	server, err := b.dialRelayTarget(dialCtx, conn, target)
-	cancel()
-	if err != nil {
-		b.log.Error("dial relay target", "xuid", id.XUID, "name", id.DisplayName, "target", target, "err", err)
-		b.disconnectRelayClient(conn, "Could not reach the server, try again shortly.")
-		return
-	}
-	defer server.Close()
 
 	if recorder, ok := b.conf.FriendHistory.(HistoryRecorder); ok && id.XUID != "" {
 		if err := recorder.Seen(ctx, id.XUID, time.Now()); err != nil {
@@ -187,16 +181,50 @@ func (b *Broadcaster) relay(conn relayClientConn) {
 	}
 	b.info("relaying bedrock client", "xuid", id.XUID, "name", id.DisplayName, "target", target)
 
-	errs := make(chan error, 2)
-	go func() { errs <- relayPump(conn, server) }()
-	go func() { errs <- relayPump(server, conn) }()
-	select {
-	case err := <-errs:
-		if err != nil && !errors.Is(err, net.ErrClosed) {
-			b.debug("relay ended", "xuid", id.XUID, "name", id.DisplayName, "err", err)
-		}
-	case <-ctx.Done():
+	end := b.pumpRelay(ctx, conn, server)
+	b.relays.remove(conn)
+	_ = server.Close()
+	if end.err != nil && !errors.Is(end.err, net.ErrClosed) {
+		b.debug("relay ended", "xuid", id.XUID, "name", id.DisplayName, "from_server", end.fromServer, "err", end.err)
 	}
+	var disconnect *minecraft.DisconnectPacketError
+	if end.fromServer && errors.As(end.err, &disconnect) {
+		b.disconnectRelayClient(conn, &packet.Disconnect{
+			Reason:                  disconnect.Reason,
+			HideDisconnectionScreen: disconnect.HideDisconnectionScreen,
+			Message:                 disconnect.Message,
+			FilteredMessage:         disconnect.FilteredMessage,
+		})
+		return
+	}
+	_ = conn.Close()
+}
+
+// relayError carries the message shown to the player when the relay cannot start.
+type relayError struct {
+	message string
+	err     error
+}
+
+func (e *relayError) Error() string { return e.message }
+func (e *relayError) Unwrap() error { return e.err }
+
+// connectRelay resolves and dials the backend for conn, returning the backend
+// conn and its address. The error's text is safe to show to the player.
+func (b *Broadcaster) connectRelay(ctx context.Context, conn relayClientConn, id login.IdentityData) (relayServerConn, string, error) {
+	ctx, cancel := context.WithTimeout(ctx, b.conf.Relay.dialTimeout())
+	defer cancel()
+	target, err := b.resolveRelayTarget(ctx, id, conn.ClientData())
+	if err != nil {
+		b.log.Error("resolve relay target", "xuid", id.XUID, "name", id.DisplayName, "err", err)
+		return nil, "", &relayError{message: "The server is not available right now.", err: err}
+	}
+	server, err := b.dialRelayTarget(ctx, conn, target)
+	if err != nil {
+		b.log.Error("dial relay target", "xuid", id.XUID, "name", id.DisplayName, "target", target, "err", err)
+		return nil, target, &relayError{message: "Could not reach the server, try again shortly.", err: err}
+	}
+	return server, target, nil
 }
 
 func (b *Broadcaster) resolveRelayTarget(ctx context.Context, id login.IdentityData, client login.ClientData) (string, error) {
@@ -226,6 +254,9 @@ func (b *Broadcaster) dialRelayTarget(ctx context.Context, conn relayClientConn,
 	d.DisablePacketHandling = true
 	d.EnableBatchReading = true
 	d.FlushRate = -1 // relayPump flushes once per forwarded batch
+	d.ForwardClientCacheStatus = true
+	d.DisconnectOnUnknownPackets = false
+	d.DisconnectOnInvalidPackets = false
 	d.Protocol = conn.Proto()
 	if d.ErrorLog == nil {
 		d.ErrorLog = b.log
@@ -249,26 +280,79 @@ func defaultRelayDial(ctx context.Context, d minecraft.Dialer, network, address 
 	return conn, nil
 }
 
-func (b *Broadcaster) disconnectRelayClient(conn relayClientConn, message string) {
-	_ = conn.WritePacket(&packet.Disconnect{Message: text.Colourf("<red>%v</red>", message)})
-	_ = conn.Flush()
+// relayEnd reports which leg stopped a relay and why.
+type relayEnd struct {
+	fromServer bool
+	err        error
+}
+
+// pumpRelay forwards batches both ways until a leg fails or the broadcaster
+// stops. The other pump unblocks once the caller closes both conns.
+func (b *Broadcaster) pumpRelay(ctx context.Context, client relayClientConn, server relayServerConn) relayEnd {
+	ends := make(chan relayEnd, 2)
+	go func() { ends <- relayEnd{err: relayPump(client, server, nil)} }()
+	go func() {
+		ends <- relayEnd{fromServer: true, err: relayPump(server, client, func(pk packet.Packet) {
+			if registry, ok := pk.(*packet.ItemRegistry); ok {
+				data := minecraft.GameData{Items: registry.Items}
+				server.SetGameData(data)
+				client.SetGameData(data)
+			}
+		})}
+	}()
+	select {
+	case end := <-ends:
+		return end
+	case <-ctx.Done():
+		return relayEnd{err: ctx.Err()}
+	}
 }
 
 // relayPump forwards each network batch read from src as one batch to dst, so
-// the relay adds no coalescing latency of its own.
-func relayPump(src, dst relayServerConn) error {
+// the relay adds no coalescing latency of its own. observe, if non-nil, sees
+// every packet before it is written.
+func relayPump(src, dst relayServerConn, observe func(packet.Packet)) error {
 	for {
 		batch, err := src.ReadBatch()
 		if err != nil {
 			return fmt.Errorf("read batch: %w", err)
 		}
 		for _, pk := range batch {
+			if observe != nil {
+				observe(pk)
+			}
 			if err := dst.WritePacket(pk); err != nil {
 				return fmt.Errorf("write packet: %w", err)
 			}
 		}
 		if err := dst.Flush(); err != nil {
 			return fmt.Errorf("flush batch: %w", err)
+		}
+	}
+}
+
+// disconnectRelayClient shows pk to the player, then waits for the client to
+// leave before closing so the message is not cut off by the transport teardown.
+func (b *Broadcaster) disconnectRelayClient(conn relayClientConn, pk *packet.Disconnect) {
+	defer conn.Close()
+	if err := conn.WritePacket(pk); err != nil {
+		return
+	}
+	if err := conn.Flush(); err != nil {
+		return
+	}
+	timeout := b.effectiveTransferCloseTimeout()
+	if timeout <= 0 {
+		return
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return
+	}
+	cancelWait := b.closeTransferredClientOnStop(conn)
+	defer cancelWait()
+	for {
+		if _, err := conn.ReadBatch(); err != nil {
+			return
 		}
 	}
 }
