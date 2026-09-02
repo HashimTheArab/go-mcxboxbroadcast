@@ -63,6 +63,31 @@ The config exposes the same operator-facing areas as MCXboxBroadcast:
 - optional HTTP proxy URL through `http.proxy`
 - selectable NetherNet signaling through `session.signalingMode`: `websocket`
   (default) or `jsonrpc` (only when no sub-accounts are enabled).
+- relay mode through `relay.enabled`, which keeps players inside the NetherNet
+  session instead of transferring them (see below).
+
+### Relay mode
+
+By default a joining client receives a `Transfer` to `sessionInfo.ip:port` and
+leaves the Xbox session, so only the bot's own friends ever see the world. With
+`relay.enabled: true` the broadcaster instead logs the player into the backend
+itself and relays every packet batch in both directions. The player stays a
+member of the session for as long as they play, which lets their own friends
+discover and join the world too. The backend owns the whole login sequence,
+including resource packs, so the client sees exactly what a direct join would.
+
+The backend receives the relay's address and a self-signed login chain that
+still carries the XUID the broadcaster verified, so it must trust the relay:
+Geyser with `advanced.bedrock.validate-bedrock-login: false`, BDS with
+`online-mode=false`, or a gophertunnel listener with `AuthenticationDisabled`.
+Bind such a backend to loopback or a private network; the broadcaster is its
+authentication boundary. Public servers that verify login chains cannot be
+relayed to, and a `Transfer` sent by the backend still moves the client out of
+the session.
+
+Library users can route each player individually with `RelayConfig.ResolveTarget`
+and customize the backend dial with `RelayConfig.Dialer`. Xbox Live's session
+member limit bounds how many players one session can relay at a time.
 
 ### Signaling modes
 

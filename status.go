@@ -57,6 +57,9 @@ func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 		}
 	}
 
+	if b.conf.Relay != nil && !st.QueryTarget {
+		st.Players = max(st.Players, b.relays.count())
+	}
 	advertisedProtocol := st.Protocol
 	if advertisedProtocol == 0 {
 		advertisedProtocol = protocol.CurrentProtocol
