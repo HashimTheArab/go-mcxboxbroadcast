@@ -2,6 +2,7 @@ package broadcaster
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,11 +20,14 @@ const (
 	peopleHubFollowersURL = "https://peoplehub.xboxlive.com/users/me/people/followers"
 	peopleHubSocialURL    = "https://peoplehub.xboxlive.com/users/me/people/social"
 	pendingRequestsURL    = "https://peoplehub.xboxlive.com/users/me/people/friendRequests(received)"
-	bulkAddFriendsURL     = "https://social.xboxlive.com/bulk/users/me/people/friends/v2?method=add"
-	socialSummaryURL      = "https://social.xboxlive.com/users/me/summary"
+	addFriendsURL         = "https://social.xboxlive.com/bulk/users/me/people/friends/v2?method=add"
 )
 
 func followURL(xuid string) string {
+	return fmt.Sprintf("https://social.xboxlive.com/users/me/people/xuid(%s)", xuid)
+}
+
+func unfollowURL(xuid string) string {
 	return fmt.Sprintf("https://social.xboxlive.com/users/me/people/xuid(%s)", xuid)
 }
 
@@ -125,7 +129,7 @@ func TestFriendClientUnfollowReturnsRetryAfterError(t *testing.T) {
 			if req.Method != http.MethodDelete {
 				t.Fatalf("unexpected method %s", req.Method)
 			}
-			if req.URL.String() != followURL("123") {
+			if req.URL.String() != unfollowURL("123") {
 				t.Fatalf("unexpected URL %s", req.URL)
 			}
 			resp := response(http.StatusTooManyRequests, "")
@@ -197,7 +201,7 @@ func TestFriendClientFollowReturnsSocialResponseErrors(t *testing.T) {
 	}
 }
 
-func TestFriendClientAcceptPendingFriendRequestsUsesBulkAdd(t *testing.T) {
+func TestFriendClientAcceptPendingFriendRequestsUsesAddFriends(t *testing.T) {
 	var requests []string
 	client := FriendClient{
 		Client: testAuthenticatedClient("XBL3.0 x=user;token", roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -211,13 +215,15 @@ func TestFriendClientAcceptPendingFriendRequestsUsesBulkAdd(t *testing.T) {
 					t.Fatalf("contract version = %q, want 7", req.Header.Get("X-Xbl-Contract-Version"))
 				}
 				return response(http.StatusOK, `{"people":[{"xuid":"1","gamertag":"One"},{"xuid":"2","gamertag":"Two"}]}`), nil
-			case req.Method == http.MethodPost && req.URL.String() == bulkAddFriendsURL:
-				body, err := io.ReadAll(req.Body)
-				if err != nil {
+			case req.Method == http.MethodPost && req.URL.String() == addFriendsURL:
+				var body struct {
+					XUIDs []string `json:"xuids"`
+				}
+				if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 					t.Fatal(err)
 				}
-				if want := `{"xuids":["1","2"]}`; string(body) != want {
-					t.Fatalf("bulk body = %s, want %s", body, want)
+				if got, want := strings.Join(body.XUIDs, ","), "1,2"; got != want {
+					t.Fatalf("add-friends XUIDs = %s, want %s", got, want)
 				}
 				return response(http.StatusOK, `{"updatedPeople":["1","2"]}`), nil
 			default:
@@ -232,13 +238,103 @@ func TestFriendClientAcceptPendingFriendRequestsUsesBulkAdd(t *testing.T) {
 	}
 	wantRequests := strings.Join([]string{
 		http.MethodGet + " " + pendingRequestsURL,
-		http.MethodPost + " " + bulkAddFriendsURL,
+		http.MethodPost + " " + addFriendsURL,
 	}, ",")
 	if got := strings.Join(requests, ","); got != wantRequests {
 		t.Fatalf("requests = %s, want %s", got, wantRequests)
 	}
 	if len(accepted) != 2 || accepted[0].XUID != "1" || accepted[1].XUID != "2" {
 		t.Fatalf("accepted people = %#v", accepted)
+	}
+}
+
+func TestFriendClientAcceptPendingFriendRequestsBatchesAdds(t *testing.T) {
+	pending := make([]map[string]string, 51)
+	for i := range pending {
+		pending[i] = map[string]string{"xuid": fmt.Sprint(i + 1)}
+	}
+	pendingBody, err := json.Marshal(map[string]any{"people": pending})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var batchSizes []int
+	client := FriendClient{
+		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.Method {
+			case http.MethodGet:
+				return response(http.StatusOK, string(pendingBody)), nil
+			case http.MethodPost:
+				var body struct {
+					XUIDs []string `json:"xuids"`
+				}
+				if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+					t.Fatal(err)
+				}
+				batchSizes = append(batchSizes, len(body.XUIDs))
+				responseBody, err := json.Marshal(map[string]any{"updatedPeople": body.XUIDs})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return response(http.StatusOK, string(responseBody)), nil
+			default:
+				t.Fatalf("unexpected request %s %s", req.Method, req.URL)
+			}
+			return nil, nil
+		})},
+	}
+
+	accepted, err := client.AcceptPendingFriendRequests(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accepted) != len(pending) {
+		t.Fatalf("accepted %d people, want %d", len(accepted), len(pending))
+	}
+	if got := fmt.Sprint(batchSizes); got != "[50 1]" {
+		t.Fatalf("bulk batch sizes = %s, want [50 1]", got)
+	}
+}
+
+func TestFriendClientAcceptPendingFriendRequestsSplitsLimitErrors(t *testing.T) {
+	var batchSizes []int
+	client := FriendClient{
+		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.Method {
+			case http.MethodGet:
+				return response(http.StatusOK, `{"people":[{"xuid":"1"},{"xuid":"2"},{"xuid":"3"},{"xuid":"4"}]}`), nil
+			case http.MethodPost:
+				var body struct {
+					XUIDs []string `json:"xuids"`
+				}
+				if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+					t.Fatal(err)
+				}
+				batchSizes = append(batchSizes, len(body.XUIDs))
+				if len(body.XUIDs) > 2 {
+					return response(http.StatusBadRequest, `{"code":1050,"description":"Bulk Operation exceeded our limits, retry with a lower count."}`), nil
+				}
+				responseBody, err := json.Marshal(map[string]any{"updatedPeople": body.XUIDs})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return response(http.StatusOK, string(responseBody)), nil
+			default:
+				t.Fatalf("unexpected request %s %s", req.Method, req.URL)
+			}
+			return nil, nil
+		})},
+	}
+
+	accepted, err := client.AcceptPendingFriendRequests(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accepted) != 4 {
+		t.Fatalf("accepted people = %#v, want all four", accepted)
+	}
+	if got := fmt.Sprint(batchSizes); got != "[4 2 2]" {
+		t.Fatalf("bulk batch sizes = %s, want [4 2 2]", got)
 	}
 }
 
@@ -323,24 +419,6 @@ func TestFriendClientForceUnfollowDeletesFollowerRelationship(t *testing.T) {
 	}
 	if !called {
 		t.Fatal("client was not called")
-	}
-}
-
-func TestFriendClientSummaryReturnsFollowingCount(t *testing.T) {
-	client := FriendClient{
-		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			if req.URL.String() != socialSummaryURL {
-				t.Fatalf("unexpected URL %s", req.URL)
-			}
-			return response(http.StatusOK, `{"targetFollowingCount":1337,"targetFollowerCount":42}`), nil
-		})},
-	}
-	summary, err := client.Summary(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if summary.TargetFollowingCount != 1337 || summary.TargetFollowerCount != 42 {
-		t.Fatalf("summary = %#v", summary)
 	}
 }
 

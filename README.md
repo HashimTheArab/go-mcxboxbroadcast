@@ -10,7 +10,9 @@ Go-first building blocks:
 
 - `github.com/df-mc/go-xsapi/v2` for Xbox Live MPSD/RTA session publishing,
   replaced in `go.mod` with the `HashimTheArab/go-xsapi` fork.
-- `github.com/df-mc/go-nethernet` for NetherNet/WebRTC listener support.
+- `github.com/df-mc/go-nethernet` for NetherNet/WebRTC listener support. The
+  upstream module is used directly because it now contains the networking
+  changes that previously required Lunar's fork.
 - `hashimthearab/gophertunnel` Lunar P2P branch for NetherNet, signaling,
   room announcements, and `minecraft/p2p`-compatible session metadata. This
   should be updated to the official `sandertv/gophertunnel` once it supports
@@ -36,6 +38,11 @@ If `config.yml` does not exist, the command writes a default one and starts from
 those values. The first run starts Microsoft device-code authentication and
 stores the Live token at `accounts.primaryCachePath`.
 
+Configuration keys use the exact camelCase names shown in
+[`config.example.yml`](config.example.yml). YAML and TOML are supported; legacy
+kebab-case keys, root-level session settings, friend-expiry aliases, and
+`slack-webhook` are not translated.
+
 Use `-debug` or set `debugMode: true` in the config to show detailed runtime
 events such as session creation, presence heartbeats, friend sync scans, pending
 friend-request accepts, friends being added/removed, and the final add/remove
@@ -54,10 +61,58 @@ The config exposes the same operator-facing areas as MCXboxBroadcast:
 - Slack/Discord-compatible webhook notifications
 - primary and sub-account token cache paths
 - optional HTTP proxy URL through `http.proxy`
-- NetherNet signaling mode through `session.signalingMode`; `jsonrpc` is the
-  supported config value and matches MCXboxBroadcast's `ConnectionType=7`/
-  `PmsgId` session metadata required by current Minecraft friend-list
-  discovery.
+- selectable NetherNet signaling through `session.signalingMode`: `websocket`
+  (default) or `jsonrpc` (only when no sub-accounts are enabled).
+- relay mode through `relay.enabled`, which keeps players inside the NetherNet
+  session instead of transferring them (see below).
+
+### Session recovery
+
+Signaling loss and repeated primary-session update failures share one recovery
+loop. Normal updates pause while it rebuilds the session. Recovery makes up to
+six attempts, waiting 5, 10, 20, 40, and 80 seconds between failures. It reports
+the first recovery failure to the webhook and sends a recovery notice if a later
+attempt succeeds; retry details remain in the logs.
+
+If all six attempts fail, the command closes its resources and exits with an
+error. Run it under Kubernetes or another process supervisor with automatic
+restart enabled so the next process recreates authentication and client state.
+Library callers receive the terminal error from `Broadcaster.Wait()` and must
+call `Close()` to release resources. A normal shutdown returns no recovery error.
+
+### Relay mode
+
+By default a joining client receives a `Transfer` to `sessionInfo.ip:port` and
+leaves the Xbox session, so only the bot's own friends ever see the world. With
+`relay.enabled: true` the broadcaster instead logs the player into the backend
+itself and relays every packet batch in both directions. The player stays a
+member of the session for as long as they play, which lets their own friends
+discover and join the world too. The backend owns the whole login sequence,
+including resource packs, so the client sees exactly what a direct join would.
+
+The backend receives the relay's address and a self-signed login chain that
+still carries the XUID the broadcaster verified, so it must trust the relay:
+Geyser with `advanced.bedrock.validate-bedrock-login: false`, BDS with
+`online-mode=false`, or a gophertunnel listener with `AuthenticationDisabled`.
+Bind such a backend to loopback or a private network; the broadcaster is its
+authentication boundary. Public servers that verify login chains cannot be
+relayed to, and a `Transfer` sent by the backend still moves the client out of
+the session.
+
+Library users can route each player individually with `RelayConfig.ResolveTarget`
+and customize the backend dial with `RelayConfig.Dialer`. Xbox Live's session
+member limit bounds how many players one session can relay at a time.
+
+### Signaling modes
+
+Both modes exchange the same WebRTC offers, answers, and ICE candidates.
+`websocket` connects directly to the signaling service and advertises type `3`,
+whose numeric network ID vanilla stores in `RakNetGUID`. `jsonrpc` wraps the
+same messages in Player Messaging envelopes and advertises type `7` with
+`PmsgId` and `NetherNetId`. JSON-RPC cannot be combined with enabled
+sub-accounts because each independently owned session needs its own Player
+Messaging identity; startup fails instead of publishing a misleading shared
+identity.
 
 ## Docker
 
@@ -67,6 +122,10 @@ The standalone container is published at
 ```sh
 docker run --rm -it -v /path/to/config:/opt/app/config ghcr.io/hashimthearab/go-mcxboxbroadcast:latest
 ```
+
+Interactive terminals use colored, human-readable logs. Redirected output and
+container log streams use plain structured text. Set `NO_COLOR=1` to disable
+color or `FORCE_COLOR=1` to enable it for consoles that do not expose a TTY.
 
 The mounted config directory is where the app reads or creates `config.yml` and
 stores token cache, player history, and gallery assets. With the default
@@ -128,7 +187,9 @@ if err != nil {
 if err := b.Start(ctx); err != nil {
     return err
 }
-defer b.Close()
+runErr := b.Wait()
+closeErr := b.Close()
+return errors.Join(runErr, closeErr)
 ```
 
 Contexts are accepted for start, update, signaling setup, announcement, and

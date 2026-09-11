@@ -11,8 +11,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/df-mc/go-nethernet"
 	"github.com/df-mc/go-xsapi/v2"
 	"github.com/pelletier/go-toml/v2"
+	"github.com/pion/webrtc/v4"
 	"github.com/sandertv/gophertunnel/minecraft"
 	"github.com/sandertv/gophertunnel/minecraft/service"
 	"gopkg.in/yaml.v3"
@@ -29,6 +31,7 @@ type ConfigFile struct {
 	FriendSync                   FriendFileConfig   `yaml:"friendSync" toml:"friendSync"`
 	Notifications                NotificationConfig `yaml:"notifications" toml:"notifications"`
 	Gallery                      GalleryFileConfig  `yaml:"gallery" toml:"gallery"`
+	Relay                        RelayFileConfig    `yaml:"relay" toml:"relay"`
 	Accounts                     AccountsConfig     `yaml:"accounts" toml:"accounts"`
 
 	// Notes lists adjustments applied while loading, such as out-of-range
@@ -44,14 +47,20 @@ type HTTPFileConfig struct {
 // The Geyser-extension-only remoteAddress/remotePort keys are intentionally
 // absent; the broadcast target always comes from sessionInfo.
 type SessionFileConfig struct {
-	UpdateInterval   int             `yaml:"updateInterval" toml:"updateInterval"`
-	SignalingMode    string          `yaml:"signalingMode" toml:"signalingMode"`
-	QueryServer      bool            `yaml:"queryServer" toml:"queryServer"`
-	WebQueryFallback bool            `yaml:"webQueryFallback" toml:"webQueryFallback"`
-	ConfigFallback   bool            `yaml:"configFallback" toml:"configFallback"`
-	BroadcastSetting int32           `yaml:"broadcastSetting" toml:"broadcastSetting"`
-	WorldType        string          `yaml:"worldType" toml:"worldType"`
-	SessionInfo      SessionInfoFile `yaml:"sessionInfo" toml:"sessionInfo"`
+	UpdateInterval   int              `yaml:"updateInterval" toml:"updateInterval"`
+	SignalingMode    string           `yaml:"signalingMode" toml:"signalingMode"`
+	QueryServer      bool             `yaml:"queryServer" toml:"queryServer"`
+	WebQueryFallback bool             `yaml:"webQueryFallback" toml:"webQueryFallback"`
+	ConfigFallback   bool             `yaml:"configFallback" toml:"configFallback"`
+	BroadcastSetting int32            `yaml:"broadcastSetting" toml:"broadcastSetting"`
+	WorldType        string           `yaml:"worldType" toml:"worldType"`
+	ICEPortRange     ICEPortRangeFile `yaml:"icePortRange" toml:"icePortRange"`
+	SessionInfo      SessionInfoFile  `yaml:"sessionInfo" toml:"sessionInfo"`
+}
+
+type ICEPortRangeFile struct {
+	Min int `yaml:"min" toml:"min"`
+	Max int `yaml:"max" toml:"max"`
 }
 
 type SessionInfoFile struct {
@@ -61,6 +70,9 @@ type SessionInfoFile struct {
 	MaxPlayers int    `yaml:"maxPlayers" toml:"maxPlayers"`
 	IP         string `yaml:"ip" toml:"ip"`
 	Port       uint16 `yaml:"port" toml:"port"`
+	// Protocol overrides the network protocol advertised in the session.
+	// Zero uses the protocol library's current protocol.
+	Protocol int32 `yaml:"protocol,omitempty" toml:"protocol,omitempty"`
 	// Version overrides the game version advertised in the session document.
 	// Empty uses the protocol library's version. Clients hide friend worlds
 	// older than their own game version, so set this when a client update
@@ -86,6 +98,11 @@ type FriendExpiryFile struct {
 type NotificationConfig struct {
 	Enabled    bool   `yaml:"enabled" toml:"enabled"`
 	WebhookURL string `yaml:"webhookUrl" toml:"webhookUrl"`
+}
+
+// RelayFileConfig enables relay mode; see RelayConfig for the trust model.
+type RelayFileConfig struct {
+	Enabled bool `yaml:"enabled" toml:"enabled"`
 }
 
 type GalleryFileConfig struct {
@@ -121,7 +138,7 @@ func DefaultConfigFile() ConfigFile {
 		DebugMode:     false,
 		Session: SessionFileConfig{
 			UpdateInterval:   30,
-			SignalingMode:    string(SignalingModeJSONRPC),
+			SignalingMode:    string(SignalingModeWebSocket),
 			QueryServer:      true,
 			WebQueryFallback: false,
 			ConfigFallback:   false,
@@ -270,7 +287,11 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 		in.BaseDir = "."
 	}
 	server := ServerInfo{Host: c.Session.SessionInfo.IP, Port: c.Session.SessionInfo.Port}
-	signalingMode, err := configSignalingMode(c.Session.SignalingMode)
+	signalingMode, err := normalizeSignalingMode(SignalingMode(c.Session.SignalingMode))
+	if err != nil {
+		return Config{}, err
+	}
+	netherNetListenConfig, err := c.Session.ICEPortRange.listenConfig()
 	if err != nil {
 		return Config{}, err
 	}
@@ -284,6 +305,7 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 			HostName:         c.Session.SessionInfo.HostName,
 			WorldName:        c.Session.SessionInfo.WorldName,
 			WorldType:        c.Session.WorldType,
+			Protocol:         c.Session.SessionInfo.Protocol,
 			Version:          c.Session.SessionInfo.Version,
 			Players:          c.Session.SessionInfo.Players,
 			MaxPlayers:       c.Session.SessionInfo.MaxPlayers,
@@ -297,6 +319,7 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 		ListenConfig: minecraft.ListenConfig{
 			HTTPClient: in.HTTPClient,
 		},
+		NetherNetListenConfig:        netherNetListenConfig,
 		UpdateInterval:               time.Duration(c.Session.UpdateInterval) * time.Second,
 		HTTPClient:                   in.HTTPClient,
 		Log:                          in.Log,
@@ -305,6 +328,9 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 	}
 	if c.FriendSync.Expiry.Enabled {
 		cfg.FriendHistory = NewFileHistoryStore(resolvePath(in.BaseDir, c.FriendSync.Expiry.HistoryPath))
+	}
+	if c.Relay.Enabled {
+		cfg.Relay = &RelayConfig{}
 	}
 	if c.Gallery.Enabled {
 		cfg.Gallery = &GalleryConfig{
@@ -324,15 +350,21 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 	return cfg, nil
 }
 
-func configSignalingMode(mode string) (SignalingMode, error) {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "", "jsonrpc", "json-rpc", "messaging":
-		return SignalingModeJSONRPC, nil
-	case "websocket", "websockets", "ws":
-		return "", errors.New("session.signalingMode websocket is not supported for Minecraft friend-list publishing; set session.signalingMode: jsonrpc")
-	default:
-		return "", fmt.Errorf("unknown session.signalingMode %q", mode)
+func (r ICEPortRangeFile) listenConfig() (nethernet.ListenConfig, error) {
+	if r.Min == 0 && r.Max == 0 {
+		return nethernet.ListenConfig{}, nil
 	}
+	if r.Min < 1 || r.Max < 1 || r.Min > 65535 || r.Max > 65535 || r.Min > r.Max {
+		return nethernet.ListenConfig{}, fmt.Errorf(
+			"session.icePortRange must be disabled with min/max 0 or satisfy 1 <= min <= max <= 65535 (got min=%d max=%d)",
+			r.Min, r.Max,
+		)
+	}
+	var settingEngine webrtc.SettingEngine
+	if err := settingEngine.SetEphemeralUDPPortRange(uint16(r.Min), uint16(r.Max)); err != nil {
+		return nethernet.ListenConfig{}, fmt.Errorf("configure session.icePortRange: %w", err)
+	}
+	return nethernet.ListenConfig{API: webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine))}, nil
 }
 
 func (f FriendFileConfig) runtime() *FriendSyncConfig {
@@ -351,15 +383,11 @@ func (f FriendFileConfig) runtime() *FriendSyncConfig {
 }
 
 func decodeConfig(path string, data []byte, out *ConfigFile) error {
-	normalized, err := normalizeConfigData(path, data)
-	if err != nil {
-		return err
-	}
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".toml":
-		return toml.Unmarshal(normalized, out)
+		return toml.Unmarshal(data, out)
 	default:
-		return yaml.Unmarshal(normalized, out)
+		return yaml.Unmarshal(data, out)
 	}
 }
 
@@ -370,190 +398,6 @@ func encodeConfig(path string, cfg ConfigFile) ([]byte, error) {
 	default:
 		return yaml.Marshal(cfg)
 	}
-}
-
-var configKeyAliases = map[string]string{
-	"config-version":                  "configVersion",
-	"debug-mode":                      "debugMode",
-	"debug-log":                       "debugMode",
-	"suppress-session-update-message": "suppressSessionUpdateMessage",
-	"suppress-session-update-info":    "suppressSessionUpdateMessage",
-	"friend-sync":                     "friendSync",
-	"remote-address":                  "remoteAddress",
-	"remote-port":                     "remotePort",
-	"update-interval":                 "updateInterval",
-	"signaling-mode":                  "signalingMode",
-	"query-server":                    "queryServer",
-	"web-query-fallback":              "webQueryFallback",
-	"config-fallback":                 "configFallback",
-	"broadcast-setting":               "broadcastSetting",
-	"world-type":                      "worldType",
-	"session-info":                    "sessionInfo",
-	"host-name":                       "hostName",
-	"world-name":                      "worldName",
-	"max-players":                     "maxPlayers",
-	"auto-follow":                     "autoFollow",
-	"auto-unfollow":                   "autoUnfollow",
-	"initial-invite":                  "initialInvite",
-	"history-path":                    "historyPath",
-	"webhook-url":                     "webhookUrl",
-	"image-path":                      "imagePath",
-	"delete-other-images":             "deleteOtherImages",
-	"primary-cache-path":              "primaryCachePath",
-	"sub-accounts":                    "subAccounts",
-	"cache-path":                      "cachePath",
-}
-
-func normalizeConfigData(path string, data []byte) ([]byte, error) {
-	var root map[string]any
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".toml":
-		if err := toml.Unmarshal(data, &root); err != nil {
-			return nil, err
-		}
-		if root == nil {
-			return data, nil
-		}
-		normalizeConfigMap(root)
-		return toml.Marshal(root)
-	default:
-		if err := yaml.Unmarshal(data, &root); err != nil {
-			return nil, err
-		}
-		if root == nil {
-			return data, nil
-		}
-		normalizeConfigMap(root)
-		return yaml.Marshal(root)
-	}
-}
-
-func normalizeConfigMap(m map[string]any, path ...string) {
-	for from, to := range configKeyAliases {
-		renameConfigKey(m, from, to)
-	}
-	if len(path) == 0 {
-		moveRootSessionKeys(m)
-		migrateLegacySlackWebhook(m)
-	}
-	if len(path) == 1 && path[0] == "friendSync" {
-		moveFriendExpiryKeys(m)
-	}
-	for key, value := range m {
-		normalizeConfigValue(value, append(path, key)...)
-	}
-}
-
-func normalizeConfigValue(value any, path ...string) {
-	switch v := value.(type) {
-	case map[string]any:
-		normalizeConfigMap(v, path...)
-	case []any:
-		for _, item := range v {
-			normalizeConfigValue(item, path...)
-		}
-	case []map[string]any:
-		for _, item := range v {
-			normalizeConfigMap(item, path...)
-		}
-	}
-}
-
-func renameConfigKey(m map[string]any, from, to string) {
-	value, ok := m[from]
-	if !ok {
-		return
-	}
-	if _, exists := m[to]; !exists {
-		m[to] = value
-	}
-	delete(m, from)
-}
-
-func migrateLegacySlackWebhook(root map[string]any) {
-	value, ok := root["slack-webhook"]
-	if !ok {
-		return
-	}
-	delete(root, "slack-webhook")
-	if strings.TrimSpace(fmt.Sprint(value)) == "" {
-		return
-	}
-	notifications, ok := configChildMap(root, "notifications")
-	if !ok {
-		return
-	}
-	if _, exists := notifications["webhookUrl"]; !exists {
-		notifications["webhookUrl"] = value
-	}
-	if _, exists := notifications["enabled"]; !exists {
-		notifications["enabled"] = true
-	}
-}
-
-func moveRootSessionKeys(root map[string]any) {
-	if !hasAnyConfigKey(root, "remoteAddress", "remotePort", "updateInterval") {
-		return
-	}
-	session, ok := configChildMap(root, "session")
-	if !ok {
-		return
-	}
-	moveConfigKey(root, session, "remoteAddress")
-	moveConfigKey(root, session, "remotePort")
-	moveConfigKey(root, session, "updateInterval")
-}
-
-func moveFriendExpiryKeys(friendSync map[string]any) {
-	if !hasAnyConfigKey(friendSync, "should-expire", "shouldExpire", "expire-days", "expireDays", "expire-check", "expireCheck") {
-		return
-	}
-	expiry, ok := configChildMap(friendSync, "expiry")
-	if !ok {
-		return
-	}
-	moveAliasedConfigKey(friendSync, expiry, "should-expire", "enabled")
-	moveAliasedConfigKey(friendSync, expiry, "shouldExpire", "enabled")
-	moveAliasedConfigKey(friendSync, expiry, "expire-days", "days")
-	moveAliasedConfigKey(friendSync, expiry, "expireDays", "days")
-	moveAliasedConfigKey(friendSync, expiry, "expire-check", "check")
-	moveAliasedConfigKey(friendSync, expiry, "expireCheck", "check")
-}
-
-func hasAnyConfigKey(m map[string]any, keys ...string) bool {
-	for _, key := range keys {
-		if _, ok := m[key]; ok {
-			return true
-		}
-	}
-	return false
-}
-
-func configChildMap(parent map[string]any, key string) (map[string]any, bool) {
-	if child, ok := parent[key].(map[string]any); ok {
-		return child, true
-	}
-	if _, exists := parent[key]; exists {
-		return nil, false
-	}
-	child := map[string]any{}
-	parent[key] = child
-	return child, true
-}
-
-func moveConfigKey(from, to map[string]any, key string) {
-	moveAliasedConfigKey(from, to, key, key)
-}
-
-func moveAliasedConfigKey(from, to map[string]any, sourceKey, targetKey string) {
-	value, ok := from[sourceKey]
-	if !ok {
-		return
-	}
-	if _, exists := to[targetKey]; !exists {
-		to[targetKey] = value
-	}
-	delete(from, sourceKey)
 }
 
 func resolvePath(base, path string) string {

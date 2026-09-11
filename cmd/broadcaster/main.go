@@ -18,6 +18,7 @@ import (
 	"github.com/HashimTheArab/go-mcxboxbroadcast"
 	"github.com/df-mc/go-xsapi/v2"
 	"github.com/df-mc/go-xsapi/v2/xal/sisu"
+	"github.com/sandertv/gophertunnel/minecraft/auth"
 	"golang.org/x/oauth2"
 )
 
@@ -28,6 +29,7 @@ type commandOptions struct {
 
 type commandBroadcaster interface {
 	Start(context.Context) error
+	Wait() error
 	Close() error
 }
 
@@ -56,10 +58,11 @@ func main() {
 	defer stop()
 
 	if err := runBroadcasterCommand(ctx, commandOptions{ConfigPath: *configPath, Debug: *debug}, defaultCommandDeps()); err != nil {
+		log := slog.New(newLogHandler(os.Stderr, slog.LevelInfo, shouldColorLogs(os.Stderr)))
 		if code, ok := errors.AsType[sisu.ErrorCode](err); ok && code == sisu.ErrorCodeAgeVerificationRequired {
-			fmt.Fprintln(os.Stderr, "broadcaster: authentication failed: complete Xbox/Microsoft age verification for this account, then retry")
+			log.Error("authentication failed: complete Xbox/Microsoft age verification for this account, then retry")
 		} else {
-			slog.Error("broadcaster", "err", err)
+			log.Error("broadcaster", "err", err)
 		}
 		os.Exit(1)
 	}
@@ -83,13 +86,14 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 	}
 	authCtx := ctx
 	if httpClient != nil && strings.TrimSpace(cfg.HTTP.Proxy) != "" {
-		authCtx = context.WithValue(authCtx, oauth2.HTTPClient, httpClient)
+		authCtx = auth.WithContextClient(authCtx, httpClient)
 	}
 	level := slog.LevelInfo
 	if opts.Debug || cfg.DebugMode {
 		level = slog.LevelDebug
 	}
-	log := slog.New(slog.NewTextHandler(deps.Stdout, &slog.HandlerOptions{Level: level}))
+	log := slog.New(newLogHandler(deps.Stdout, level, shouldColorLogs(deps.Stdout)))
+	log.Info("starting go-mcxboxbroadcast", "config", opts.ConfigPath, "debug", level == slog.LevelDebug)
 	log.Debug("debug logging enabled")
 	for _, note := range cfg.Notes {
 		log.Warn("config adjusted", "note", note)
@@ -177,13 +181,15 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 	if err := b.Start(ctx); err != nil {
 		return fmt.Errorf("start: %w", err)
 	}
-	log.Info("broadcasting", "target", runtime.Server.Address())
-
-	<-ctx.Done()
-	if err := b.Close(); err != nil {
-		return fmt.Errorf("close: %w", err)
+	runErr := b.Wait()
+	closeErr := b.Close()
+	if runErr != nil {
+		runErr = fmt.Errorf("run: %w", runErr)
 	}
-	return nil
+	if closeErr != nil {
+		closeErr = fmt.Errorf("close: %w", closeErr)
+	}
+	return errors.Join(runErr, closeErr)
 }
 
 func defaultCommandDeps() commandDeps {

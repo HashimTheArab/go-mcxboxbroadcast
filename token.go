@@ -74,9 +74,7 @@ func NewXSAPIClient(ctx context.Context, src xsapi.TokenSource, client *http.Cli
 	if src == nil {
 		return nil, fmt.Errorf("xbox live token source is nil")
 	}
-	if client != nil {
-		ctx = context.WithValue(ctx, oauth2.HTTPClient, client)
-	}
+	ctx = auth.WithContextClient(ctx, client)
 	return xsapi.ClientConfig{HTTPClient: client, Logger: log, RTAMode: xsapi.RTALazy}.New(ctx, src)
 }
 
@@ -91,9 +89,7 @@ func newMinecraftTokenSource(ctx context.Context, xbl *xsapi.Client, client *htt
 	if xbl == nil {
 		return nil, fmt.Errorf("xbox live client is nil")
 	}
-	if client != nil {
-		ctx = context.WithValue(ctx, oauth2.HTTPClient, client)
-	}
+	ctx = auth.WithContextClient(ctx, client)
 	debugLog(log, "discovering minecraft services")
 	discovery, err := service.Discover(ctx, service.ApplicationTypeMinecraftPE, protocol.CurrentVersion)
 	if err != nil {
@@ -225,7 +221,12 @@ func requestLiveTokenWriter(ctx context.Context, conf auth.Config, out io.Writer
 	if out == nil {
 		out = io.Discard
 	}
-	return conf.RequestLiveTokenContext(ctx, out)
+	tok, err := conf.RequestLiveTokenContext(ctx, out)
+	var retrieveErr *oauth2.RetrieveError
+	if errors.As(err, &retrieveErr) && retrieveErr.ErrorCode == "invalid_grant" {
+		return nil, fmt.Errorf("%w; set or reset the Microsoft account password, then retry the device login", err)
+	}
+	return tok, err
 }
 
 func refreshLiveToken(ctx context.Context, clientID, refreshToken string) (*oauth2.Token, error) {

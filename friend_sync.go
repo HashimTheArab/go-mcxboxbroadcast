@@ -130,7 +130,9 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 	if s.Config.AutoFollow && opts.autoFollow {
 		s.acceptPending(ctx, &result)
 	}
-	people, err := s.Client.Friends(ctx)
+	operationCtx, cancel := xboxOperationContext(ctx)
+	people, err := s.Client.Friends(operationCtx)
+	cancel()
 	if err != nil {
 		return result, err
 	}
@@ -139,6 +141,10 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 		"people", stats.people,
 		"followers", stats.followers,
 		"following", stats.following,
+		"followers_only", stats.followersOnly,
+		"following_only", stats.followingOnly,
+		"mutual", stats.mutual,
+		"neither", stats.neither,
 		"auto_follow_candidates", stats.autoFollowCandidates,
 		"auto_unfollow_candidates", stats.autoUnfollowCandidates,
 		"expire", opts.expire,
@@ -151,6 +157,8 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 	}
 	added := 0
 	removed := 0
+	expiryCandidates := 0
+	expiredFriends := 0
 	for _, p := range people {
 		if err := ctx.Err(); err != nil {
 			return result, err
@@ -170,13 +178,24 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 			continue
 		}
 		if opts.expire && opts.autoUnfollow && !result.unfollowBlocked() && s.Config.ExpiryEnabled && p.IsFollowedByCaller && s.History != nil {
-			if s.expire(ctx, p, &result) {
+			expiryResult := s.expire(ctx, p, &result)
+			if expiryResult.candidate {
+				expiryCandidates++
+			}
+			if expiryResult.removed {
 				removed++
+				expiredFriends++
 			}
 		}
 	}
 	if opts.expire && s.Config.ExpiryEnabled && s.PruneHistory {
 		s.pruneHistory(ctx, people)
+	}
+	if opts.expire && s.Config.ExpiryEnabled && s.History != nil {
+		s.debug(ctx, "friend sync expiry scan",
+			"mutual_expiry_candidates", expiryCandidates,
+			"expired_friends", expiredFriends,
+		)
 	}
 	if stats.autoFollowCandidates > 0 {
 		s.debug(ctx, "added friends", "count", added)
@@ -203,7 +222,9 @@ func (s FriendSyncer) acceptPending(ctx context.Context, result *friendSyncResul
 		return
 	}
 	s.debug(ctx, "accepting pending friend requests")
-	accepted, err := accepter.AcceptPendingFriendRequests(ctx)
+	operationCtx, cancel := xboxOperationContext(ctx)
+	accepted, err := accepter.AcceptPendingFriendRequests(operationCtx)
+	cancel()
 	for _, p := range accepted {
 		s.info(ctx, "added friend", "xuid", p.XUID, "gamertag", p.Gamertag, "source", "pending_requests")
 	}
@@ -223,7 +244,9 @@ func (s FriendSyncer) acceptPending(ctx context.Context, result *friendSyncResul
 // follow follows p back and reports whether the friendship was established.
 // Restricted accounts are force-unfollowed so they are not retried forever.
 func (s FriendSyncer) follow(ctx context.Context, p Person, result *friendSyncResult) bool {
-	err := s.Client.Follow(ctx, p.XUID)
+	operationCtx, cancel := xboxOperationContext(ctx)
+	err := s.Client.Follow(operationCtx, p.XUID)
+	cancel()
 	if err == nil {
 		s.info(ctx, "added friend", "xuid", p.XUID, "gamertag", p.Gamertag)
 		if s.Config.InitialInvite && s.Inviter != nil {
@@ -253,7 +276,10 @@ func (s FriendSyncer) dropRestrictedFollower(ctx context.Context, p Person) {
 	if !ok {
 		return
 	}
-	if err := unfollower.ForceUnfollow(ctx, p.XUID); err != nil {
+	operationCtx, cancel := xboxOperationContext(ctx)
+	err := unfollower.ForceUnfollow(operationCtx, p.XUID)
+	cancel()
+	if err != nil {
 		if s.Log != nil {
 			s.Log.Error("force unfollow restricted account", "xuid", p.XUID, "gamertag", p.Gamertag, "err", err)
 		}
@@ -268,7 +294,10 @@ func (s FriendSyncer) dropRestrictedFollower(ctx context.Context, p Person) {
 
 // unfollow removes p and reports whether the removal succeeded.
 func (s FriendSyncer) unfollow(ctx context.Context, p Person, reason string, result *friendSyncResult) bool {
-	if err := s.Client.Unfollow(ctx, p.XUID); err != nil {
+	operationCtx, cancel := xboxOperationContext(ctx)
+	err := s.Client.Unfollow(operationCtx, p.XUID)
+	cancel()
+	if err != nil {
 		s.debug(ctx, "failed to remove friend", "xuid", p.XUID, "gamertag", p.Gamertag, "err", err)
 		if delay := retryDelay(err); delay > 0 {
 			result.unfollowRetryAfter = delay
@@ -286,15 +315,20 @@ func (s FriendSyncer) unfollow(ctx context.Context, p Person, reason string, res
 	return true
 }
 
+type friendExpiryResult struct {
+	candidate bool
+	removed   bool
+}
+
 // expire removes p when they have not been seen within the expiry window and
-// reports whether a removal happened.
-func (s FriendSyncer) expire(ctx context.Context, p Person, result *friendSyncResult) bool {
+// reports whether p was an expiry candidate and whether a removal happened.
+func (s FriendSyncer) expire(ctx context.Context, p Person, result *friendSyncResult) friendExpiryResult {
 	lastSeen, ok, err := s.History.LastSeen(ctx, p.XUID)
 	if err != nil {
 		if s.Log != nil {
 			s.Log.Error("read player history", "xuid", p.XUID, "err", err)
 		}
-		return false
+		return friendExpiryResult{}
 	}
 	if !ok {
 		if recorder, ok := s.History.(HistoryRecorder); ok {
@@ -302,17 +336,20 @@ func (s FriendSyncer) expire(ctx context.Context, p Person, result *friendSyncRe
 				s.Log.Error("record player history", "xuid", p.XUID, "err", err)
 			}
 		}
-		return false
+		return friendExpiryResult{}
 	}
 	expiryDays := s.Config.ExpiryDays
 	if expiryDays <= 0 {
 		expiryDays = 15
 	}
 	if !lastSeen.Before(time.Now().Add(-time.Duration(expiryDays) * 24 * time.Hour)) {
-		return false
+		return friendExpiryResult{}
 	}
 	s.info(ctx, "removing inactive friend", "xuid", p.XUID, "gamertag", p.Gamertag, "last_seen", lastSeen)
-	return s.unfollow(ctx, p, "inactive", result)
+	return friendExpiryResult{
+		candidate: true,
+		removed:   s.unfollow(ctx, p, "inactive", result),
+	}
 }
 
 // pruneHistory drops history entries for people who are no longer on the
@@ -349,7 +386,10 @@ func (s FriendSyncer) pruneHistory(ctx context.Context, people []Person) {
 
 func (s FriendSyncer) sendInitialInvite(ctx context.Context, p Person, source string) {
 	s.debug(ctx, "sending initial invite", "xuid", p.XUID, "gamertag", p.Gamertag, "source", source)
-	if err := s.Inviter.Invite(ctx, p.XUID, strconv.FormatInt(TitleID, 10)); err != nil {
+	operationCtx, cancel := xboxOperationContext(ctx)
+	err := s.Inviter.Invite(operationCtx, p.XUID, strconv.FormatInt(TitleID, 10))
+	cancel()
+	if err != nil {
 		if s.Log != nil {
 			s.Log.Warn("send initial invite", "xuid", p.XUID, "gamertag", p.Gamertag, "source", source, "err", err)
 		}
@@ -362,6 +402,10 @@ type friendSyncStats struct {
 	people                 int
 	followers              int
 	following              int
+	followersOnly          int
+	followingOnly          int
+	mutual                 int
+	neither                int
 	autoFollowCandidates   int
 	autoUnfollowCandidates int
 }
@@ -377,6 +421,16 @@ func (s FriendSyncer) friendSyncStats(people []Person, opts friendSyncOptions) f
 		}
 		if p.IsFollowedByCaller {
 			stats.following++
+		}
+		switch {
+		case p.IsFollowingCaller && p.IsFollowedByCaller:
+			stats.mutual++
+		case p.IsFollowingCaller:
+			stats.followersOnly++
+		case p.IsFollowedByCaller:
+			stats.followingOnly++
+		default:
+			stats.neither++
 		}
 		if s.Config.AutoFollow && opts.autoFollow && p.IsFollowingCaller && !p.IsFollowedByCaller {
 			stats.autoFollowCandidates++

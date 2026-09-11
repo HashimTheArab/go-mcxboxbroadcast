@@ -83,6 +83,26 @@ func TestPresenceClientUpdateDefaultsHeartbeatWhenHeaderInvalid(t *testing.T) {
 	}
 }
 
+func TestPresenceClientUpdateBoundsRequestContext(t *testing.T) {
+	client := PresenceClient{
+		XUID: "1",
+		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			deadline, ok := req.Context().Deadline()
+			if !ok {
+				t.Fatal("presence request has no deadline")
+			}
+			remaining := time.Until(deadline)
+			if remaining <= 0 || remaining > 20*time.Second {
+				t.Fatalf("presence request deadline remaining = %s", remaining)
+			}
+			return response(http.StatusOK, ""), nil
+		})},
+	}
+	if _, err := client.Update(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPresenceClientUpdateRejectsEmptyXUID(t *testing.T) {
 	client := PresenceClient{}
 
@@ -99,6 +119,7 @@ func TestBroadcasterPresenceClientsIncludeEnabledSubAccounts(t *testing.T) {
 		HTTPClient: httpClient,
 		SubAccounts: []SubAccountConfig{
 			{ID: "enabled", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "enabled"},
+			{ID: "enabled", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "duplicate"},
 			{ID: "xuid-only", Enabled: true, XUID: "xuid-only"},
 			{ID: "disabled", Enabled: false, XUID: "disabled"},
 			{ID: "missing-token", Enabled: true},
