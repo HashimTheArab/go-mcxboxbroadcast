@@ -4,17 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 
 	xblsocial "github.com/df-mc/go-xsapi/v2/social"
-	"github.com/df-mc/go-xsapi/v2/xal/xsts"
 )
 
 // FriendClient adapts go-xsapi/v2's Xbox social client to the FriendSyncer
 // API, using the same endpoints, contract versions, and request shapes as
 // MCXboxBroadcast.
 type FriendClient struct {
-	Client *http.Client
 	Social *xblsocial.Client
 }
 
@@ -163,10 +160,7 @@ func (c FriendClient) ForceUnfollow(ctx context.Context, xuid string) error {
 }
 
 func (c FriendClient) social() *xblsocial.Client {
-	if c.Social != nil {
-		return c.Social
-	}
-	return xblsocial.New(c.client(), nil, xsts.UserInfo{}, nil)
+	return c.Social
 }
 
 func peopleFromSocialUsers(users []xblsocial.User) []Person {
@@ -229,11 +223,4 @@ func mergePerson(existing, next Person) Person {
 		existing.UniqueModernGamertag = next.UniqueModernGamertag
 	}
 	return existing
-}
-
-func (c FriendClient) client() *http.Client {
-	if c.Client != nil {
-		return c.Client
-	}
-	return http.DefaultClient
 }
