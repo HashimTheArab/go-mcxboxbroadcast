@@ -53,8 +53,11 @@ func (b *Broadcaster) subscribeSocial(sub socialSubscriber, log *slog.Logger) <-
 	go func() {
 		defer b.socialWg.Done()
 		// Subscribe dials RTA lazily; running it here keeps a slow or failing
-		// dial off the start path.
-		unsubscribe, err := sub.Subscribe(b.ctx, handler)
+		// dial off the start path. Bound setup because it holds the shared
+		// RTA subscription lock while waiting for an acknowledgment.
+		ctx, cancel := xboxOperationContext(b.ctx)
+		unsubscribe, err := sub.Subscribe(ctx, handler)
+		cancel()
 		if err != nil {
 			log.Warn("subscribe to social rta feed; friend requests will be accepted on the sync interval", "err", err)
 			return
@@ -65,7 +68,7 @@ func (b *Broadcaster) subscribeSocial(sub socialSubscriber, log *slog.Logger) <-
 		// b.ctx is done, so use a fresh context to release the subscription.
 		// The cleanup removes only this registration, so a shared client's other
 		// subscribers keep working.
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel = context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := unsubscribe(ctx); err != nil {
 			log.Debug("unsubscribe social rta feed", "err", err)

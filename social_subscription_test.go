@@ -123,6 +123,50 @@ func (f *fakeSocialSubscriber) Subscribe(_ context.Context, h xblsocial.Subscrip
 	}, nil
 }
 
+// waitingSocialSubscriber leaves setup waiting until its context ends.
+type waitingSocialSubscriber struct {
+	result chan error
+}
+
+// Subscribe simulates an RTA subscription that never receives an acknowledgment.
+func (s waitingSocialSubscriber) Subscribe(ctx context.Context, _ xblsocial.SubscriptionHandler) (func(context.Context) error, error) {
+	<-ctx.Done()
+	s.result <- ctx.Err()
+	return nil, ctx.Err()
+}
+
+func TestSocialSubscriptionSetupTimesOut(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		b := &Broadcaster{log: testBroadcasterLogger()}
+		b.ctx, b.cancel = context.WithCancel(t.Context())
+		defer b.cancel()
+		result := make(chan error, 1)
+		b.subscribeSocial(waitingSocialSubscriber{result}, b.log)
+		synctest.Wait()
+		time.Sleep(defaultXboxOperationTimeout - time.Nanosecond)
+		synctest.Wait()
+		select {
+		case err := <-result:
+			t.Fatalf("setup ended early: %v", err)
+		default:
+		}
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		select {
+		case err := <-result:
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("setup error = %v, want deadline exceeded", err)
+			}
+		default:
+			t.Fatal("subscription setup did not time out")
+		}
+		b.socialWg.Wait()
+		if err := b.ctx.Err(); err != nil {
+			t.Fatalf("setup timeout stopped the broadcaster: %v", err)
+		}
+	})
+}
+
 // TestSubscribeSocialUnsubscribesOnShutdown verifies that a social subscription
 // is undone when the broadcaster shuts down and that the shutdown waits for it,
 // so a reused xsapi client does not accumulate stale handlers across restarts.
