@@ -11,21 +11,21 @@ import (
 	"testing"
 	"time"
 
-	"github.com/df-mc/go-xsapi/v2"
 	xblsocial "github.com/df-mc/go-xsapi/v2/social"
 	"github.com/df-mc/go-xsapi/v2/xal/xsts"
 )
 
+// newTestSocialClient creates a social client using only the test transport.
 func newTestSocialClient(client *http.Client) *xblsocial.Client {
 	return xblsocial.New(client, nil, xsts.UserInfo{}, nil)
 }
 
 func TestBroadcasterFriendClientUsesXSAPIOwnedSocialClient(t *testing.T) {
-	xbl := &xsapi.Client{}
+	xbl := newTestXSAPIClient(t, &http.Client{}, "primary")
 	b := &Broadcaster{conf: Config{XBLClient: xbl, HTTPClient: &http.Client{}}}
 
 	client := b.friendClientFor(xbl)
-	if client.Social != xbl.Social() {
+	if client.Social == nil || client.Social != xbl.Social() {
 		t.Fatal("friend client did not use xsapi-owned social subclient")
 	}
 }
@@ -44,7 +44,7 @@ func followURL(xuid string) string {
 }
 
 func unfollowURL(xuid string) string {
-	return fmt.Sprintf("https://social.xboxlive.com/users/me/people/friends/v2/xuid(%s)?deleteRelationships=follows", xuid)
+	return fmt.Sprintf("https://social.xboxlive.com/users/me/people/xuid(%s)", xuid)
 }
 
 func TestFriendClientFriendsMergesFollowersAndSocial(t *testing.T) {

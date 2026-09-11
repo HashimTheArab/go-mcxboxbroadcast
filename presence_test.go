@@ -120,7 +120,9 @@ func TestBroadcasterPresenceClientsIncludeEnabledSubAccounts(t *testing.T) {
 		XBLClient:  primary,
 		SubAccounts: []SubAccountConfig{
 			{ID: "enabled", Enabled: true, XBLClient: enabled, XUID: "enabled"},
+			{ID: "enabled", Enabled: true, XBLClient: enabled, XUID: "duplicate"},
 			{ID: "failed-lazy-client", Enabled: true, XUID: "failed-lazy-client", XBLTokenSource: staticTokenSource{}},
+			{ID: "xuid-only", Enabled: true, XUID: "xuid-only"},
 			{ID: "disabled", Enabled: false, XUID: "disabled"},
 			{ID: "missing-token", Enabled: true},
 		},
@@ -135,5 +137,30 @@ func TestBroadcasterPresenceClientsIncludeEnabledSubAccounts(t *testing.T) {
 	}
 	if clients[0].Presence != primary.Presence() || clients[1].Presence != enabled.Presence() {
 		t.Fatal("presence clients did not use xsapi-owned presence subclients")
+	}
+}
+
+func TestBroadcasterPresenceIsRemovedWhenOwnerCloses(t *testing.T) {
+	var methods []string
+	xbl := newTestXSAPIClient(t, &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host != "userpresence.xboxlive.com" || req.URL.Path != "/users/xuid(100)/devices/current/titles/current" {
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL)
+		}
+		methods = append(methods, req.Method)
+		return response(http.StatusOK, ""), nil
+	})}, "100")
+	b := &Broadcaster{conf: Config{XBLClient: xbl}}
+	clients := b.presenceClients()
+	if len(clients) != 1 {
+		t.Fatalf("presence clients = %d, want 1", len(clients))
+	}
+	if _, err := clients[0].Update(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := xbl.CloseContext(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if len(methods) != 2 || methods[0] != http.MethodPost || methods[1] != http.MethodDelete {
+		t.Fatalf("presence requests = %v, want POST then DELETE", methods)
 	}
 }

@@ -80,6 +80,48 @@ func TestStatusVersionOverride(t *testing.T) {
 	}
 }
 
+func TestStatusAdvertisedProtocolOverride(t *testing.T) {
+	b, err := New(Config{
+		XBLTokenSource: staticTokenSource{},
+		XUID:           "123",
+		Server:         ServerInfo{Host: "127.0.0.1", Port: 19132},
+		Status: Status{
+			HostName: "Host",
+			Version:  "1.26.44",
+			Protocol: 2168,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := b.status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Version != "1.26.44" || status.Protocol != 2168 {
+		t.Fatalf("advertised pair = %s/%d, want 1.26.44/2168", status.Version, status.Protocol)
+	}
+}
+
+func TestStatusDefaultsToMinecraft12645(t *testing.T) {
+	b, err := New(Config{
+		XBLTokenSource: staticTokenSource{},
+		XUID:           "123",
+		Server:         ServerInfo{Host: "127.0.0.1", Port: 19132},
+		Status:         Status{HostName: "Host"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := b.status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Protocol != 2169 || status.Version != "1.26.45" {
+		t.Fatalf("advertised protocol/version = %d/%q, want 2169/%q", status.Protocol, status.Version, "1.26.45")
+	}
+}
+
 func TestStatusLevelIDUniquePerAccount(t *testing.T) {
 	levelID := func(xuid string) string {
 		b, err := New(Config{

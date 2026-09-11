@@ -7,79 +7,68 @@ import (
 	"strings"
 
 	"github.com/df-mc/go-nethernet"
-	"github.com/google/uuid"
 	"github.com/sandertv/gophertunnel/minecraft/p2p"
 	"github.com/sandertv/gophertunnel/minecraft/room"
 )
 
 type signalingConnectionAnnouncer struct {
 	room.Announcer
-	connection room.Connection
+	connection p2p.Connection
 }
 
 func (a signalingConnectionAnnouncer) Announce(ctx context.Context, status room.Status) error {
-	// The session document must advertise exactly the JSON-RPC signaling
+	// The session document must advertise exactly the shared signaling
 	// connection clients can join through; any caller-provided connections are
-	// deliberately replaced, matching MCXboxBroadcast's single-connection doc.
-	status.SupportedConnections = []room.Connection{a.connection}
+	// deliberately replaced.
+	status.SupportedConnections = []p2p.Connection{a.connection}
 	return a.Announcer.Announce(ctx, status)
 }
 
-func (b *Broadcaster) signalingMode() (SignalingMode, error) {
-	mode := b.conf.SignalingMode
-	if mode == "" {
-		if b.conf.Signaling == nil && b.conf.SignalingFactory == nil {
-			return SignalingModeJSONRPC, nil
-		}
-		return SignalingModeWebSocket, nil
-	}
+// normalizeSignalingMode validates mode and applies the WebSocket default.
+func normalizeSignalingMode(mode SignalingMode) (SignalingMode, error) {
 	switch strings.ToLower(strings.TrimSpace(string(mode))) {
+	case "", "websocket", "websockets", "ws":
+		return SignalingModeWebSocket, nil
 	case "jsonrpc", "json-rpc", "messaging":
 		return SignalingModeJSONRPC, nil
-	case "websocket", "websockets", "ws":
-		return SignalingModeWebSocket, nil
 	default:
 		return "", fmt.Errorf("unknown signaling mode %q", mode)
 	}
 }
 
-func (b *Broadcaster) signalingConnection(ctx context.Context, sig nethernet.Signaling) (*room.Connection, error) {
+// signalingMode returns the broadcaster's validated signaling mode.
+func (b *Broadcaster) signalingMode() (SignalingMode, error) {
+	return normalizeSignalingMode(b.conf.SignalingMode)
+}
+
+// signalingConnection builds the MPSD connection entry for the active
+// signaling transport.
+func (b *Broadcaster) signalingConnection(sig nethernet.Signaling) (*p2p.Connection, error) {
 	mode, err := b.signalingMode()
 	if err != nil {
 		return nil, err
 	}
-	if mode != SignalingModeJSONRPC {
-		return nil, nil
-	}
 	if sig == nil {
-		return nil, errors.New("jsonrpc signaling connection: signaling is nil")
+		return nil, errors.New("signaling connection: signaling is nil")
 	}
 	networkID := sig.NetworkID()
 	if strings.TrimSpace(networkID) == "" {
-		return nil, errors.New("jsonrpc signaling connection: nethernet id is empty")
+		return nil, errors.New("signaling connection: nethernet id is empty")
 	}
-	pmsgID, err := b.playerMessagingID(ctx)
-	if err != nil {
-		return nil, err
+	if mode == SignalingModeJSONRPC {
+		jsonRPCSignaling, ok := sig.(p2p.JSONRPCSignaling)
+		if !ok {
+			return nil, fmt.Errorf("jsonrpc signaling %T does not expose its player messaging identity", sig)
+		}
+		connection, err := p2p.NewJSONRPCConnection(jsonRPCSignaling)
+		if err != nil {
+			return nil, fmt.Errorf("validate jsonrpc signaling connection: %w", err)
+		}
+		return &connection, nil
 	}
-	return &room.Connection{
-		ConnectionType: p2p.ConnectionTypeSignalingOverJSONRPC,
-		NetherNetID:    p2p.NetherNetID(networkID),
-		PmsgID:         pmsgID,
-	}, nil
-}
-
-func (b *Broadcaster) playerMessagingID(ctx context.Context) (uuid.UUID, error) {
-	src, err := b.minecraftTokenSource(ctx)
-	if err != nil {
-		return uuid.Nil, fmt.Errorf("create minecraft token source for jsonrpc signaling: %w", err)
+	connection := p2p.Connection{Type: p2p.ConnectionTypeSignalingOverWebSocket, NetherNetID: p2p.NetherNetID(networkID)}
+	if err := connection.Validate(); err != nil {
+		return nil, fmt.Errorf("validate websocket signaling connection: %w", err)
 	}
-	tok, err := src.ServiceToken(ctx)
-	if err != nil {
-		return uuid.Nil, fmt.Errorf("request minecraft token for jsonrpc signaling: %w", err)
-	}
-	if tok.Claims.PlayerMessagingID == uuid.Nil {
-		return uuid.Nil, errors.New("minecraft token player messaging id is empty")
-	}
-	return tok.Claims.PlayerMessagingID, nil
+	return &connection, nil
 }

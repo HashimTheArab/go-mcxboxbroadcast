@@ -57,6 +57,13 @@ func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 		}
 	}
 
+	if b.conf.Relay != nil && !st.QueryTarget {
+		st.Players = max(st.Players, b.relays.count())
+	}
+	advertisedProtocol := st.Protocol
+	if advertisedProtocol == 0 {
+		advertisedProtocol = protocol.CurrentProtocol
+	}
 	return normalizeStatus(room.Status{
 		HostName:         stripColour(defaultString(st.HostName, b.hostNameFallback())),
 		WorldName:        stripColour(defaultString(st.WorldName, defaultString(st.HostName, b.hostNameFallback()))),
@@ -68,7 +75,7 @@ func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 		// Always joinable_by_friends, matching MCXboxBroadcast; any other
 		// value makes clients hide the world from the friend list.
 		Joinability:             p2p.JoinabilityFriends,
-		Protocol:                protocol.CurrentProtocol,
+		Protocol:                advertisedProtocol,
 		Version:                 defaultString(st.Version, protocol.CurrentVersion),
 		TransportLayer:          p2p.TransportLayerNetherNet,
 		LanGame:                 false,
@@ -76,6 +83,15 @@ func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 		CrossPlayDisabled:       false,
 		LevelID:                 defaultString(levelID(st.LevelID), accountLevelID(ownerID)),
 	}), nil
+}
+
+// subAccountStatus makes a sub-account's activity independently joinable
+// while preserving the primary session's advertised NetherNet connection and
+// world metadata.
+func subAccountStatus(status room.Status, xuid string) room.Status {
+	status.OwnerID = xuid
+	status.LevelID = accountLevelID(xuid)
+	return status
 }
 
 // applyQueriedStatus overlays a queried server status onto the announced one.

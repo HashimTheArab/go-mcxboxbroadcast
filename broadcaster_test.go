@@ -31,11 +31,13 @@ import (
 	"github.com/sandertv/gophertunnel/minecraft/room"
 )
 
+// broadcasterTokenSource supplies deterministic credentials to test clients.
 type broadcasterTokenSource struct {
 	xuid string
 	key  *ecdsa.PrivateKey
 }
 
+// XSTSToken returns the account identity used by the test transport.
 func (s broadcasterTokenSource) XSTSToken(context.Context, string) (*xsts.Token, error) {
 	return &xsts.Token{
 		Token: "token",
@@ -46,14 +48,17 @@ func (s broadcasterTokenSource) XSTSToken(context.Context, string) (*xsts.Token,
 	}, nil
 }
 
+// DeviceToken rejects unexpected device authentication during a test.
 func (broadcasterTokenSource) DeviceToken(context.Context) (*xasd.Token, error) {
 	return nil, errors.New("unexpected device token request")
 }
 
+// ProofKey returns the key used to sign test requests.
 func (s broadcasterTokenSource) ProofKey() *ecdsa.PrivateKey {
 	return s.key
 }
 
+// newTestXSAPIClient constructs real API subclients with a stubbed title configuration.
 func newTestXSAPIClient(t *testing.T, client *http.Client, xuid string) *xsapi.Client {
 	t.Helper()
 	base := client.Transport
@@ -78,6 +83,30 @@ func newTestXSAPIClient(t *testing.T, client *http.Client, xuid string) *xsapi.C
 	return xbl
 }
 
+func TestMutualFollowSkipsMissingSocialClients(t *testing.T) {
+	xbl := newTestXSAPIClient(t, &http.Client{Transport: broadcasterRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		t.Fatalf("unexpected mutual-follow request: %s %s", req.Method, req.URL)
+		return nil, errors.New("unexpected request")
+	})}, "100")
+	for _, tc := range []struct {
+		name    string
+		primary *xsapi.Client
+		sub     *xsapi.Client
+	}{
+		{name: "nil primary", sub: xbl},
+		{name: "nil sub", primary: xbl},
+		{name: "missing primary social", primary: &xsapi.Client{}, sub: xbl},
+		{name: "missing sub social", primary: xbl, sub: &xsapi.Client{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &Broadcaster{conf: Config{XBLClient: tc.primary, XUID: "100"}}
+			if err := b.ensureSubAccountMutualFollow(t.Context(), SubAccountConfig{XBLClient: tc.sub, XUID: "200"}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestBroadcasterStartSubAccountsMutuallyFollowsBeforePublish(t *testing.T) {
 	var calls []string
 	client := &http.Client{Transport: broadcasterRoundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -97,12 +126,12 @@ func TestBroadcasterStartSubAccountsMutuallyFollowsBeforePublish(t *testing.T) {
 			XUID:      "200",
 		}},
 	}}
-	b.subAccountPublisher = func(context.Context, SubAccountConfig, mpsd.SessionReference, mpsd.PublishConfig) (*mpsd.Session, error) {
+	b.subAccountAnnouncerFactory = func(context.Context, SubAccountConfig, mpsd.SessionReference) (room.Announcer, error) {
 		calls = append(calls, "publish")
-		return &mpsd.Session{}, nil
+		return &fakeAnnouncer{}, nil
 	}
 
-	if err := b.startSubAccounts(context.Background()); err != nil {
+	if err := b.startSubAccounts(context.Background(), room.Status{}); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -144,12 +173,12 @@ func TestBroadcasterStartSubAccountsSkipsExistingMutualFollow(t *testing.T) {
 			XUID:      "200",
 		}},
 	}}
-	b.subAccountPublisher = func(context.Context, SubAccountConfig, mpsd.SessionReference, mpsd.PublishConfig) (*mpsd.Session, error) {
+	b.subAccountAnnouncerFactory = func(context.Context, SubAccountConfig, mpsd.SessionReference) (room.Announcer, error) {
 		calls = append(calls, "publish")
-		return &mpsd.Session{}, nil
+		return &fakeAnnouncer{}, nil
 	}
 
-	if err := b.startSubAccounts(context.Background()); err != nil {
+	if err := b.startSubAccounts(context.Background(), room.Status{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, call := range calls {
@@ -177,13 +206,13 @@ func TestBroadcasterStartSubAccountsStopsQuietlyOnContextCancel(t *testing.T) {
 			{ID: "second", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "100"},
 		},
 	}}
-	b.subAccountPublisher = func(_ context.Context, account SubAccountConfig, _ mpsd.SessionReference, _ mpsd.PublishConfig) (*mpsd.Session, error) {
+	b.subAccountAnnouncerFactory = func(_ context.Context, account SubAccountConfig, _ mpsd.SessionReference) (room.Announcer, error) {
 		started = append(started, account.ID)
 		cancel()
 		return nil, ctx.Err()
 	}
 
-	err := b.startSubAccounts(ctx)
+	err := b.startSubAccounts(ctx, room.Status{})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("startSubAccounts() error = %v, want context.Canceled", err)
 	}
@@ -224,15 +253,15 @@ func TestBroadcasterStartSubAccountsContinuesPastFailingAccount(t *testing.T) {
 			{ID: "good", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "100"},
 		},
 	}}
-	b.subAccountPublisher = func(_ context.Context, account SubAccountConfig, _ mpsd.SessionReference, _ mpsd.PublishConfig) (*mpsd.Session, error) {
+	b.subAccountAnnouncerFactory = func(_ context.Context, account SubAccountConfig, _ mpsd.SessionReference) (room.Announcer, error) {
 		if account.ID == "bad" {
 			return nil, errors.New("boom")
 		}
 		published = append(published, account.ID)
-		return &mpsd.Session{}, nil
+		return &fakeAnnouncer{}, nil
 	}
 
-	if err := b.startSubAccounts(context.Background()); err != nil {
+	if err := b.startSubAccounts(context.Background(), room.Status{}); err != nil {
 		t.Fatalf("startSubAccounts() error = %v, want nil (bad account skipped)", err)
 	}
 	if fmt.Sprint(published) != "[good]" {
@@ -255,12 +284,12 @@ func TestBroadcasterStartSubAccountsSkipsMutualFollowWithoutXUIDs(t *testing.T) 
 			XUID:      "200",
 		}},
 	}}
-	b.subAccountPublisher = func(context.Context, SubAccountConfig, mpsd.SessionReference, mpsd.PublishConfig) (*mpsd.Session, error) {
+	b.subAccountAnnouncerFactory = func(context.Context, SubAccountConfig, mpsd.SessionReference) (room.Announcer, error) {
 		publishCalls++
-		return &mpsd.Session{}, nil
+		return &fakeAnnouncer{}, nil
 	}
 
-	if err := b.startSubAccounts(context.Background()); err != nil {
+	if err := b.startSubAccounts(context.Background(), room.Status{}); err != nil {
 		t.Fatal(err)
 	}
 	if httpCalls != 0 {
@@ -285,12 +314,12 @@ func TestBroadcasterStartSubAccountsSkipsEnabledAccountWithoutCredentials(t *tes
 			Enabled: true,
 		}},
 	}}
-	b.subAccountPublisher = func(context.Context, SubAccountConfig, mpsd.SessionReference, mpsd.PublishConfig) (*mpsd.Session, error) {
+	b.subAccountAnnouncerFactory = func(context.Context, SubAccountConfig, mpsd.SessionReference) (room.Announcer, error) {
 		publishCalls++
-		return &mpsd.Session{}, nil
+		return &fakeAnnouncer{}, nil
 	}
 
-	if err := b.startSubAccounts(context.Background()); err != nil {
+	if err := b.startSubAccounts(context.Background(), room.Status{}); err != nil {
 		t.Fatal(err)
 	}
 	if httpCalls != 0 {
@@ -343,8 +372,8 @@ func TestXBLAnnouncerUnwrapsDiagnosticsWrappers(t *testing.T) {
 	inner := &room.XBLAnnouncer{}
 	wrapped := signalingConnectionAnnouncer{
 		Announcer: loggingAnnouncer{Announcer: inner},
-		connection: room.Connection{
-			ConnectionType: p2p.ConnectionTypeSignalingOverJSONRPC,
+		connection: p2p.Connection{
+			Type: p2p.ConnectionTypeSignalingOverWebSocket,
 		},
 	}
 	got, ok := xblAnnouncer(wrapped)
@@ -370,21 +399,81 @@ func TestBroadcasterInviteRequiresActiveBroadcaster(t *testing.T) {
 	}
 }
 
-func TestBroadcasterWarnsForWebSocketSignaling(t *testing.T) {
-	var log bytes.Buffer
-	b := &Broadcaster{log: slog.New(slog.NewTextHandler(&log, nil))}
-	b.warnWebSocketSignalingMode(SignalingModeWebSocket)
-	got := log.String()
-	if !strings.Contains(got, "websocket signaling may not appear in Minecraft friends list") {
-		t.Fatalf("warning missing from log: %q", got)
+func TestBroadcasterBuildsWebSocketSignalingConnection(t *testing.T) {
+	b := &Broadcaster{}
+	connection, err := b.signalingConnection(&fakeSignaling{networkID: "123456789"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(got, "recommended_signaling_mode=jsonrpc") {
-		t.Fatalf("recommended mode missing from log: %q", got)
+	if connection == nil {
+		t.Fatal("websocket signaling connection is nil")
 	}
-	log.Reset()
-	b.warnWebSocketSignalingMode(SignalingModeJSONRPC)
-	if log.Len() != 0 {
-		t.Fatalf("unexpected warning for jsonrpc mode: %q", log.String())
+	if connection.Type != p2p.ConnectionTypeSignalingOverWebSocket {
+		t.Fatalf("connection type = %d, want websocket", connection.Type)
+	}
+	if connection.NetherNetID != "123456789" {
+		t.Fatalf("nethernet id = %q, want shared signaling id", connection.NetherNetID)
+	}
+	if connection.PlayerMessagingID != uuid.Nil {
+		t.Fatalf("pmsg id = %s, want nil for websocket signaling", connection.PlayerMessagingID)
+	}
+}
+
+func TestNewRejectsJSONRPCWithEnabledSubAccounts(t *testing.T) {
+	_, err := New(Config{
+		Server:        ServerInfo{Host: "127.0.0.1", Port: 19132},
+		SignalingMode: SignalingModeJSONRPC,
+		SubAccounts: []SubAccountConfig{{
+			ID:      "sub",
+			Enabled: true,
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "jsonrpc signaling does not support sub-accounts") {
+		t.Fatalf("New() error = %v, want JSON-RPC sub-account rejection", err)
+	}
+}
+
+func TestNewAllowsWebSocketWithEnabledSubAccounts(t *testing.T) {
+	if _, err := New(Config{
+		Server:         ServerInfo{Host: "127.0.0.1", Port: 19132},
+		XBLTokenSource: staticTokenSource{},
+		SignalingMode:  SignalingModeWebSocket,
+		SubAccounts: []SubAccountConfig{{
+			ID:      "sub",
+			Enabled: true,
+		}},
+	}); err != nil {
+		t.Fatalf("New() error = %v, want WebSocket sub-accounts accepted", err)
+	}
+}
+
+func TestBroadcasterBuildsJSONRPCSignalingConnection(t *testing.T) {
+	pmid := uuid.MustParse("11111111-2222-3333-4444-555555555555")
+	b := &Broadcaster{conf: Config{SignalingMode: SignalingModeJSONRPC}}
+	connection, err := b.signalingConnection(&jsonRPCFakeSignaling{
+		fakeSignaling: fakeSignaling{networkID: "123456789"},
+		pmid:          pmid,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if connection.Type != p2p.ConnectionTypeSignalingOverJSONRPC || connection.NetherNetID != "123456789" || connection.PlayerMessagingID != pmid {
+		t.Fatalf("JSON-RPC connection = %#v", connection)
+	}
+}
+
+func TestBroadcasterRejectsInvalidWebSocketNetworkID(t *testing.T) {
+	t.Parallel()
+
+	for _, networkID := range []string{"0", "01"} {
+		networkID := networkID
+		t.Run(networkID, func(t *testing.T) {
+			t.Parallel()
+			b := &Broadcaster{}
+			if _, err := b.signalingConnection(&fakeSignaling{networkID: networkID}); err == nil {
+				t.Fatalf("signalingConnection() accepted network ID %q", networkID)
+			}
+		})
 	}
 }
 
@@ -432,6 +521,20 @@ func TestMinecraftListenConfigKeepsFullLoginFlow(t *testing.T) {
 	}
 	if conf.ResourcePackWorldTemplateUUID != uuid.Nil || conf.ResourcePackWorldTemplateVersion != "" {
 		t.Fatalf("unexpected resource-pack template metadata: uuid=%s version=%q, want zero UUID and empty version", conf.ResourcePackWorldTemplateUUID, conf.ResourcePackWorldTemplateVersion)
+	}
+}
+
+func TestMinecraftListenConfigAcceptsRetail2168Dialects(t *testing.T) {
+	b := &Broadcaster{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	conf := b.minecraftListenConfig(room.Status{})
+	if len(conf.AcceptedProtocols) != 2 {
+		t.Fatalf("AcceptedProtocols length = %d, want 2 legacy dialects", len(conf.AcceptedProtocols))
+	}
+	want := []string{"1.26.40", "1.26.44"}
+	for i, accepted := range conf.AcceptedProtocols {
+		if got := accepted.Ver(); got != want[i] {
+			t.Fatalf("AcceptedProtocols[%d] = %q, want %q", i, got, want[i])
+		}
 	}
 }
 
@@ -505,10 +608,12 @@ func TestBroadcasterSignalingFactoryIsUsedOnceForSharedSignaling(t *testing.T) {
 		conf: Config{
 			Server:               ServerInfo{Host: "127.0.0.1", Port: 19132},
 			XUID:                 "123",
-			SignalingMode:        SignalingModeJSONRPC,
 			MinecraftTokenSource: minecraftTokenSourceWithPMID{pmid: uuid.New()},
-			Status:               Status{HostName: "Host", WorldName: "World"},
-			UpdateInterval:       30 * time.Second,
+			ListenConfig: minecraft.ListenConfig{
+				AuthenticationDisabled: true,
+			},
+			Status:         Status{HostName: "Host", WorldName: "World"},
+			UpdateInterval: 30 * time.Second,
 			SignalingFactory: func(context.Context, Config) (nethernet.Signaling, error) {
 				calls++
 				return sig, nil
@@ -532,60 +637,13 @@ func TestBroadcasterSignalingFactoryIsUsedOnceForSharedSignaling(t *testing.T) {
 	}
 }
 
-func TestBroadcasterWatchSignalingRetriesInsteadOfShuttingDown(t *testing.T) {
-	sigCtx, sigCancel := context.WithCancel(context.Background())
-	defer sigCancel()
-	var log bytes.Buffer
-	b := &Broadcaster{
-		log:       slog.New(slog.NewTextHandler(&log, nil)),
-		signaling: &cancelableSignaling{ctx: sigCtx, networkID: "12345"},
-		started:   true,
-		conf: Config{
-			Server: ServerInfo{Host: "127.0.0.1", Port: 19132},
-			XUID:   "123",
-			Status: Status{HostName: "Host", WorldName: "World"},
-			SignalingFactory: func(context.Context, Config) (nethernet.Signaling, error) {
-				return nil, errors.New("test: signaling factory error")
-			},
-		},
-	}
-	b.ctx, b.cancel = context.WithCancel(context.Background())
-	defer b.cancel()
-
-	sigCancel()
-	done := make(chan struct{})
-	go func() {
-		b.watchSignaling()
-		close(done)
-	}()
-
-	// A failing reconnect must not shut the broadcaster down: watchSignaling
-	// keeps retrying with backoff rather than returning and cancelling.
-	select {
-	case <-done:
-		t.Fatal("watchSignaling returned after a failed reconnect; want it to keep retrying")
-	case <-time.After(200 * time.Millisecond):
-	}
-	if b.ctx.Err() != nil {
-		t.Fatal("broadcaster was shut down after a failed reconnect")
-	}
-
-	// Shutting the broadcaster down stops the retry loop.
-	b.cancel()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("watchSignaling did not return after broadcaster shutdown")
-	}
-}
-
 func TestRetryWithBackoffSkipsOnErrorAfterContextCanceled(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	var onErrCalls int
-	err := retryWithBackoff(ctx, time.Millisecond, time.Millisecond, func() error {
+	err := retryWithBackoff(ctx, time.Millisecond, time.Millisecond, sessionRecoveryAttempts, func() error {
 		return errors.New("broadcaster is shut down")
 	}, func(error, time.Duration) {
 		onErrCalls++
@@ -595,35 +653,6 @@ func TestRetryWithBackoffSkipsOnErrorAfterContextCanceled(t *testing.T) {
 	}
 	if onErrCalls != 0 {
 		t.Fatalf("onError called %d times after context cancel, want 0", onErrCalls)
-	}
-}
-
-func TestBroadcasterWatchSignalingSkipsStaticSignaling(t *testing.T) {
-	sigCtx, sigCancel := context.WithCancel(context.Background())
-	defer sigCancel()
-	var log bytes.Buffer
-	staticSig := &cancelableSignaling{ctx: sigCtx, networkID: "12345"}
-	b := &Broadcaster{
-		log:       slog.New(slog.NewTextHandler(&log, nil)),
-		signaling: staticSig,
-		started:   true,
-		conf: Config{
-			Signaling: staticSig,
-		},
-	}
-	b.ctx, b.cancel = context.WithCancel(context.Background())
-	defer b.cancel()
-
-	done := make(chan struct{})
-	go func() {
-		b.watchSignaling()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("watchSignaling should have returned immediately for static signaling")
 	}
 }
 
@@ -911,7 +940,7 @@ func (c *recordingTransferConn) readStarted() bool {
 	return c.readStartedValue
 }
 
-func TestSubAccountInviterRequiresJoinedSession(t *testing.T) {
+func TestSubAccountInviterRequiresPublishedSession(t *testing.T) {
 	b, err := New(Config{
 		XBLTokenSource: staticTokenSource{},
 		XUID:           "123",
@@ -922,7 +951,7 @@ func TestSubAccountInviterRequiresJoinedSession(t *testing.T) {
 	}
 	inviter := &subAccountInviter{b: b, id: "sub1"}
 	if err := inviter.Invite(context.Background(), "456", "1739947436"); err == nil {
-		t.Fatal("expected error inviting before the sub-account joined the session")
+		t.Fatal("expected error inviting before the sub-account published a session")
 	}
 }
 
@@ -944,8 +973,8 @@ func TestStartSubAccountsTimeoutDoesNotBlockStartup(t *testing.T) {
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	defer b.cancel()
 	b.subAccountStartTimeout = 50 * time.Millisecond
-	b.subAccountPublisher = func(ctx context.Context, _ SubAccountConfig, _ mpsd.SessionReference, _ mpsd.PublishConfig) (*mpsd.Session, error) {
-		<-ctx.Done() // a hung join must be bounded by the per-account timeout
+	b.subAccountAnnouncerFactory = func(ctx context.Context, _ SubAccountConfig, _ mpsd.SessionReference) (room.Announcer, error) {
+		<-ctx.Done() // a hung publish must be bounded by the per-account timeout
 		return nil, ctx.Err()
 	}
 	done := make(chan error, 1)
@@ -954,7 +983,7 @@ func TestStartSubAccountsTimeoutDoesNotBlockStartup(t *testing.T) {
 		// re-locking inside the sub-account path deadlocks the test too.
 		b.mu.Lock()
 		defer b.mu.Unlock()
-		done <- b.startSubAccounts(b.ctx)
+		done <- b.startSubAccounts(b.ctx, room.Status{})
 	}()
 	select {
 	case err := <-done:
@@ -962,6 +991,6 @@ func TestStartSubAccountsTimeoutDoesNotBlockStartup(t *testing.T) {
 			t.Fatalf("hung sub-account should be skipped, not fail startup: %v", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("startSubAccounts blocked on a hung sub-account join")
+		t.Fatal("startSubAccounts blocked on a hung sub-account publish")
 	}
 }

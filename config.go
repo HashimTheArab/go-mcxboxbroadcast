@@ -31,8 +31,11 @@ type Config struct {
 	// signaling and gallery/profile image requests.
 	MinecraftTokenSource service.TokenSource
 
-	// Server is the target Bedrock server clients are transferred to.
+	// Server is the target Bedrock server clients are transferred or relayed to.
 	Server ServerInfo
+	// Relay keeps joined clients inside the NetherNet session and relays them
+	// to the backend instead of transferring them. Nil transfers.
+	Relay *RelayConfig
 
 	// SessionName is the MPSD session name. If empty, a random UUID is used.
 	SessionName string
@@ -52,8 +55,8 @@ type Config struct {
 	FriendSync *FriendSyncConfig
 	// FriendHistory records player activity for friend expiry.
 	FriendHistory HistoryStore
-	// SubAccounts contains additional accounts that join/publish the same MPSD
-	// session to extend friend-list visibility.
+	// SubAccounts contains additional accounts that publish independently owned
+	// MPSD sessions for the same NetherNet listener.
 	SubAccounts []SubAccountConfig
 
 	// Signaling is the NetherNet signaling connection used to accept clients.
@@ -61,9 +64,8 @@ type Config struct {
 	Signaling nethernet.Signaling
 	// SignalingFactory creates the NetherNet signaling connection.
 	SignalingFactory SignalingFactory
-	// SignalingMode controls the default NetherNet signaling transport. Empty
-	// uses JSON-RPC messaging for normal Live-token based signaling and
-	// preserves websocket signaling for injected Signaling/SignalingFactory.
+	// SignalingMode controls the signaling transport. Empty uses direct
+	// WebSocket signaling.
 	SignalingMode SignalingMode
 
 	// ListenConfig customizes the gophertunnel listener.
@@ -92,11 +94,15 @@ type Config struct {
 
 type SignalingFactory func(ctx context.Context, conf Config) (nethernet.Signaling, error)
 
+// SignalingMode identifies the service transport used to exchange WebRTC
+// signaling messages.
 type SignalingMode string
 
 const (
-	SignalingModeJSONRPC   SignalingMode = "jsonrpc"
+	// SignalingModeWebSocket exchanges messages through the direct signaling service.
 	SignalingModeWebSocket SignalingMode = "websocket"
+	// SignalingModeJSONRPC exchanges messages through Player Messaging JSON-RPC.
+	SignalingModeJSONRPC SignalingMode = "jsonrpc"
 )
 
 type ServerInfo struct {
@@ -123,6 +129,9 @@ type Status struct {
 	HostName  string
 	WorldName string
 	WorldType string
+	// Protocol overrides the network protocol advertised in the session
+	// document. Zero uses the protocol library's current protocol.
+	Protocol int32
 	// Version is the game version advertised in the session document.
 	// Clients hide friend worlds whose version is older than their own, so
 	// this may need to lead the compiled-in protocol.CurrentVersion when a

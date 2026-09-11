@@ -358,15 +358,13 @@ func TestMinecraftStatusProviderMirrorsConfiguredProvider(t *testing.T) {
 }
 
 func TestRoomListenerDoesNotOverridePublishedStatusWithMinecraftPong(t *testing.T) {
-	pmsgID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
 	inner := &fakeAnnouncer{}
 	b := &Broadcaster{
 		announcer: signalingConnectionAnnouncer{
 			Announcer: inner,
-			connection: room.Connection{
-				ConnectionType: p2p.ConnectionTypeSignalingOverJSONRPC,
-				NetherNetID:    p2p.NetherNetID("123456789"),
-				PmsgID:         pmsgID,
+			connection: p2p.Connection{
+				Type:        p2p.ConnectionTypeSignalingOverWebSocket,
+				NetherNetID: p2p.NetherNetID("123456789"),
 			},
 		},
 	}
@@ -399,29 +397,27 @@ func TestRoomListenerDoesNotOverridePublishedStatusWithMinecraftPong(t *testing.
 		t.Fatalf("unexpected supported connections: %#v", status.SupportedConnections)
 	}
 	connection := status.SupportedConnections[0]
-	if connection.ConnectionType != p2p.ConnectionTypeSignalingOverJSONRPC ||
+	if connection.Type != p2p.ConnectionTypeSignalingOverWebSocket ||
 		connection.NetherNetID != p2p.NetherNetID("123456789") ||
-		connection.PmsgID != pmsgID {
-		t.Fatalf("json-rpc connection was not preserved: %#v", connection)
+		connection.PlayerMessagingID != uuid.Nil {
+		t.Fatalf("websocket connection was not preserved: %#v", connection)
 	}
 }
 
-func TestSignalingConnectionAnnouncerPublishesJSONRPCConnection(t *testing.T) {
-	pmsgID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
+func TestSignalingConnectionAnnouncerPublishesWebSocketConnection(t *testing.T) {
 	inner := &fakeAnnouncer{}
 	announcer := signalingConnectionAnnouncer{
 		Announcer: inner,
-		connection: room.Connection{
-			ConnectionType: p2p.ConnectionTypeSignalingOverJSONRPC,
-			NetherNetID:    p2p.NetherNetID("123456789"),
-			PmsgID:         pmsgID,
+		connection: p2p.Connection{
+			Type:        p2p.ConnectionTypeSignalingOverWebSocket,
+			NetherNetID: p2p.NetherNetID("123456789"),
 		},
 	}
 
 	err := announcer.Announce(context.Background(), room.Status{
-		SupportedConnections: []room.Connection{{
-			ConnectionType: p2p.ConnectionTypeSignalingOverWebSocket,
-			NetherNetID:    p2p.NetherNetID("old"),
+		SupportedConnections: []p2p.Connection{{
+			Type:        99,
+			NetherNetID: p2p.NetherNetID("old"),
 		}},
 	})
 	if err != nil {
@@ -432,30 +428,30 @@ func TestSignalingConnectionAnnouncerPublishesJSONRPCConnection(t *testing.T) {
 		t.Fatalf("unexpected connections: %#v", status.SupportedConnections)
 	}
 	got := status.SupportedConnections[0]
-	if got.ConnectionType != p2p.ConnectionTypeSignalingOverJSONRPC {
-		t.Fatalf("connection type = %d, want %d", got.ConnectionType, p2p.ConnectionTypeSignalingOverJSONRPC)
+	if got.Type != p2p.ConnectionTypeSignalingOverWebSocket {
+		t.Fatalf("connection type = %d, want %d", got.Type, p2p.ConnectionTypeSignalingOverWebSocket)
 	}
 	if got.NetherNetID != p2p.NetherNetID("123456789") {
 		t.Fatalf("nethernet id = %q", got.NetherNetID)
 	}
-	if got.PmsgID != pmsgID {
-		t.Fatalf("pmsg id = %s", got.PmsgID)
+	if got.PlayerMessagingID != uuid.Nil {
+		t.Fatalf("pmsg id = %s, want nil", got.PlayerMessagingID)
 	}
 }
 
-func TestStartAdvertisesJSONRPCConnectionWhenConfigured(t *testing.T) {
-	pmsgID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
+func TestStartAlwaysAdvertisesWebSocketForInjectedSignaling(t *testing.T) {
 	sig := &fakeSignaling{networkID: "123456789"}
 	announcer := &fakeAnnouncer{}
 	b := &Broadcaster{
 		conf: Config{
-			Server:               ServerInfo{Host: "127.0.0.1", Port: 19132},
-			XBLTokenSource:       staticTokenSource{xuid: "123"},
-			Signaling:            sig,
-			SignalingMode:        SignalingModeJSONRPC,
-			MinecraftTokenSource: minecraftTokenSourceWithPMID{pmid: pmsgID},
-			Status:               Status{HostName: "Host", WorldName: "World"},
-			UpdateInterval:       30 * time.Second,
+			Server:         ServerInfo{Host: "127.0.0.1", Port: 19132},
+			XBLTokenSource: staticTokenSource{xuid: "123"},
+			Signaling:      sig,
+			ListenConfig: minecraft.ListenConfig{
+				AuthenticationDisabled: true,
+			},
+			Status:         Status{HostName: "Host", WorldName: "World"},
+			UpdateInterval: 30 * time.Second,
 		},
 		announcerFactory: func(*Broadcaster) room.Announcer {
 			return announcer
@@ -472,14 +468,14 @@ func TestStartAdvertisesJSONRPCConnectionWhenConfigured(t *testing.T) {
 		t.Fatalf("unexpected connections: %#v", status.SupportedConnections)
 	}
 	got := status.SupportedConnections[0]
-	if got.ConnectionType != p2p.ConnectionTypeSignalingOverJSONRPC {
-		t.Fatalf("connection type = %d, want %d", got.ConnectionType, p2p.ConnectionTypeSignalingOverJSONRPC)
+	if got.Type != p2p.ConnectionTypeSignalingOverWebSocket {
+		t.Fatalf("connection type = %d, want %d", got.Type, p2p.ConnectionTypeSignalingOverWebSocket)
 	}
 	if got.NetherNetID != p2p.NetherNetID("123456789") {
 		t.Fatalf("nethernet id = %q", got.NetherNetID)
 	}
-	if got.PmsgID != pmsgID {
-		t.Fatalf("pmsg id = %s", got.PmsgID)
+	if got.PlayerMessagingID != uuid.Nil {
+		t.Fatalf("pmsg id = %s, want nil", got.PlayerMessagingID)
 	}
 	if status.OwnerID != "123" {
 		t.Fatalf("owner id = %q", status.OwnerID)
@@ -502,10 +498,12 @@ func TestStartAdvertisesOpaqueNetherNetID(t *testing.T) {
 			Server:               ServerInfo{Host: "127.0.0.1", Port: 19132},
 			XBLTokenSource:       staticTokenSource{xuid: "123"},
 			Signaling:            sig,
-			SignalingMode:        SignalingModeJSONRPC,
 			MinecraftTokenSource: minecraftTokenSourceWithPMID{pmid: pmsgID},
-			Status:               Status{HostName: "Host", WorldName: "World"},
-			UpdateInterval:       30 * time.Second,
+			ListenConfig: minecraft.ListenConfig{
+				AuthenticationDisabled: true,
+			},
+			Status:         Status{HostName: "Host", WorldName: "World"},
+			UpdateInterval: 30 * time.Second,
 		},
 		announcerFactory: func(*Broadcaster) room.Announcer {
 			return announcer
@@ -535,7 +533,6 @@ func TestStartTimesOutDefaultSignalingDial(t *testing.T) {
 		XBLTokenSource:       staticTokenSource{xuid: "123"},
 		MinecraftTokenSource: minecraftTokenSourceWithPMID{pmid: uuid.New()},
 		HTTPClient:           blockingClient,
-		SignalingMode:        SignalingModeJSONRPC,
 		SignalingDialTimeout: time.Millisecond,
 	})
 	if err != nil {
@@ -556,7 +553,6 @@ func TestStartTimesOutDefaultSignalingTokenSourceCreation(t *testing.T) {
 	b, err := New(Config{
 		Server:               ServerInfo{Host: "127.0.0.1", Port: 19132},
 		XBLTokenSource:       blockingTokenSource{started: started, unblock: unblock},
-		SignalingMode:        SignalingModeJSONRPC,
 		SignalingDialTimeout: 10 * time.Millisecond,
 	})
 	if err != nil {
@@ -615,9 +611,9 @@ func TestStartCleansUpWhenPrimaryAnnounceFails(t *testing.T) {
 			StatusProvider: room.NewStatusProvider(room.Status{
 				HostName:  "Host",
 				WorldName: "World",
-				SupportedConnections: []room.Connection{{
-					ConnectionType: p2p.ConnectionTypeSignalingOverWebSocket,
-					NetherNetID:    p2p.NetherNetID("123"),
+				SupportedConnections: []p2p.Connection{{
+					Type:        p2p.ConnectionTypeSignalingOverWebSocket,
+					NetherNetID: p2p.NetherNetID("123"),
 				}},
 			}),
 		},
@@ -637,24 +633,34 @@ func TestStartCleansUpWhenPrimaryAnnounceFails(t *testing.T) {
 	}
 }
 
-func TestStartFailsWhenSessionWouldPublishNoConnections(t *testing.T) {
+func TestStartAdvertisesWebSocketConnectionByDefault(t *testing.T) {
 	sig := &fakeSignaling{}
+	announcer := &fakeAnnouncer{}
 	b := &Broadcaster{
 		conf: Config{
 			Server:    ServerInfo{Host: "127.0.0.1", Port: 19132},
 			Signaling: sig,
-			Status:    Status{HostName: "Host", WorldName: "World"},
+			ListenConfig: minecraft.ListenConfig{
+				AuthenticationDisabled: true,
+			},
+			Status:         Status{HostName: "Host", WorldName: "World"},
+			UpdateInterval: 30 * time.Second,
 		},
 		announcerFactory: func(*Broadcaster) room.Announcer {
-			return &fakeAnnouncer{}
+			return announcer
 		},
 	}
-	err := b.Start(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "unjoinable") {
-		t.Fatalf("Start() error = %v, want unjoinable session error", err)
+	if err := b.Start(context.Background()); err != nil {
+		t.Fatal(err)
 	}
-	if !sig.closed {
-		t.Fatal("signaling was not closed")
+	defer b.Close()
+
+	connections := announcer.Status().SupportedConnections
+	if len(connections) != 1 {
+		t.Fatalf("supported connections = %#v, want one", connections)
+	}
+	if connections[0].Type != p2p.ConnectionTypeSignalingOverWebSocket || connections[0].NetherNetID != "123456789" {
+		t.Fatalf("supported connection = %#v, want shared websocket network", connections[0])
 	}
 }
 
@@ -747,6 +753,7 @@ func (f fakeNotifier) Notify(ctx context.Context, message string) error {
 type fakeAnnouncer struct {
 	mu          sync.Mutex
 	announceErr error
+	closeErr    error
 	closed      bool
 	status      room.Status
 }
@@ -762,7 +769,7 @@ func (f *fakeAnnouncer) Close() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.closed = true
-	return nil
+	return f.closeErr
 }
 
 func (f *fakeAnnouncer) Status() room.Status {
@@ -792,6 +799,14 @@ type fakeSignaling struct {
 	networkID string
 }
 
+type jsonRPCFakeSignaling struct {
+	fakeSignaling
+	pmid uuid.UUID
+}
+
+// PlayerMessagingID returns the fake transport's Player Messaging identity.
+func (f *jsonRPCFakeSignaling) PlayerMessagingID() uuid.UUID { return f.pmid }
+
 func (f *fakeSignaling) Signal(context.Context, *nethernet.Signal) error { return nil }
 func (f *fakeSignaling) Notify(nethernet.Notifier) func() {
 	return func() {}
@@ -804,7 +819,7 @@ func (f *fakeSignaling) NetworkID() string {
 	if f.networkID != "" {
 		return f.networkID
 	}
-	return "network"
+	return "123456789"
 }
 func (f *fakeSignaling) PongData([]byte) {}
 func (f *fakeSignaling) Close() error {
