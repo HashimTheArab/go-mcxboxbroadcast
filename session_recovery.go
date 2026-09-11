@@ -37,11 +37,14 @@ func (b *Broadcaster) sessionLoop() {
 		case <-ticker.C:
 			issue := b.sessionHealthIssue()
 			if issue.reason != "" && issue.subAccountID == "" {
-				if !b.recoverSession(issue.reason) {
-					return
+				if b.canRecreateSignaling() {
+					if !b.recoverSession(issue.reason) {
+						return
+					}
+					consecutiveFailures = 0
+					continue
 				}
-				consecutiveFailures = 0
-				continue
+				b.warn("session is unhealthy but signaling is statically configured; cannot re-create", "reason", issue.reason)
 			}
 			err := b.refreshSession(issue)
 			if err == nil {

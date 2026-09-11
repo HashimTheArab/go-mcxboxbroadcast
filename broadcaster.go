@@ -2001,10 +2001,13 @@ func (b *Broadcaster) Close() error {
 // Wait blocks until shutdown is requested and returns any terminal recovery error.
 // Call Close afterward to release the listener and Xbox sessions.
 func (b *Broadcaster) Wait() error {
-	if b.ctx == nil {
+	b.mu.Lock()
+	ctx := b.ctx
+	b.mu.Unlock()
+	if ctx == nil {
 		return nil
 	}
-	<-b.ctx.Done()
+	<-ctx.Done()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.failure

@@ -187,7 +187,9 @@ if err != nil {
 if err := b.Start(ctx); err != nil {
     return err
 }
-defer b.Close()
+runErr := b.Wait()
+closeErr := b.Close()
+return errors.Join(runErr, closeErr)
 ```
 
 Contexts are accepted for start, update, signaling setup, announcement, and
