@@ -62,10 +62,12 @@ type Broadcaster struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 
-	mu        sync.Mutex
-	galleryMu sync.Mutex
-	started   bool
-	acceptWg  sync.WaitGroup
+	mu         sync.Mutex
+	galleryMu  sync.Mutex
+	started    bool
+	failure    error
+	recovering bool
+	acceptWg   sync.WaitGroup
 
 	// lastQuery is the most recent successful target-server query, kept so
 	// query failures fall back to real data instead of failing the update.
@@ -173,6 +175,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	}
 	b.ctx, b.cancel = context.WithCancel(ctx)
 	b.done = make(chan struct{})
+	b.failure = nil
 	mode, err := b.signalingMode()
 	if err != nil {
 		b.cancel()
@@ -266,8 +269,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 		b.acceptWg.Wait()
 		close(b.done)
 	}()
-	go b.updateLoop()
-	go b.watchSignaling()
+	go b.sessionLoop()
 	presenceClients := b.presenceClients()
 	b.debug("starting presence updates", "count", len(presenceClients), "xuids", presenceClientXUIDs(presenceClients))
 	for _, client := range presenceClients {
@@ -1600,69 +1602,9 @@ func countsAsPrimaryUpdateFailure(err error) bool {
 	return !errors.As(err, &subErr)
 }
 
-// updateLoop periodically refreshes the Xbox session metadata, checking
-// session health before each update like Java's checkConnection().
-func (b *Broadcaster) updateLoop() {
-	ticker := time.NewTicker(b.conf.UpdateInterval)
-	defer ticker.Stop()
-	consecutiveFailures := 0
-	for {
-		select {
-		case <-ticker.C:
-			if b.checkSessionHealth() {
-				consecutiveFailures = 0
-				continue
-			}
-			ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
-			err := b.Update(ctx)
-			if err == nil {
-				consecutiveFailures = 0
-			} else if !errors.Is(err, context.Canceled) && !countsAsPrimaryUpdateFailure(err) {
-				consecutiveFailures = 0
-				b.log.Error("update sub-account sessions", "err", err)
-			} else if !errors.Is(err, context.Canceled) {
-				consecutiveFailures++
-				b.log.Error("update session", "err", err)
-				b.notifySessionUpdateFailure(ctx, err)
-				if consecutiveFailures >= sessionUpdateFailureLimit {
-					consecutiveFailures = 0
-					b.recreateAfterFailure("repeated session update failures")
-				}
-			}
-			cancel()
-		case <-b.ctx.Done():
-			return
-		}
-	}
-}
-
 type sessionHealthIssue struct {
 	reason       string
 	subAccountID string
-}
-
-// checkSessionHealth recovers a session when it is dead or nearly full and
-// reports whether recovery was attempted.
-func (b *Broadcaster) checkSessionHealth() bool {
-	issue := b.sessionHealthIssue()
-	if issue.reason == "" {
-		return false
-	}
-	if issue.subAccountID == "" {
-		b.recreateAfterFailure(issue.reason)
-		return true
-	}
-	ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
-	defer cancel()
-	if err := b.recoverSessionHealthIssue(ctx, issue); err != nil {
-		b.log.Error("recover sub-account session health", "sub_account", issue.subAccountID, "reason", issue.reason, "err", err)
-		b.notify(ctx, "Sub-account "+issue.subAccountID+" session recovery failed: "+err.Error())
-		// Let Update refresh the healthy primary and sub-account sessions. Its
-		// sub-account-only error does not count toward a full-stack restart.
-		return false
-	}
-	b.info("sub-account session recovered", "sub_account", issue.subAccountID, "reason", issue.reason)
-	return true
 }
 
 // recoverSessionHealthIssue replaces the unhealthy sub-account session without
@@ -1724,121 +1666,6 @@ func (b *Broadcaster) sessionHealthIssue() sessionHealthIssue {
 	return sessionHealthIssue{}
 }
 
-// recreateAfterFailure rebuilds the whole session stack after a health-check
-// failure. Failures are logged and retried on the next tick rather than
-// shutting the broadcaster down.
-func (b *Broadcaster) recreateAfterFailure(reason string) {
-	if b.ctx.Err() != nil {
-		return
-	}
-	if !b.canRecreateSignaling() {
-		b.warn("session is unhealthy but signaling is statically configured; cannot re-create", "reason", reason)
-		return
-	}
-	b.warn("re-creating xbox live session", "reason", reason)
-	if err := b.recreateSession(); err != nil {
-		b.log.Error("re-create session failed", "reason", reason, "err", err)
-		b.notify(b.ctx, "Xbox session recreation failed: "+err.Error())
-		return
-	}
-	b.info("xbox live session re-created", "reason", reason)
-}
-
-// canRecreateSignaling reports whether signaling can be rebuilt (not statically configured).
-func (b *Broadcaster) canRecreateSignaling() bool {
-	return b.conf.Signaling == nil
-}
-
-// watchSignaling monitors the signaling context and triggers session reconnection on loss.
-func (b *Broadcaster) watchSignaling() {
-	sig := b.signaling
-	if sig == nil {
-		return
-	}
-	if !b.canRecreateSignaling() {
-		b.debug("signaling reconnection disabled for static signaling")
-		return
-	}
-	select {
-	case <-sig.Context().Done():
-		if b.ctx.Err() != nil {
-			return
-		}
-		b.mu.Lock()
-		current := b.signaling
-		b.mu.Unlock()
-		if current != nil && current != sig {
-			// The session was already re-created (for example by the health
-			// check); watch the replacement signaling instead.
-			go b.watchSignaling()
-			return
-		}
-		b.warn("connection to signaling lost, re-creating session...",
-			"cause", context.Cause(sig.Context()))
-		if err := b.reconnectSignaling(sig); err != nil {
-			// The broadcaster was shut down while retrying; stop watching.
-			return
-		}
-		b.info("signaling session reconnected")
-		go b.watchSignaling()
-	case <-b.ctx.Done():
-	}
-}
-
-// reconnect backoff bounds for rebuilding the session after signaling loss.
-const (
-	reconnectBackoffBase = 5 * time.Second
-	reconnectBackoffMax  = 2 * time.Minute
-)
-
-// reconnectSignaling rebuilds the session after the lost signaling sig, retrying
-// with backoff until it succeeds or the broadcaster is shut down. A transient
-// failure (an expired token, a brief network outage) no longer tears the
-// broadcaster down on the first attempt. It stops early, without rebuilding, if
-// another path (such as the health check) has already replaced the signaling, so
-// a delayed retry never tears down a newer session. It returns a non-nil error
-// only when the broadcaster's context is canceled.
-func (b *Broadcaster) reconnectSignaling(sig nethernet.Signaling) error {
-	return retryWithBackoff(b.ctx, reconnectBackoffBase, reconnectBackoffMax, func() error {
-		b.mu.Lock()
-		superseded := b.signaling != nil && b.signaling != sig
-		b.mu.Unlock()
-		if superseded {
-			return nil
-		}
-		return b.recreateSession()
-	}, func(err error, next time.Duration) {
-		b.log.Error("re-create session failed, retrying", "err", err, "retry_in", next)
-		b.notify(b.ctx, "Signaling reconnection failed, retrying in "+next.String()+": "+err.Error())
-	})
-}
-
-// retryWithBackoff calls attempt until it returns nil or ctx is done, waiting
-// between attempts starting at base and doubling up to max. onError, when
-// non-nil, is called with each failed attempt's error and the delay before the
-// next try. It returns nil once an attempt succeeds, or ctx.Err() if ctx is
-// done first.
-func retryWithBackoff(ctx context.Context, base, max time.Duration, attempt func() error, onError func(err error, next time.Duration)) error {
-	delay := base
-	for {
-		if err := attempt(); err == nil {
-			return nil
-		} else if ctx.Err() == nil && onError != nil {
-			// Skip the failure callback when the context is already canceled:
-			// a graceful shutdown is not a reconnect failure worth alerting on.
-			onError(err, delay)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(delay):
-		}
-		if delay *= 2; delay > max {
-			delay = max
-		}
-	}
-}
-
 // recreateSession tears down and rebuilds signaling, session, and listener after a drop.
 func (b *Broadcaster) recreateSession() error {
 	b.mu.Lock()
@@ -1847,7 +1674,6 @@ func (b *Broadcaster) recreateSession() error {
 	if b.ctx.Err() != nil || !b.started {
 		return errors.New("broadcaster is shut down")
 	}
-
 	b.acceptWg.Add(1)
 	reconnectDone := false
 	defer func() {
@@ -1858,6 +1684,7 @@ func (b *Broadcaster) recreateSession() error {
 
 	if b.listener != nil {
 		_ = b.listener.Close()
+		b.listener = nil
 	}
 	_ = b.cleanupPublishedSessions(true)
 	if b.signaling != nil {
@@ -1891,12 +1718,14 @@ func (b *Broadcaster) recreateSession() error {
 		b.signaling = nil
 	}
 
-	status, err := b.status(b.ctx)
+	ctx, cancel := context.WithTimeout(b.ctx, 30*time.Second)
+	defer cancel()
+	status, err := b.status(ctx)
 	if err != nil {
 		closeSignaling()
 		return fmt.Errorf("re-create session status: %w", err)
 	}
-	announcer, err := b.newAnnouncer(b.ctx)
+	announcer, err := b.newAnnouncer(ctx)
 	if err != nil {
 		closeSignaling()
 		return fmt.Errorf("re-create announcer: %w", err)
@@ -1911,7 +1740,7 @@ func (b *Broadcaster) recreateSession() error {
 		b.sessionConnection = connection
 		b.announcer = signalingConnectionAnnouncer{Announcer: b.announcer, connection: *b.sessionConnection}
 	}
-	if err := b.announcer.Announce(b.ctx, status); err != nil {
+	if err := b.announcer.Announce(ctx, status); err != nil {
 		closeSignaling()
 		return fmt.Errorf("re-announce session: %w", err)
 	}
@@ -1950,6 +1779,9 @@ func (b *Broadcaster) Update(ctx context.Context) error {
 	defer b.mu.Unlock()
 	if !b.started {
 		return errors.New("broadcaster not started")
+	}
+	if b.recovering {
+		return errors.New("session recovery is in progress")
 	}
 	status, err := b.status(ctx)
 	if err != nil {
@@ -2150,8 +1982,11 @@ func (b *Broadcaster) Close() error {
 		return nil
 	}
 	b.cancel()
-	err := b.listener.Close()
-	err = errors.Join(err, b.cleanupPublishedSessions(false))
+	var err error
+	if b.listener != nil {
+		err = b.listener.Close()
+	}
+	err = errors.Join(err, b.cleanupPublishedSessions(true))
 	if b.signaling != nil {
 		if c, ok := b.signaling.(interface{ Close() error }); ok {
 			err = errors.Join(err, c.Close())
@@ -2163,9 +1998,17 @@ func (b *Broadcaster) Close() error {
 	return err
 }
 
-// Wait blocks until the listener stops.
-func (b *Broadcaster) Wait() {
-	if b.done != nil {
-		<-b.done
+// Wait blocks until shutdown is requested and returns any terminal recovery error.
+// Call Close afterward to release the listener and Xbox sessions.
+func (b *Broadcaster) Wait() error {
+	b.mu.Lock()
+	ctx := b.ctx
+	b.mu.Unlock()
+	if ctx == nil {
+		return nil
 	}
+	<-ctx.Done()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.failure
 }

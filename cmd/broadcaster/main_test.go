@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	broadcaster "github.com/HashimTheArab/go-mcxboxbroadcast"
 	"github.com/df-mc/go-xsapi/v2"
@@ -123,6 +124,10 @@ func TestRunBroadcasterCommandStartsAndClosesBroadcaster(t *testing.T) {
 					cancel()
 					return nil
 				},
+				wait: func() error {
+					<-ctx.Done()
+					return nil
+				},
 				close: func() error {
 					closed = true
 					return nil
@@ -196,6 +201,91 @@ func TestRunBroadcasterCommandClosesXSAPIClientsWhenStartFails(t *testing.T) {
 	}
 	if closedClients != 2 {
 		t.Fatalf("expected primary and sub-account clients to be closed, got %d", closedClients)
+	}
+}
+
+func TestRunBroadcasterCommandClosesAfterInternalFailure(t *testing.T) {
+	runErr := errors.New("session recovery exhausted")
+	closeErr := errors.New("listener close failed")
+	for _, tc := range []struct {
+		name     string
+		closeErr error
+	}{
+		{name: "runtime failure"},
+		{name: "runtime and close failure", closeErr: closeErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var closed bool
+			var closedClients int
+			result := make(chan error, 1)
+			go func() {
+				result <- runBroadcasterCommand(ctx, commandOptions{
+					ConfigPath: "/base/config.yml",
+				}, commandDeps{
+					Stdout: io.Discard,
+					LoadConfig: func(string) (broadcaster.ConfigFile, error) {
+						cfg := broadcaster.DefaultConfigFile()
+						cfg.Session.SessionInfo.IP = "127.0.0.1"
+						cfg.Session.SessionInfo.Port = 19132
+						cfg.Accounts.SubAccounts = []broadcaster.SubAccountFile{{ID: "alt", Enabled: true}}
+						return cfg, nil
+					},
+					LoadLiveToken: func(string) (*oauth2.Token, error) {
+						return nil, errors.ErrUnsupported
+					},
+					NewLiveTokenSource: func(context.Context, *oauth2.Token, io.Writer, func(*oauth2.Token)) oauth2.TokenSource {
+						return staticOAuthTokenSource{}
+					},
+					SaveLiveToken: func(string, *oauth2.Token) error {
+						return nil
+					},
+					LoadAccountToken: func(context.Context, string, io.Writer, func(*oauth2.Token)) (oauth2.TokenSource, error) {
+						return staticOAuthTokenSource{}, nil
+					},
+					NewXBLTokenSource: func(context.Context, oauth2.TokenSource) xsapi.TokenSource {
+						return nil
+					},
+					NewXSAPIClient: testNewXSAPIClient,
+					CloseXSAPIClients: func(_ *slog.Logger, clients []*xsapi.Client) {
+						closedClients = len(clients)
+					},
+					NewBroadcaster: func(broadcaster.Config) (commandBroadcaster, error) {
+						return fakeCommandBroadcaster{
+							start: func(context.Context) error { return nil },
+							wait:  func() error { return runErr },
+							close: func() error {
+								closed = true
+								return tc.closeErr
+							},
+						}, nil
+					},
+				})
+			}()
+			select {
+			case err := <-result:
+				if ctx.Err() != nil {
+					t.Fatal("external context was canceled before command returned")
+				}
+				if !errors.Is(err, runErr) {
+					t.Fatalf("expected runtime error, got %v", err)
+				}
+				if tc.closeErr != nil && !errors.Is(err, tc.closeErr) {
+					t.Fatalf("expected close error alongside runtime error, got %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				cancel()
+				<-result
+				t.Fatal("command did not return after internal broadcaster failure")
+			}
+			if !closed {
+				t.Fatal("broadcaster was not closed after internal failure")
+			}
+			if closedClients != 2 {
+				t.Fatalf("expected primary and sub-account clients to be closed, got %d", closedClients)
+			}
+		})
 	}
 }
 
@@ -442,11 +532,20 @@ func testNewXSAPIClient(context.Context, xsapi.TokenSource, *http.Client, *slog.
 
 type fakeCommandBroadcaster struct {
 	start func(context.Context) error
+	wait  func() error
 	close func() error
 }
 
 func (f fakeCommandBroadcaster) Start(ctx context.Context) error {
 	return f.start(ctx)
+}
+
+// Wait returns the simulated runtime result, or a normal shutdown when omitted.
+func (f fakeCommandBroadcaster) Wait() error {
+	if f.wait == nil {
+		return nil
+	}
+	return f.wait()
 }
 
 func (f fakeCommandBroadcaster) Close() error {
