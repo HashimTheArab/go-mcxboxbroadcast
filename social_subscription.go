@@ -26,10 +26,8 @@ func reactiveFriendSyncApplicable(conf *FriendSyncConfig) bool {
 }
 
 // startSocialSubscription subscribes to the account's RTA social feed so friend
-// requests are accepted (and relationship changes reconciled) reactively rather
-// than only on the sync interval. It returns a channel the account's friend
-// syncer should select on to run an immediate pass, or nil when a reactive
-// subscription is not applicable.
+// requests and relationship changes can be handled before the next poll.
+// It returns the syncer's trigger channel, or nil when no subscription is needed.
 func (b *Broadcaster) startSocialSubscription(client *xsapi.Client, conf *FriendSyncConfig, log *slog.Logger) <-chan struct{} {
 	if !hasSocialClient(client) || !reactiveFriendSyncApplicable(conf) {
 		return nil
@@ -77,8 +75,7 @@ func (b *Broadcaster) subscribeSocial(sub socialSubscriber, log *slog.Logger) <-
 }
 
 // friendRequestSubscriptionHandler adapts go-xsapi's social RTA subscription to
-// the friend syncer: any relationship change or incoming-friend-request event
-// requests an immediate sync pass through trigger.
+// the friend syncer. Events request a pass through its normal rate limits.
 type friendRequestSubscriptionHandler struct {
 	trigger chan<- struct{}
 	log     *slog.Logger

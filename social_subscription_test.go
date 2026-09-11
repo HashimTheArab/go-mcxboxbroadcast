@@ -13,40 +13,36 @@ import (
 	xblsocial "github.com/df-mc/go-xsapi/v2/social"
 )
 
-// TestFriendSyncerRunSyncsOnTrigger verifies that a signal on the Trigger channel
-// causes an immediate sync pass, rather than waiting for the poll interval.
+// TestFriendSyncerRunSyncsOnTrigger checks that events can run ahead of polling.
 func TestFriendSyncerRunSyncsOnTrigger(t *testing.T) {
-	accepted := make(chan struct{}, 16)
-	client := &syncFriendClient{
-		accept: func(context.Context) ([]Person, error) {
-			accepted <- struct{}{}
-			return nil, nil
-		},
-	}
-	trigger := make(chan struct{}, 1)
-	syncer := FriendSyncer{
-		Client:  client,
-		Config:  FriendSyncConfig{AutoFollow: true, UpdateInterval: time.Hour},
-		Trigger: trigger,
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go syncer.Run(ctx)
-
-	// Run performs an initial sync on startup.
-	select {
-	case <-accepted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("no initial sync pass")
-	}
-	// An RTA event fires the trigger, causing an immediate extra sync well before
-	// the one-hour ticker could.
-	trigger <- struct{}{}
-	select {
-	case <-accepted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("trigger did not cause a sync pass")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		accepts := 0
+		client := &syncFriendClient{
+			accept: func(context.Context) ([]Person, error) {
+				accepts++
+				return nil, nil
+			},
+		}
+		trigger := make(chan struct{}, 1)
+		syncer := FriendSyncer{
+			Client:  client,
+			Config:  FriendSyncConfig{AutoFollow: true, UpdateInterval: time.Hour},
+			Trigger: trigger,
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		go syncer.Run(ctx)
+		synctest.Wait()
+		if accepts != 1 {
+			t.Fatalf("initial passes = %d, want 1", accepts)
+		}
+		time.Sleep(30 * time.Second)
+		trigger <- struct{}{}
+		synctest.Wait()
+		if accepts != 2 {
+			t.Fatalf("passes after event = %d, want 2", accepts)
+		}
+	})
 }
 
 // TestFriendSyncerRunHandlesClosedTrigger verifies that a closed Trigger channel
@@ -214,11 +210,12 @@ func TestReactiveFriendSyncPreservesMutationBackoff(t *testing.T) {
 			t.Fatalf("initial accepts=%d removals=%d, want 1 each", accepts, client.removeCalls)
 		}
 		trigger <- struct{}{}
+		time.Sleep(20 * time.Second)
 		synctest.Wait()
 		if accepts != 1 || client.removeCalls != 2 {
 			t.Fatalf("during backoff accepts=%d removals=%d, want 1 and 2", accepts, client.removeCalls)
 		}
-		time.Sleep(time.Minute)
+		time.Sleep(40 * time.Second)
 		trigger <- struct{}{}
 		synctest.Wait()
 		if accepts != 2 || client.removeCalls != 3 {
