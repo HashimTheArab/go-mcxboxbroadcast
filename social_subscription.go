@@ -11,11 +11,10 @@ import (
 
 // socialSubscriber is the part of go-xsapi's social client the broadcaster uses
 // to receive and release RTA relationship events. It is satisfied by
-// [*xblsocial.Client]. Unsubscribe removes only the broadcaster's own handler,
-// leaving any other subscribers on a shared client untouched.
+// [*xblsocial.Client]. Subscribe returns a cleanup function for only that
+// registration, leaving other subscribers on a shared client untouched.
 type socialSubscriber interface {
-	Subscribe(context.Context, xblsocial.SubscriptionHandler) error
-	Unsubscribe(context.Context, xblsocial.SubscriptionHandler) error
+	Subscribe(context.Context, xblsocial.SubscriptionHandler) (func(context.Context) error, error)
 }
 
 // reactiveFriendSyncApplicable reports whether an account with the given friend
@@ -57,7 +56,8 @@ func (b *Broadcaster) subscribeSocial(sub socialSubscriber, log *slog.Logger) <-
 		defer b.socialWg.Done()
 		// Subscribe dials RTA lazily; running it here keeps a slow or failing
 		// dial off the start path.
-		if err := sub.Subscribe(b.ctx, handler); err != nil {
+		unsubscribe, err := sub.Subscribe(b.ctx, handler)
+		if err != nil {
 			log.Warn("subscribe to social rta feed; friend requests will be accepted on the sync interval", "err", err)
 			return
 		}
@@ -65,11 +65,11 @@ func (b *Broadcaster) subscribeSocial(sub socialSubscriber, log *slog.Logger) <-
 
 		<-b.ctx.Done()
 		// b.ctx is done, so use a fresh context to release the subscription.
-		// Unsubscribe removes only this handler, so a shared client's other
+		// The cleanup removes only this registration, so a shared client's other
 		// subscribers keep working.
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		if err := sub.Unsubscribe(ctx, handler); err != nil {
+		if err := unsubscribe(ctx); err != nil {
 			log.Debug("unsubscribe social rta feed", "err", err)
 		}
 	}()

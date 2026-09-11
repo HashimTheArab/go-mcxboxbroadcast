@@ -131,7 +131,8 @@ func TestBroadcasterClosePreservesSharedSocialSubscriber(t *testing.T) {
 	// The first wire subscribe holds the social client's registration lock.
 	// Registering this handler waits for the broadcaster's registration to finish.
 	other := &sharedSocialEventHandler{counts: make(chan int, 2)}
-	if err := social.Subscribe(ctx, other); err != nil {
+	unsubscribeOther, err := social.Subscribe(ctx, other)
+	if err != nil {
 		t.Fatalf("register other shared-client handler: %v", err)
 	}
 	for _, count := range []int{1, 2} {
@@ -176,7 +177,7 @@ func TestBroadcasterClosePreservesSharedSocialSubscriber(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("timed out checking broadcaster handler removal")
 	}
-	if err := social.Unsubscribe(ctx, other); err != nil {
+	if err := unsubscribeOther(ctx); err != nil {
 		t.Fatalf("remove final shared-client handler: %v", err)
 	}
 	if got := unsubscribes.Load(); got != 1 {

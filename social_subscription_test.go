@@ -112,19 +112,19 @@ func TestFriendRequestSubscriptionHandlerCoalescesEvents(t *testing.T) {
 type fakeSocialSubscriber struct {
 	subscribeErr error
 	subscribed   chan xblsocial.SubscriptionHandler
-	unsubscribed chan xblsocial.SubscriptionHandler
+	cleanupCalls atomic.Int32
 }
 
-// Subscribe records the requested handler and returns the configured setup error.
-func (f *fakeSocialSubscriber) Subscribe(_ context.Context, h xblsocial.SubscriptionHandler) error {
+// Subscribe records the handler and returns its cleanup or the configured error.
+func (f *fakeSocialSubscriber) Subscribe(_ context.Context, h xblsocial.SubscriptionHandler) (func(context.Context) error, error) {
 	f.subscribed <- h
-	return f.subscribeErr
-}
-
-// Unsubscribe records which handler was released.
-func (f *fakeSocialSubscriber) Unsubscribe(_ context.Context, h xblsocial.SubscriptionHandler) error {
-	f.unsubscribed <- h
-	return nil
+	if f.subscribeErr != nil {
+		return nil, f.subscribeErr
+	}
+	return func(context.Context) error {
+		f.cleanupCalls.Add(1)
+		return nil
+	}, nil
 }
 
 // TestSubscribeSocialUnsubscribesOnShutdown verifies that a social subscription
@@ -135,8 +135,7 @@ func TestSubscribeSocialUnsubscribesOnShutdown(t *testing.T) {
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	defer b.cancel()
 	fake := &fakeSocialSubscriber{
-		subscribed:   make(chan xblsocial.SubscriptionHandler, 1),
-		unsubscribed: make(chan xblsocial.SubscriptionHandler, 1),
+		subscribed: make(chan xblsocial.SubscriptionHandler, 1),
 	}
 
 	trigger := b.subscribeSocial(fake, b.log)
@@ -157,8 +156,7 @@ func TestSubscribeSocialUnsubscribesOnShutdown(t *testing.T) {
 		t.Fatal("social event did not reach the trigger")
 	}
 
-	// Shutdown unsubscribes exactly the handler it registered, and the
-	// broadcaster's wait group tracks that cleanup.
+	// The broadcaster's wait group tracks the returned cleanup through shutdown.
 	b.cancel()
 	done := make(chan struct{})
 	go func() { b.socialWg.Wait(); close(done) }()
@@ -167,13 +165,8 @@ func TestSubscribeSocialUnsubscribesOnShutdown(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("socialWg.Wait did not return after shutdown")
 	}
-	select {
-	case got := <-fake.unsubscribed:
-		if got != h {
-			t.Fatal("unsubscribed a different handler than was registered")
-		}
-	default:
-		t.Fatal("subscription was not unsubscribed on shutdown")
+	if got := fake.cleanupCalls.Load(); got != 1 {
+		t.Fatalf("subscription cleanup calls = %d, want 1", got)
 	}
 }
 
@@ -242,7 +235,6 @@ func TestSocialSubscriptionFailureKeepsPolling(t *testing.T) {
 		sub := &fakeSocialSubscriber{
 			subscribeErr: errors.New("RTA unavailable"),
 			subscribed:   make(chan xblsocial.SubscriptionHandler, 1),
-			unsubscribed: make(chan xblsocial.SubscriptionHandler, 1),
 		}
 		var accepts atomic.Int32
 		syncer := FriendSyncer{
@@ -265,8 +257,8 @@ func TestSocialSubscriptionFailureKeepsPolling(t *testing.T) {
 		}
 		b.cancel()
 		b.socialWg.Wait()
-		if len(sub.unsubscribed) != 0 {
-			t.Fatal("failed subscription was unsubscribed")
+		if sub.cleanupCalls.Load() != 0 {
+			t.Fatal("failed subscription was cleaned up")
 		}
 	})
 }
