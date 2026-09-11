@@ -551,60 +551,13 @@ func TestBroadcasterSignalingFactoryIsUsedOnceForSharedSignaling(t *testing.T) {
 	}
 }
 
-func TestBroadcasterWatchSignalingRetriesInsteadOfShuttingDown(t *testing.T) {
-	sigCtx, sigCancel := context.WithCancel(context.Background())
-	defer sigCancel()
-	var log bytes.Buffer
-	b := &Broadcaster{
-		log:       slog.New(slog.NewTextHandler(&log, nil)),
-		signaling: &cancelableSignaling{ctx: sigCtx, networkID: "12345"},
-		started:   true,
-		conf: Config{
-			Server: ServerInfo{Host: "127.0.0.1", Port: 19132},
-			XUID:   "123",
-			Status: Status{HostName: "Host", WorldName: "World"},
-			SignalingFactory: func(context.Context, Config) (nethernet.Signaling, error) {
-				return nil, errors.New("test: signaling factory error")
-			},
-		},
-	}
-	b.ctx, b.cancel = context.WithCancel(context.Background())
-	defer b.cancel()
-
-	sigCancel()
-	done := make(chan struct{})
-	go func() {
-		b.watchSignaling()
-		close(done)
-	}()
-
-	// A failing reconnect must not shut the broadcaster down: watchSignaling
-	// keeps retrying with backoff rather than returning and cancelling.
-	select {
-	case <-done:
-		t.Fatal("watchSignaling returned after a failed reconnect; want it to keep retrying")
-	case <-time.After(200 * time.Millisecond):
-	}
-	if b.ctx.Err() != nil {
-		t.Fatal("broadcaster was shut down after a failed reconnect")
-	}
-
-	// Shutting the broadcaster down stops the retry loop.
-	b.cancel()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("watchSignaling did not return after broadcaster shutdown")
-	}
-}
-
 func TestRetryWithBackoffSkipsOnErrorAfterContextCanceled(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	var onErrCalls int
-	err := retryWithBackoff(ctx, time.Millisecond, time.Millisecond, func() error {
+	err := retryWithBackoff(ctx, time.Millisecond, time.Millisecond, sessionRecoveryAttempts, func() error {
 		return errors.New("broadcaster is shut down")
 	}, func(error, time.Duration) {
 		onErrCalls++
@@ -614,35 +567,6 @@ func TestRetryWithBackoffSkipsOnErrorAfterContextCanceled(t *testing.T) {
 	}
 	if onErrCalls != 0 {
 		t.Fatalf("onError called %d times after context cancel, want 0", onErrCalls)
-	}
-}
-
-func TestBroadcasterWatchSignalingSkipsStaticSignaling(t *testing.T) {
-	sigCtx, sigCancel := context.WithCancel(context.Background())
-	defer sigCancel()
-	var log bytes.Buffer
-	staticSig := &cancelableSignaling{ctx: sigCtx, networkID: "12345"}
-	b := &Broadcaster{
-		log:       slog.New(slog.NewTextHandler(&log, nil)),
-		signaling: staticSig,
-		started:   true,
-		conf: Config{
-			Signaling: staticSig,
-		},
-	}
-	b.ctx, b.cancel = context.WithCancel(context.Background())
-	defer b.cancel()
-
-	done := make(chan struct{})
-	go func() {
-		b.watchSignaling()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("watchSignaling should have returned immediately for static signaling")
 	}
 }
 

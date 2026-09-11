@@ -29,6 +29,7 @@ type commandOptions struct {
 
 type commandBroadcaster interface {
 	Start(context.Context) error
+	Wait() error
 	Close() error
 }
 
@@ -180,11 +181,15 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 	if err := b.Start(ctx); err != nil {
 		return fmt.Errorf("start: %w", err)
 	}
-	<-ctx.Done()
-	if err := b.Close(); err != nil {
-		return fmt.Errorf("close: %w", err)
+	runErr := b.Wait()
+	closeErr := b.Close()
+	if runErr != nil {
+		runErr = fmt.Errorf("run: %w", runErr)
 	}
-	return nil
+	if closeErr != nil {
+		closeErr = fmt.Errorf("close: %w", closeErr)
+	}
+	return errors.Join(runErr, closeErr)
 }
 
 func defaultCommandDeps() commandDeps {

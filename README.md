@@ -66,6 +66,20 @@ The config exposes the same operator-facing areas as MCXboxBroadcast:
 - relay mode through `relay.enabled`, which keeps players inside the NetherNet
   session instead of transferring them (see below).
 
+### Session recovery
+
+Signaling loss and repeated primary-session update failures share one recovery
+loop. Normal updates pause while it rebuilds the session. Recovery makes up to
+six attempts, waiting 5, 10, 20, 40, and 80 seconds between failures. It reports
+the first recovery failure to the webhook and sends a recovery notice if a later
+attempt succeeds; retry details remain in the logs.
+
+If all six attempts fail, the command closes its resources and exits with an
+error. Run it under Kubernetes or another process supervisor with automatic
+restart enabled so the next process recreates authentication and client state.
+Library callers receive the terminal error from `Broadcaster.Wait()` and must
+call `Close()` to release resources. A normal shutdown returns no recovery error.
+
 ### Relay mode
 
 By default a joining client receives a `Transfer` to `sessionInfo.ip:port` and
