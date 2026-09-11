@@ -278,7 +278,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 		go client.Run(b.ctx, b.log)
 	}
 	go b.uploadGalleryWithTimeout()
-	if b.conf.FriendSync != nil {
+	if b.conf.FriendSync != nil && hasSocialClient(b.conf.XBLClient) {
 		b.debug("starting friend sync",
 			"auto_follow", b.conf.FriendSync.AutoFollow,
 			"auto_unfollow", b.conf.FriendSync.AutoUnfollow,
@@ -335,7 +335,7 @@ func (b *Broadcaster) subAccountFriendSyncActive() bool {
 func (b *Broadcaster) startSubAccountFriendSync() {
 	accounts, _ := b.enabledSubAccounts()
 	for _, account := range accounts {
-		if account.XBLClient == nil {
+		if !hasSocialClient(account.XBLClient) {
 			continue
 		}
 		conf := account.FriendSync
@@ -367,6 +367,9 @@ func (b *Broadcaster) startSubAccountFriendSync() {
 // from the friend list like MCXboxBroadcast; the social summary's
 // targetFollowingCount is unreliable for the caller's own profile.
 func (b *Broadcaster) logSocialSummary() {
+	if !hasSocialClient(b.conf.XBLClient) {
+		return
+	}
 	ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
 	defer cancel()
 	friends, err := b.friendClientFor(b.conf.XBLClient).Friends(ctx)
@@ -383,22 +386,29 @@ func (b *Broadcaster) logSocialSummary() {
 
 // presenceClients builds the list of Xbox presence clients for heartbeat updates.
 func (b *Broadcaster) presenceClients() []PresenceClient {
-	clients := []PresenceClient{{
-		XUID:   b.primaryXUID(),
-		Client: authenticatedHTTPClient(b.conf.XBLClient, b.conf.HTTPClient),
-	}}
+	var clients []PresenceClient
+	if b.conf.XBLClient != nil && b.conf.XBLClient.Presence() != nil {
+		clients = append(clients, PresenceClient{
+			XUID:     b.primaryXUID(),
+			Presence: b.conf.XBLClient.Presence(),
+		})
+	}
 	accounts, _ := b.enabledSubAccounts()
 	for _, account := range accounts {
-		if !subAccountHasXBLCredentials(*account) {
+		if account.XBLClient == nil {
 			continue
 		}
 		xuid := accountXUID(*account)
 		if xuid == "" {
 			continue
 		}
+		presenceClient := account.XBLClient.Presence()
+		if presenceClient == nil {
+			continue
+		}
 		clients = append(clients, PresenceClient{
-			XUID:   xuid,
-			Client: authenticatedHTTPClient(account.XBLClient, b.conf.HTTPClient),
+			XUID:     xuid,
+			Presence: presenceClient,
 		})
 	}
 	return clients
@@ -613,19 +623,14 @@ func clientXUID(client *xsapi.Client) string {
 	return client.UserInfo().XUID
 }
 
-// friendClientFor wraps an Xbox client into a FriendClient for social API calls.
-func (b *Broadcaster) friendClientFor(client *xsapi.Client) FriendClient {
-	return FriendClient{Client: authenticatedHTTPClient(client, b.conf.HTTPClient)}
+// hasSocialClient reports whether an account has initialized its social API client.
+func hasSocialClient(client *xsapi.Client) bool {
+	return client != nil && client.Social() != nil
 }
 
-// authenticatedHTTPClient returns the client's authenticated HTTP client or the fallback.
-func authenticatedHTTPClient(client *xsapi.Client, fallback *http.Client) *http.Client {
-	if client != nil {
-		if httpClient := client.HTTPClient(); httpClient != nil {
-			return httpClient
-		}
-	}
-	return fallback
+// friendClientFor wraps an Xbox client into a FriendClient for social API calls.
+func (b *Broadcaster) friendClientFor(client *xsapi.Client) FriendClient {
+	return FriendClient{Social: client.Social()}
 }
 
 // broadcasterInviter resolves the current MPSD session dynamically for friend invites.
@@ -1055,6 +1060,9 @@ func (b *Broadcaster) ensureSubAccountMutualFollow(ctx context.Context, account 
 	primaryXUID := b.primaryXUID()
 	subXUID := accountXUID(account)
 	if primaryXUID == "" || subXUID == "" || primaryXUID == subXUID {
+		return nil
+	}
+	if !hasSocialClient(b.conf.XBLClient) || !hasSocialClient(account.XBLClient) {
 		return nil
 	}
 	primary := b.friendClientFor(b.conf.XBLClient)

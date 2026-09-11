@@ -4,11 +4,9 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"net/http"
 	"time"
 
 	"github.com/df-mc/go-xsapi/v2/presence"
-	"github.com/df-mc/go-xsapi/v2/xal/xsts"
 )
 
 const (
@@ -18,20 +16,19 @@ const (
 // PresenceClient updates Xbox user presence so the broadcaster account remains
 // visible as active while its MPSD session is published.
 type PresenceClient struct {
-	XUID   string
-	Client *http.Client
+	XUID     string
+	Presence *presence.Client
 }
 
 func (c PresenceClient) Update(ctx context.Context) (time.Duration, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if c.XUID == "" {
-		return defaultPresenceHeartbeat, errors.New("xuid is empty")
+	if c.Presence == nil {
+		return defaultPresenceHeartbeat, errors.New("presence client is nil")
 	}
-	presenceClient := presence.New(c.client(), xsts.UserInfo{XUID: c.XUID})
 	operationCtx, cancel := xboxOperationContext(ctx)
-	result, err := presenceClient.Update(operationCtx, presence.TitleRequest{State: presence.StateActive})
+	result, err := c.Presence.Update(operationCtx, presence.TitleRequest{State: presence.StateActive})
 	cancel()
 	if err != nil {
 		return defaultPresenceHeartbeat, err
@@ -66,11 +63,4 @@ func (c PresenceClient) Run(ctx context.Context, log *slog.Logger) {
 			return
 		}
 	}
-}
-
-func (c PresenceClient) client() *http.Client {
-	if c.Client != nil {
-		return c.Client
-	}
-	return http.DefaultClient
 }

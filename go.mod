@@ -3,6 +3,7 @@ module github.com/HashimTheArab/go-mcxboxbroadcast
 go 1.26.2
 
 require (
+	github.com/coder/websocket v1.8.14
 	github.com/df-mc/go-nethernet v1.0.20
 	github.com/df-mc/go-playfab/v2 v2.0.2
 	github.com/df-mc/go-xsapi/v2 v2.0.3
@@ -20,7 +21,6 @@ require (
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/coder/websocket v1.8.14 // indirect
 	github.com/coreos/go-oidc/v3 v3.17.0 // indirect
 	github.com/creachadair/jrpc2 v1.3.5 // indirect
 	github.com/creachadair/mds v0.26.1 // indirect
@@ -57,4 +57,4 @@ replace (
 	github.com/sandertv/gophertunnel => github.com/hashimthearab/gophertunnel v1.25.3-0.20260902183206-fc666ba2a7ce
 )
 
-replace github.com/df-mc/go-xsapi/v2 => github.com/HashimTheArab/go-xsapi/v2 v2.0.0-20260911064730-d60df3023755
+replace github.com/df-mc/go-xsapi/v2 => github.com/HashimTheArab/go-xsapi/v2 v2.0.0-20260911074615-e5edffa23110

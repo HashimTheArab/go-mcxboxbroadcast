@@ -32,7 +32,7 @@ func reactiveFriendSyncApplicable(conf *FriendSyncConfig) bool {
 // syncer should select on to run an immediate pass, or nil when a reactive
 // subscription is not applicable.
 func (b *Broadcaster) startSocialSubscription(client *xsapi.Client, conf *FriendSyncConfig, log *slog.Logger) <-chan struct{} {
-	if client == nil || !reactiveFriendSyncApplicable(conf) {
+	if !hasSocialClient(client) || !reactiveFriendSyncApplicable(conf) {
 		return nil
 	}
 	return b.subscribeSocial(client.Social(), log)

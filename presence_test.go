@@ -9,14 +9,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/df-mc/go-xsapi/v2"
+	"github.com/df-mc/go-xsapi/v2/presence"
+	"github.com/df-mc/go-xsapi/v2/xal/xsts"
 )
 
 func TestPresenceClientUpdatePostsActiveStateAndReturnsHeartbeat(t *testing.T) {
 	var called bool
 	client := PresenceClient{
-		XUID: "1",
-		Client: testAuthenticatedClient("XBL3.0 x=user;token", roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		Presence: presence.New(testAuthenticatedClient("XBL3.0 x=user;token", roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			called = true
 			if req.Method != http.MethodPost {
 				t.Fatalf("unexpected method %s", req.Method)
@@ -49,7 +49,7 @@ func TestPresenceClientUpdatePostsActiveStateAndReturnsHeartbeat(t *testing.T) {
 			resp := response(http.StatusOK, "")
 			resp.Header.Set("X-Heartbeat-After", "42")
 			return resp, nil
-		})),
+		})), xsts.UserInfo{XUID: "1"}),
 	}
 
 	heartbeat, err := client.Update(context.Background())
@@ -66,12 +66,11 @@ func TestPresenceClientUpdatePostsActiveStateAndReturnsHeartbeat(t *testing.T) {
 
 func TestPresenceClientUpdateDefaultsHeartbeatWhenHeaderInvalid(t *testing.T) {
 	client := PresenceClient{
-		XUID: "1",
-		Client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		Presence: presence.New(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			resp := response(http.StatusOK, "")
 			resp.Header.Set("X-Heartbeat-After", "bad")
 			return resp, nil
-		})},
+		})}, xsts.UserInfo{XUID: "1"}),
 	}
 
 	heartbeat, err := client.Update(context.Background())
@@ -85,8 +84,7 @@ func TestPresenceClientUpdateDefaultsHeartbeatWhenHeaderInvalid(t *testing.T) {
 
 func TestPresenceClientUpdateBoundsRequestContext(t *testing.T) {
 	client := PresenceClient{
-		XUID: "1",
-		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		Presence: presence.New(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			deadline, ok := req.Context().Deadline()
 			if !ok {
 				t.Fatal("presence request has no deadline")
@@ -96,30 +94,34 @@ func TestPresenceClientUpdateBoundsRequestContext(t *testing.T) {
 				t.Fatalf("presence request deadline remaining = %s", remaining)
 			}
 			return response(http.StatusOK, ""), nil
-		})},
+		})}, xsts.UserInfo{XUID: "1"}),
 	}
 	if _, err := client.Update(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestPresenceClientUpdateRejectsEmptyXUID(t *testing.T) {
+func TestPresenceClientUpdateRejectsNilClient(t *testing.T) {
 	client := PresenceClient{}
 
 	_, err := client.Update(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "xuid is empty") {
-		t.Fatalf("expected empty xuid error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "presence client is nil") {
+		t.Fatalf("expected nil client error, got %v", err)
 	}
 }
 
 func TestBroadcasterPresenceClientsIncludeEnabledSubAccounts(t *testing.T) {
 	httpClient := &http.Client{}
+	primary := newTestXSAPIClient(t, httpClient, "primary")
+	enabled := newTestXSAPIClient(t, httpClient, "enabled")
 	b := &Broadcaster{conf: Config{
 		XUID:       "primary",
 		HTTPClient: httpClient,
+		XBLClient:  primary,
 		SubAccounts: []SubAccountConfig{
-			{ID: "enabled", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "enabled"},
-			{ID: "enabled", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "duplicate"},
+			{ID: "enabled", Enabled: true, XBLClient: enabled, XUID: "enabled"},
+			{ID: "enabled", Enabled: true, XBLClient: enabled, XUID: "duplicate"},
+			{ID: "failed-lazy-client", Enabled: true, XUID: "failed-lazy-client", XBLTokenSource: staticTokenSource{}},
 			{ID: "xuid-only", Enabled: true, XUID: "xuid-only"},
 			{ID: "disabled", Enabled: false, XUID: "disabled"},
 			{ID: "missing-token", Enabled: true},
@@ -133,9 +135,32 @@ func TestBroadcasterPresenceClientsIncludeEnabledSubAccounts(t *testing.T) {
 	if clients[1].XUID != "enabled" {
 		t.Fatalf("expected credentialed sub-account presence, got xuid %q", clients[1].XUID)
 	}
-	for _, client := range clients {
-		if client.Client != httpClient {
-			t.Fatal("presence client did not use configured HTTP client")
+	if clients[0].Presence != primary.Presence() || clients[1].Presence != enabled.Presence() {
+		t.Fatal("presence clients did not use xsapi-owned presence subclients")
+	}
+}
+
+func TestBroadcasterPresenceIsRemovedWhenOwnerCloses(t *testing.T) {
+	var methods []string
+	xbl := newTestXSAPIClient(t, &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host != "userpresence.xboxlive.com" || req.URL.Path != "/users/xuid(100)/devices/current/titles/current" {
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL)
 		}
+		methods = append(methods, req.Method)
+		return response(http.StatusOK, ""), nil
+	})}, "100")
+	b := &Broadcaster{conf: Config{XBLClient: xbl}}
+	clients := b.presenceClients()
+	if len(clients) != 1 {
+		t.Fatalf("presence clients = %d, want 1", len(clients))
+	}
+	if _, err := clients[0].Update(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := xbl.CloseContext(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if len(methods) != 2 || methods[0] != http.MethodPost || methods[1] != http.MethodDelete {
+		t.Fatalf("presence requests = %v, want POST then DELETE", methods)
 	}
 }

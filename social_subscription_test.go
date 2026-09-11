@@ -2,9 +2,12 @@ package broadcaster
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	xblsocial "github.com/df-mc/go-xsapi/v2/social"
@@ -105,16 +108,20 @@ func TestFriendRequestSubscriptionHandlerCoalescesEvents(t *testing.T) {
 	}
 }
 
+// fakeSocialSubscriber records subscription ownership and can fail setup.
 type fakeSocialSubscriber struct {
+	subscribeErr error
 	subscribed   chan xblsocial.SubscriptionHandler
 	unsubscribed chan xblsocial.SubscriptionHandler
 }
 
+// Subscribe records the requested handler and returns the configured setup error.
 func (f *fakeSocialSubscriber) Subscribe(_ context.Context, h xblsocial.SubscriptionHandler) error {
 	f.subscribed <- h
-	return nil
+	return f.subscribeErr
 }
 
+// Unsubscribe records which handler was released.
 func (f *fakeSocialSubscriber) Unsubscribe(_ context.Context, h xblsocial.SubscriptionHandler) error {
 	f.unsubscribed <- h
 	return nil
@@ -126,6 +133,7 @@ func (f *fakeSocialSubscriber) Unsubscribe(_ context.Context, h xblsocial.Subscr
 func TestSubscribeSocialUnsubscribesOnShutdown(t *testing.T) {
 	b := &Broadcaster{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	b.ctx, b.cancel = context.WithCancel(context.Background())
+	defer b.cancel()
 	fake := &fakeSocialSubscriber{
 		subscribed:   make(chan xblsocial.SubscriptionHandler, 1),
 		unsubscribed: make(chan xblsocial.SubscriptionHandler, 1),
@@ -136,7 +144,12 @@ func TestSubscribeSocialUnsubscribesOnShutdown(t *testing.T) {
 		t.Fatal("subscribeSocial returned a nil trigger")
 	}
 	// The registered handler drives the returned trigger channel.
-	h := <-fake.subscribed
+	var h xblsocial.SubscriptionHandler
+	select {
+	case h = <-fake.subscribed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("social handler was not registered")
+	}
 	h.HandleIncomingFriendRequestCountChange(1)
 	select {
 	case <-trigger:
@@ -182,4 +195,78 @@ func TestReactiveFriendSyncApplicable(t *testing.T) {
 			t.Errorf("%s: reactiveFriendSyncApplicable = %v, want %v", tc.name, got, tc.want)
 		}
 	}
+}
+
+func TestReactiveFriendSyncPreservesMutationBackoff(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		accepts := 0
+		client := &syncFriendClient{
+			people: []Person{{XUID: "123", IsFollowedByCaller: true}},
+			accept: func(context.Context) ([]Person, error) {
+				accepts++
+				return nil, &xblsocial.ResponseError{StatusCode: 429, RetryAfter: time.Minute}
+			},
+		}
+		trigger := make(chan struct{}, 1)
+		syncer := FriendSyncer{
+			Client:  client,
+			Config:  FriendSyncConfig{AutoFollow: true, AutoUnfollow: true, UpdateInterval: time.Hour},
+			Trigger: trigger,
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go syncer.Run(ctx)
+		synctest.Wait()
+		if accepts != 1 || client.removeCalls != 1 {
+			t.Fatalf("initial accepts=%d removals=%d, want 1 each", accepts, client.removeCalls)
+		}
+		trigger <- struct{}{}
+		synctest.Wait()
+		if accepts != 1 || client.removeCalls != 2 {
+			t.Fatalf("during backoff accepts=%d removals=%d, want 1 and 2", accepts, client.removeCalls)
+		}
+		time.Sleep(time.Minute)
+		trigger <- struct{}{}
+		synctest.Wait()
+		if accepts != 2 || client.removeCalls != 3 {
+			t.Fatalf("after backoff accepts=%d removals=%d, want 2 and 3", accepts, client.removeCalls)
+		}
+	})
+}
+
+func TestSocialSubscriptionFailureKeepsPolling(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		b := &Broadcaster{log: testBroadcasterLogger()}
+		b.ctx, b.cancel = context.WithCancel(context.Background())
+		defer b.cancel()
+		sub := &fakeSocialSubscriber{
+			subscribeErr: errors.New("RTA unavailable"),
+			subscribed:   make(chan xblsocial.SubscriptionHandler, 1),
+			unsubscribed: make(chan xblsocial.SubscriptionHandler, 1),
+		}
+		var accepts atomic.Int32
+		syncer := FriendSyncer{
+			Client: &syncFriendClient{accept: func(context.Context) ([]Person, error) {
+				accepts.Add(1)
+				return nil, nil
+			}},
+			Config:  FriendSyncConfig{AutoFollow: true, UpdateInterval: 20 * time.Second},
+			Trigger: b.subscribeSocial(sub, b.log),
+		}
+		go syncer.Run(b.ctx)
+		synctest.Wait()
+		if accepts.Load() != 1 {
+			t.Fatalf("initial polling accepts=%d, want 1", accepts.Load())
+		}
+		time.Sleep(20 * time.Second)
+		synctest.Wait()
+		if accepts.Load() != 2 {
+			t.Fatalf("polling accepts=%d after failed subscription, want 2", accepts.Load())
+		}
+		b.cancel()
+		b.socialWg.Wait()
+		if len(sub.unsubscribed) != 0 {
+			t.Fatal("failed subscription was unsubscribed")
+		}
+	})
 }
