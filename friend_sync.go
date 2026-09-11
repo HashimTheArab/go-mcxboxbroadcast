@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"time"
 
@@ -58,10 +59,16 @@ type FriendSyncer struct {
 	// syncer's friend list. Enable it on exactly one syncer per shared
 	// HistoryStore, or entries maintained by other accounts get dropped.
 	PruneHistory bool
-	Log          *slog.Logger
+	// Trigger requests an early sync, subject to scan spacing and Retry-After.
+	// A nil Trigger leaves the syncer purely periodic.
+	Trigger <-chan struct{}
+	Log     *slog.Logger
 }
 
-const friendListFullBackoff = time.Hour
+const (
+	friendListFullBackoff = time.Hour
+	friendSyncMinInterval = 20 * time.Second
+)
 
 type friendSyncOptions struct {
 	expire       bool
@@ -100,6 +107,7 @@ func (s *friendSyncRunState) record(now time.Time, result friendSyncResult) {
 
 // friendSyncResult carries the rate-limit outcomes of a sync pass.
 type friendSyncResult struct {
+	readRetryAfter     time.Duration
 	followRetryAfter   time.Duration
 	unfollowRetryAfter time.Duration
 	friendListFull     bool
@@ -124,11 +132,15 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 	}
 	if s.Config.AutoFollow && opts.autoFollow {
 		s.acceptPending(ctx, &result)
+		if result.readRetryAfter > 0 {
+			return result, nil
+		}
 	}
 	operationCtx, cancel := xboxOperationContext(ctx)
 	people, err := s.Client.Friends(operationCtx)
 	cancel()
 	if err != nil {
+		result.readRetryAfter = retryDelay(err)
 		return result, err
 	}
 	stats := s.friendSyncStats(people, opts)
@@ -230,7 +242,13 @@ func (s FriendSyncer) acceptPending(ctx context.Context, result *friendSyncResul
 	}
 	if err != nil {
 		if delay := retryDelay(err); delay > 0 {
-			result.followRetryAfter = delay
+			var responseErr *xblsocial.ResponseError
+			if errors.As(err, &responseErr) && responseErr.Method == http.MethodGet {
+				// The pending list shares PeopleHub's read quota with Friends.
+				result.readRetryAfter = delay
+			} else {
+				result.followRetryAfter = delay
+			}
 		}
 		s.logPendingFriendAcceptError(err)
 	}
@@ -487,48 +505,73 @@ func (s FriendSyncer) debug(ctx context.Context, msg string, args ...any) {
 func retryDelay(err error) time.Duration {
 	var responseErr *xblsocial.ResponseError
 	if errors.As(err, &responseErr) {
-		return responseErr.RetryAfter
+		if responseErr.RetryAfter > 0 {
+			return responseErr.RetryAfter
+		}
+		if errors.Is(err, xblsocial.ErrRateLimited) {
+			return friendSyncMinInterval
+		}
 	}
 	return 0
 }
 
+// Run combines events, polling, and expiry into spaced sync passes.
 func (s FriendSyncer) Run(ctx context.Context) {
-	interval := s.Config.UpdateInterval
-	if interval < 20*time.Second {
-		interval = 20 * time.Second
-	}
+	interval := max(s.Config.UpdateInterval, friendSyncMinInterval)
+	expiryInterval := max(s.Config.ExpiryCheck, friendSyncMinInterval)
 	state := friendSyncRunState{}
-	s.runSync(ctx, &state, true)
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	var expiryTicker *time.Ticker
-	if s.Config.ExpiryEnabled {
-		expiryInterval := s.Config.ExpiryCheck
-		if expiryInterval < 20*time.Second {
-			expiryInterval = 20 * time.Second
-		}
-		expiryTicker = time.NewTicker(expiryInterval)
-		defer expiryTicker.Stop()
-	}
-	var expiryC <-chan time.Time
-	if expiryTicker != nil {
-		expiryC = expiryTicker.C
-	}
+	nextPoll, nextExpiry := time.Now(), time.Now()
+	var nextScan time.Time
+	pending, expire := true, true
+	timer := time.NewTimer(0)
+	defer timer.Stop()
 	for {
 		select {
-		case <-ticker.C:
-			s.runSync(ctx, &state, false)
-		case <-expiryC:
-			s.runSync(ctx, &state, true)
 		case <-ctx.Done():
 			return
+		case <-timer.C:
+		case _, ok := <-s.Trigger:
+			if !ok {
+				s.Trigger = nil
+			} else {
+				pending = true
+			}
 		}
+		if ctx.Err() != nil {
+			return
+		}
+		now := time.Now()
+		pending = pending || !now.Before(nextPoll)
+		if s.Config.ExpiryEnabled && !now.Before(nextExpiry) {
+			pending, expire = true, true
+		}
+		if pending && !now.Before(nextScan) {
+			retryAfter := s.runSync(ctx, &state, expire)
+			now = time.Now()
+			nextScan = now.Add(max(friendSyncMinInterval, retryAfter))
+			nextPoll = now.Add(interval)
+			pending = retryAfter > 0
+			if !pending {
+				if expire {
+					nextExpiry = now.Add(expiryInterval)
+				}
+				expire = false
+			}
+		}
+
+		nextWake := nextPoll
+		if s.Config.ExpiryEnabled && nextExpiry.Before(nextWake) {
+			nextWake = nextExpiry
+		}
+		if pending || nextWake.Before(nextScan) {
+			nextWake = nextScan
+		}
+		timer.Reset(time.Until(nextWake))
 	}
 }
 
-// runSync executes one sync pass. Rate-limit backoff only suppresses the
-// affected mutation type; scans and the other mutation type keep running.
-func (s FriendSyncer) runSync(ctx context.Context, state *friendSyncRunState, expire bool) {
+// runSync updates mutation backoff and returns any delay needed before reading again.
+func (s FriendSyncer) runSync(ctx context.Context, state *friendSyncRunState, expire bool) time.Duration {
 	if state == nil {
 		state = &friendSyncRunState{}
 	}
@@ -539,6 +582,7 @@ func (s FriendSyncer) runSync(ctx context.Context, state *friendSyncRunState, ex
 	if err != nil && s.Log != nil && !errors.Is(err, context.Canceled) {
 		s.Log.Error("sync friends", "err", err)
 	}
+	return result.readRetryAfter
 }
 
 func isGuestXUID(xuid string) bool {
