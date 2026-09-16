@@ -524,17 +524,36 @@ func TestMinecraftListenConfigKeepsFullLoginFlow(t *testing.T) {
 	}
 }
 
-func TestMinecraftListenConfigAcceptsRetail2168Dialects(t *testing.T) {
+func TestMinecraftListenConfigUsesCurrentProtocolOnly(t *testing.T) {
 	b := &Broadcaster{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	conf := b.minecraftListenConfig(room.Status{})
-	if len(conf.AcceptedProtocols) != 2 {
-		t.Fatalf("AcceptedProtocols length = %d, want 2 legacy dialects", len(conf.AcceptedProtocols))
+	if len(conf.AcceptedProtocols) != 0 || conf.AcceptNewerProtocols {
+		t.Fatal("default listener must only accept the current Minecraft protocol")
 	}
-	want := []string{"1.26.40", "1.26.44"}
-	for i, accepted := range conf.AcceptedProtocols {
-		if got := accepted.Ver(); got != want[i] {
-			t.Fatalf("AcceptedProtocols[%d] = %q, want %q", i, got, want[i])
-		}
+}
+
+func TestMinecraftListenConfigRejectsLegacyProtocols(t *testing.T) {
+	for _, version := range []struct {
+		name string
+		id   int32
+	}{
+		{"1.26.40", 2168}, {"1.26.44", 2168}, {"1.26.45", 2169},
+	} {
+		t.Run(version.name, func(t *testing.T) {
+			b := &Broadcaster{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+			listener, err := b.minecraftListenConfig(room.Status{}).Listen("raknet", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			conn, err := (minecraft.Dialer{Protocol: minecraft.BasicProtocol{Protocol: version.id, Version: version.name}}).DialTimeout("raknet", listener.Addr().String(), 5*time.Second)
+			if conn != nil {
+				_ = conn.Close()
+			}
+			if err == nil || !strings.Contains(err.Error(), "client outdated") {
+				t.Fatalf("legacy client error = %v, want client outdated", err)
+			}
+		})
 	}
 }
 

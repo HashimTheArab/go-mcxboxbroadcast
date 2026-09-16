@@ -134,7 +134,7 @@ func TestRelayPumpForwardsEachBatchWithOneFlush(t *testing.T) {
 func TestBroadcasterRelayDialsWithClientIdentityAndForwardsBothWays(t *testing.T) {
 	client := newFakeRelayConn([]packet.Packet{&packet.Text{Message: "from client"}})
 	client.identity = login.IdentityData{XUID: "visitor", DisplayName: "Visitor"}
-	client.client = login.ClientData{GameVersion: "1.26.45", ServerAddress: "nethernet", PlatformOnlineID: "forged", SelfSignedID: "device-uuid"}
+	client.client = login.ClientData{GameVersion: "1.26.50", ServerAddress: "nethernet", PlatformOnlineID: "forged", SelfSignedID: "device-uuid"}
 	server := newFakeRelayConn([]packet.Packet{&packet.Text{Message: "from server"}})
 
 	var (
@@ -175,7 +175,7 @@ func TestBroadcasterRelayDialsWithClientIdentityAndForwardsBothWays(t *testing.T
 	if gotDialer.IdentityData.XUID != "visitor" || !gotDialer.KeepXBLIdentityData {
 		t.Fatalf("dialer identity %#v keep=%v, want the client's XUID kept", gotDialer.IdentityData, gotDialer.KeepXBLIdentityData)
 	}
-	if gotDialer.ClientData.GameVersion != "1.26.45" || gotDialer.ClientData.ServerAddress != "backend.example.net:19133" {
+	if gotDialer.ClientData.GameVersion != "1.26.50" || gotDialer.ClientData.ServerAddress != "backend.example.net:19133" {
 		t.Fatalf("dialer client data %#v, want the client's data pointed at the backend", gotDialer.ClientData)
 	}
 	if gotDialer.ClientData.PlatformOnlineID != "visitor" || gotDialer.ClientData.SelfSignedID != "device-uuid" {

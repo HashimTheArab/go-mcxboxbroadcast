@@ -103,7 +103,7 @@ func TestStatusAdvertisedProtocolOverride(t *testing.T) {
 	}
 }
 
-func TestStatusDefaultsToMinecraft12645(t *testing.T) {
+func TestStatusDefaultsToMinecraft12650(t *testing.T) {
 	b, err := New(Config{
 		XBLTokenSource: staticTokenSource{},
 		XUID:           "123",
@@ -117,8 +117,8 @@ func TestStatusDefaultsToMinecraft12645(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Protocol != 2169 || status.Version != "1.26.45" {
-		t.Fatalf("advertised protocol/version = %d/%q, want 2169/%q", status.Protocol, status.Version, "1.26.45")
+	if status.Protocol != 2193 || status.Version != "1.26.50" {
+		t.Fatalf("advertised protocol/version = %d/%q, want 2193/%q", status.Protocol, status.Version, "1.26.50")
 	}
 }
 
