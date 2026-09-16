@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -26,6 +27,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sandertv/gophertunnel/minecraft"
 	"github.com/sandertv/gophertunnel/minecraft/p2p"
+	"github.com/sandertv/gophertunnel/minecraft/protocol"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/login"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
 	"github.com/sandertv/gophertunnel/minecraft/room"
@@ -751,54 +753,95 @@ func TestBroadcasterPreservesCustomNetherNetTransportContext(t *testing.T) {
 	}
 }
 
-func TestBroadcasterTransferSendsStartGameBeforeTransfer(t *testing.T) {
-	conn := &recordingTransferConn{}
+func TestBroadcasterTransferSendsStartupSequenceBeforeTransfer(t *testing.T) {
 	b := &Broadcaster{log: testBroadcasterLogger(), conf: Config{
 		Server: ServerInfo{Host: "play.example.net", Port: 19133},
 		Status: Status{WorldName: "Redirect Lobby"},
-	}, transferCloseTimeout: -1}
-
-	b.transfer(conn)
-
-	startGameIndex, transferIndex := -1, -1
-	for i, pk := range conn.packets {
-		switch pk.(type) {
-		case *packet.StartGame:
-			if startGameIndex == -1 {
-				startGameIndex = i
+	}, transferCloseTimeout: time.Second}
+	var packetsMu sync.Mutex
+	var startupPackets []uint32
+	var startGamePayload []byte
+	cfg := b.minecraftListenConfig(room.Status{})
+	cfg.AuthenticationDisabled = true
+	cfg.PacketFunc = func(header packet.Header, payload []byte, _, _ net.Addr) {
+		switch header.PacketID {
+		case packet.IDJigsawStructureData, packet.IDVoxelShapes, packet.IDStartGame, packet.IDItemRegistry, packet.IDTransfer:
+			packetsMu.Lock()
+			startupPackets = append(startupPackets, header.PacketID)
+			if header.PacketID == packet.IDStartGame {
+				startGamePayload = bytes.Clone(payload)
 			}
-		case *packet.Transfer:
-			transferIndex = i
+			packetsMu.Unlock()
 		}
 	}
-	if startGameIndex == -1 {
-		t.Fatal("StartGame was not sent")
+	listener, err := cfg.Listen("raknet", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if transferIndex == -1 {
-		t.Fatal("Transfer was not sent")
+	defer listener.Close()
+	served := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			served <- err
+			return
+		}
+		b.transfer(conn.(*minecraft.Conn))
+		served <- nil
+	}()
+
+	// Transfer can arrive during login or just after the client finishes spawning.
+	conn, err := (minecraft.Dialer{}).DialTimeout("raknet", listener.Addr().String(), 5*time.Second)
+	var transfer *packet.Transfer
+	if err != nil {
+		var transferErr *minecraft.TransferError
+		if !errors.As(err, &transferErr) {
+			t.Fatalf("client was not transferred: %v", err)
+		}
+		transfer = &packet.Transfer{Address: transferErr.Address, Port: transferErr.Port}
+	} else {
+		defer conn.Close()
+		if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		for transfer == nil {
+			pk, err := conn.ReadPacket()
+			if err != nil {
+				t.Fatalf("read transfer: %v", err)
+			}
+			transfer, _ = pk.(*packet.Transfer)
+		}
+		_ = conn.Close()
 	}
-	if startGameIndex > transferIndex {
-		t.Fatalf("StartGame sent after Transfer: startGame=%d transfer=%d", startGameIndex, transferIndex)
-	}
-	transfer := conn.packets[transferIndex].(*packet.Transfer)
 	if transfer.Address != "play.example.net" || transfer.Port != 19133 {
 		t.Fatalf("unexpected transfer target %#v", transfer)
 	}
-	startGame := conn.packets[startGameIndex].(*packet.StartGame)
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("transfer handler did not finish")
+	}
+
+	// Vanilla requires structure and shape data before StartGame, even for redirects.
+	packetsMu.Lock()
+	defer packetsMu.Unlock()
+	wantPackets := []uint32{packet.IDJigsawStructureData, packet.IDVoxelShapes, packet.IDStartGame, packet.IDItemRegistry, packet.IDTransfer}
+	if !slices.Equal(startupPackets, wantPackets) {
+		t.Fatalf("startup packet IDs = %v, want %v", startupPackets, wantPackets)
+	}
+	var startGame packet.StartGame
+	startGame.Marshal(protocol.NewReader(bytes.NewReader(startGamePayload), 0, true))
 	if startGame.WorldName != "Redirect Lobby" || startGame.Dimension != 2 || startGame.PlayerGameMode != 1 || startGame.WorldGameMode != 1 {
 		t.Fatalf("unexpected StartGame redirect shape %#v", startGame)
 	}
-	if startGame.BaseGameVersion != "*" || startGame.GameVersion != "*" || startGame.ServerAuthoritativeInventory {
+	if startGame.BaseGameVersion != "*" || startGame.GameVersion != protocol.CurrentVersion || startGame.ServerAuthoritativeInventory {
 		t.Fatalf("unexpected StartGame version/inventory fields %#v", startGame)
 	}
 	if startGame.PlayerMovementSettings.ServerAuthoritativeBlockBreaking {
 		t.Fatalf("unexpected StartGame movement settings %#v", startGame.PlayerMovementSettings)
-	}
-	if conn.flushes != 1 {
-		t.Fatalf("expected one flush, got %d", conn.flushes)
-	}
-	if !conn.closed {
-		t.Fatal("connection was not closed")
 	}
 }
 
@@ -853,6 +896,22 @@ func TestBroadcasterTransferClosesAfterDisconnectTimeout(t *testing.T) {
 	}
 }
 
+func TestBroadcasterTransferStopsWhenStartupFails(t *testing.T) {
+	conn := &recordingTransferConn{startGameErr: errors.New("startup failed")}
+	b := &Broadcaster{log: testBroadcasterLogger(), conf: Config{
+		Server: ServerInfo{Host: "play.example.net", Port: 19133},
+	}}
+
+	b.transfer(conn)
+
+	if len(conn.packets) != 0 || conn.flushes != 0 || conn.readStarted() {
+		t.Fatal("transfer continued after startup failed")
+	}
+	if !conn.closed {
+		t.Fatal("connection was not closed after startup failed")
+	}
+}
+
 func TestBroadcasterTransferDoesNotWaitWhenFlushFails(t *testing.T) {
 	conn := &recordingTransferConn{
 		flushErr: fmt.Errorf("flush failed"),
@@ -893,6 +952,7 @@ func testBroadcasterLogger() *slog.Logger {
 
 type recordingTransferConn struct {
 	packets          []packet.Packet
+	startGameErr     error
 	flushErr         error
 	flushes          int
 	closed           bool
@@ -902,6 +962,11 @@ type recordingTransferConn struct {
 	readStartedOnce  sync.Once
 	readStartedValue bool
 	deadlineTriggers bool
+}
+
+// SendStartGame returns the scripted startup result for transfer lifecycle tests.
+func (c *recordingTransferConn) SendStartGame(minecraft.GameData) error {
+	return c.startGameErr
 }
 
 func (c *recordingTransferConn) WritePacket(pk packet.Packet) error {

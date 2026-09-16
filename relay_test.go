@@ -51,6 +51,11 @@ func (c *fakeRelayConn) ReadBatch() ([]packet.Packet, error) {
 	}
 }
 
+// SendStartGame allows the fake client to be used by the transfer-mode routing test.
+func (c *fakeRelayConn) SendStartGame(minecraft.GameData) error {
+	return nil
+}
+
 func (c *fakeRelayConn) WritePacket(pk packet.Packet) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

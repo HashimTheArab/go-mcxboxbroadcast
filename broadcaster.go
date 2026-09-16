@@ -20,7 +20,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/sandertv/gophertunnel/minecraft"
 	"github.com/sandertv/gophertunnel/minecraft/p2p"
-	"github.com/sandertv/gophertunnel/minecraft/protocol"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/login"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
 	"github.com/sandertv/gophertunnel/minecraft/room"
@@ -99,6 +98,7 @@ type publishedSubAccount struct {
 }
 
 type transferConn interface {
+	SendStartGame(minecraft.GameData) error
 	WritePacket(packet.Packet) error
 	ReadPacket() (packet.Packet, error)
 	Flush() error
@@ -1415,11 +1415,11 @@ func (b *Broadcaster) acceptListener(l *minecraft.Listener) {
 	}
 }
 
-// transfer sends a StartGame and Transfer packet to redirect a client to the target server.
+// transfer sends the game startup sequence, then redirects the client to the target server.
 func (b *Broadcaster) transfer(conn transferConn) {
 	defer conn.Close()
 	id := conn.IdentityData()
-	if err := b.writeStartGameBeforeTransfer(conn); err != nil {
+	if err := conn.SendStartGame(b.redirectGameData()); err != nil {
 		b.log.Error("start game before transfer", "xuid", id.XUID, "name", id.DisplayName, "err", err)
 		return
 	}
@@ -1501,17 +1501,8 @@ func (b *Broadcaster) closeTransferredClientOnStop(conn transferConn) func() {
 	}
 }
 
-// writeStartGameBeforeTransfer writes the StartGame packet before transferring the client.
-func (b *Broadcaster) writeStartGameBeforeTransfer(conn transferConn) error {
-	pk := b.startGameBeforeTransfer()
-	if err := conn.WritePacket(pk); err != nil {
-		return fmt.Errorf("write StartGame: %w", err)
-	}
-	return nil
-}
-
-// startGameBeforeTransfer builds a minimal StartGame packet for the redirect flow.
-func (b *Broadcaster) startGameBeforeTransfer() *packet.StartGame {
+// redirectGameData describes the temporary world shown before transferring the client.
+func (b *Broadcaster) redirectGameData() minecraft.GameData {
 	worldName := b.conf.Status.WorldName
 	if worldName == "" {
 		worldName = b.conf.Status.HostName
@@ -1522,56 +1513,19 @@ func (b *Broadcaster) startGameBeforeTransfer() *packet.StartGame {
 	if worldName == "" {
 		worldName = "Redirect"
 	}
-	return &packet.StartGame{
-		EntityUniqueID:               1,
-		EntityRuntimeID:              1,
-		PlayerGameMode:               1,
-		PlayerPosition:               mgl32.Vec3{0, 66, 0},
-		Pitch:                        1,
-		Yaw:                          1,
-		WorldSeed:                    0,
-		SpawnBiomeType:               packet.SpawnBiomeTypeDefault,
-		UserDefinedBiomeName:         "",
-		Dimension:                    2,
-		Generator:                    1,
-		WorldGameMode:                1,
-		Difficulty:                   0,
-		WorldSpawn:                   protocol.BlockPos{0, 0, 0},
-		AchievementsDisabled:         true,
-		MultiPlayerGame:              true,
-		LANBroadcastEnabled:          true,
-		XBLBroadcastMode:             packet.XBLBroadcastModePublic,
-		PlatformBroadcastMode:        packet.XBLBroadcastModePublic,
-		CommandsEnabled:              true,
-		ChatRestrictionLevel:         packet.ChatRestrictionLevelNone,
-		TexturePackRequired:          false,
-		PlayerPermissions:            0,
-		ServerChunkTickRadius:        4,
-		HasLockedBehaviourPack:       false,
-		HasLockedTexturePack:         false,
-		FromLockedWorldTemplate:      false,
-		MSAGamerTagsOnly:             false,
-		FromWorldTemplate:            false,
-		WorldTemplateSettingsLocked:  false,
-		BaseGameVersion:              "*",
-		LevelID:                      "",
-		WorldName:                    worldName,
-		TemplateContentIdentity:      "",
-		Time:                         0,
-		EnchantmentSeed:              0,
-		MultiPlayerCorrelationID:     uuid.NewString(),
-		ServerAuthoritativeInventory: false,
-		GameVersion:                  "*",
-		PropertyData:                 map[string]any{},
-		WorldTemplateID:              uuid.Nil,
-		ServerID:                     "",
-		ScenarioID:                   "",
-		WorldID:                      "",
-		OwnerID:                      "",
-		PlayerMovementSettings: protocol.PlayerMovementSettings{
-			RewindHistorySize:                0,
-			ServerAuthoritativeBlockBreaking: false,
-		},
+	return minecraft.GameData{
+		EntityUniqueID:   1,
+		EntityRuntimeID:  1,
+		PlayerGameMode:   1,
+		PlayerPosition:   mgl32.Vec3{0, 66, 0},
+		Pitch:            1,
+		Yaw:              1,
+		Dimension:        2,
+		WorldGameMode:    1,
+		XBLBroadcastMode: packet.XBLBroadcastModePublic,
+		BaseGameVersion:  "*",
+		WorldName:        worldName,
+		PropertyData:     map[string]any{},
 	}
 }
 
