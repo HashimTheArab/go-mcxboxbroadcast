@@ -49,6 +49,12 @@ func (b *Broadcaster) sessionLoop() {
 			issue = b.sessionHealthIssue()
 		}
 		if issue.reason != "" && issue.subAccountID == "" {
+			if issue.activity != nil && !b.canRecreateSignaling() {
+				err := errors.New("cannot recover the primary Xbox activity with Config.Signaling; provide SignalingFactory to enable session recovery")
+				b.log.Error("activity recovery failed", "reason", issue.reason, "err", err)
+				b.notify(b.ctx, err.Error())
+				continue
+			}
 			if b.canRecreateSignaling() {
 				if !b.recoverSession(issue.reason) {
 					return

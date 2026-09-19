@@ -74,6 +74,10 @@ the current session trigger recovery, even when local metadata updates succeed.
 Lookup errors reset the missing-handle count. Each account has a ten-minute
 cooldown between recoveries caused by a missing activity handle. A missing
 sub-account handle only recreates that sub-account's session.
+Library callers that inject `Config.Signaling` must provide a `SignalingFactory`
+instead to enable primary-session recovery. When injected signaling prevents
+activity recovery, the broadcaster logs an error and notifies the configured
+webhook, retaining the cooldown without closing the supplied connection.
 
 These checks use the publishing account's credentials. They detect a missing
 directory advertisement, but do not verify friendship permissions or prove that

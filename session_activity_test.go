@@ -185,6 +185,36 @@ func TestSessionLoopRecoversMissingPublishedActivity(t *testing.T) {
 	})
 }
 
+func TestSessionLoopReportsMissingActivityWithStaticSignaling(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		b := activityTestBroadcaster(t, func(*http.Request) (*http.Response, error) {
+			return broadcasterResponse(http.StatusOK, `{"results":[]}`), nil
+		})
+		b.ctx, b.cancel = context.WithCancel(context.Background())
+		defer b.cancel()
+		sig := &fakeSignaling{}
+		b.conf.Signaling, b.signaling = sig, sig
+		var notices []time.Duration
+		start := time.Now()
+		b.conf.Notifier = fakeNotifier{notify: func(_ context.Context, message string) {
+			if !strings.Contains(message, "cannot recover") || !strings.Contains(message, "SignalingFactory") {
+				t.Fatalf("missing explicit recovery failure: %s", message)
+			}
+			notices = append(notices, time.Since(start))
+			if len(notices) == 2 {
+				b.cancel()
+			}
+		}}
+		b.sessionLoop()
+		if len(notices) != 2 || notices[0] != 4*time.Minute || notices[1] != 16*time.Minute {
+			t.Fatalf("recovery failure times = %v, want 4m and 16m with cooldown", notices)
+		}
+		if b.signaling != sig || sig.closed {
+			t.Fatal("activity recovery replaced or closed the injected signaling")
+		}
+	})
+}
+
 func TestActivityProbeTimeoutBreaksMissStreak(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		b := activityTestBroadcaster(t, func(req *http.Request) (*http.Response, error) {
