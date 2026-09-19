@@ -68,6 +68,17 @@ The config exposes the same operator-facing areas as MCXboxBroadcast:
 
 ### Session recovery
 
+The broadcaster also checks each account's Xbox activity handle once a minute.
+After a two-minute grace period, three consecutive successful lookups without
+the current session trigger recovery, even when local metadata updates succeed.
+Lookup errors reset the missing-handle count. Each account has a ten-minute
+cooldown between recoveries caused by a missing activity handle. A missing
+sub-account handle only recreates that sub-account's session.
+
+These checks use the publishing account's credentials. They detect a missing
+directory advertisement, but do not verify friendship permissions or prove that
+another player can join. Keep an independent friend-account monitor for that.
+
 Signaling loss and repeated primary-session update failures share one recovery
 loop. Normal updates pause while it rebuilds the session. Recovery makes up to
 six attempts, waiting 5, 10, 20, 40, and 80 seconds between failures. It reports

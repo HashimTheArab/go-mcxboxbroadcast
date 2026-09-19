@@ -1567,6 +1567,7 @@ func countsAsPrimaryUpdateFailure(err error) bool {
 type sessionHealthIssue struct {
 	reason       string
 	subAccountID string
+	activity     *publishedActivity
 }
 
 // recoverSessionHealthIssue replaces the unhealthy sub-account session without
@@ -1577,6 +1578,23 @@ func (b *Broadcaster) recoverSessionHealthIssue(ctx context.Context, issue sessi
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if issue.activity != nil {
+		current := false
+		for _, sub := range b.subAnnouncers {
+			if sub.id != issue.subAccountID {
+				continue
+			}
+			xbl, ok := xblAnnouncer(sub.announcer)
+			if ok && xbl == issue.activity.announcer {
+				xbl.Lock()
+				current = xbl.Session == issue.activity.session && xbl.SessionReference == issue.activity.ref
+				xbl.Unlock()
+			}
+		}
+		if !current {
+			return nil
+		}
+	}
 	status, err := b.status(ctx)
 	if err != nil {
 		return fmt.Errorf("resolve session status: %w", err)

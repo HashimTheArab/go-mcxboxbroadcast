@@ -18,6 +18,10 @@ const (
 func (b *Broadcaster) sessionLoop() {
 	ticker := time.NewTicker(b.conf.UpdateInterval)
 	defer ticker.Stop()
+	activityTicker := time.NewTicker(activityCheckInterval)
+	defer activityTicker.Stop()
+	activities := make(map[string]activityObservation)
+	b.activityHealthIssue(activities, time.Now())
 	consecutiveFailures := 0
 	for {
 		b.mu.Lock()
@@ -26,6 +30,7 @@ func (b *Broadcaster) sessionLoop() {
 			signalingDone = b.signaling.Context().Done()
 		}
 		b.mu.Unlock()
+		var issue sessionHealthIssue
 		select {
 		case <-b.ctx.Done():
 			return
@@ -34,42 +39,48 @@ func (b *Broadcaster) sessionLoop() {
 				return
 			}
 			consecutiveFailures = 0
+			continue
+		case <-activityTicker.C:
+			issue = b.activityHealthIssue(activities, time.Now())
+			if issue.reason == "" {
+				continue
+			}
 		case <-ticker.C:
-			issue := b.sessionHealthIssue()
-			if issue.reason != "" && issue.subAccountID == "" {
-				if b.canRecreateSignaling() {
-					if !b.recoverSession(issue.reason) {
-						return
-					}
-					consecutiveFailures = 0
-					continue
-				}
-				b.warn("session is unhealthy but signaling is statically configured; cannot re-create", "reason", issue.reason)
-			}
-			err := b.refreshSession(issue)
-			if err == nil {
-				consecutiveFailures = 0
-				continue
-			}
-			if b.ctx.Err() != nil {
-				return
-			}
-			if !countsAsPrimaryUpdateFailure(err) {
-				consecutiveFailures = 0
-				b.log.Error("update sub-account sessions", "err", err)
-				continue
-			}
-			consecutiveFailures++
-			b.log.Error("update session", "err", err)
-			if consecutiveFailures == 1 {
-				b.notifySessionUpdateFailure(b.ctx, err)
-			}
-			if consecutiveFailures >= sessionUpdateFailureLimit {
-				if !b.recoverSession("repeated session update failures") {
+			issue = b.sessionHealthIssue()
+		}
+		if issue.reason != "" && issue.subAccountID == "" {
+			if b.canRecreateSignaling() {
+				if !b.recoverSession(issue.reason) {
 					return
 				}
 				consecutiveFailures = 0
+				continue
 			}
+			b.warn("session is unhealthy but signaling is statically configured; cannot re-create", "reason", issue.reason)
+		}
+		err := b.refreshSession(issue)
+		if err == nil {
+			consecutiveFailures = 0
+			continue
+		}
+		if b.ctx.Err() != nil {
+			return
+		}
+		if !countsAsPrimaryUpdateFailure(err) {
+			consecutiveFailures = 0
+			b.log.Error("update sub-account sessions", "err", err)
+			continue
+		}
+		consecutiveFailures++
+		b.log.Error("update session", "err", err)
+		if consecutiveFailures == 1 {
+			b.notifySessionUpdateFailure(b.ctx, err)
+		}
+		if consecutiveFailures >= sessionUpdateFailureLimit {
+			if !b.recoverSession("repeated session update failures") {
+				return
+			}
+			consecutiveFailures = 0
 		}
 	}
 }
