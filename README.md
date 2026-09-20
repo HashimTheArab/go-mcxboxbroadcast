@@ -12,6 +12,18 @@ This project is a Go port inspired by the original
 project and contributors for the Geyser Bedrock listener behavior and
 configuration model that this implementation follows.
 
+The library is modelled after
+[MCXboxBroadcast](https://github.com/rtm516/MCXboxBroadcast) while using
+Go-first building blocks:
+
+- `github.com/df-mc/go-xsapi/v2` for Xbox Live MPSD/RTA session publishing.
+- `github.com/df-mc/go-nethernet` for NetherNet/WebRTC listener support.
+- `github.com/sandertv/gophertunnel`, using the
+  `HashimTheArab/gophertunnel` fork, for NetherNet, signaling, room
+  announcements, and `minecraft/p2p`-compatible session metadata.
+- `github.com/sandertv/go-raknet`, using the `HashimTheArab/go-raknet` fork,
+  for RakNet ping compatibility.
+
 ## CLI
 
 ```sh
