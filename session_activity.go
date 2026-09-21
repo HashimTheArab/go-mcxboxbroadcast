@@ -74,6 +74,14 @@ func (b *Broadcaster) primaryActivityCurrentLocked(activity *publishedActivity) 
 	return xbl.Session == activity.session && xbl.SessionReference == activity.ref
 }
 
+// primaryActivityCurrent reports whether activity still identifies the primary
+// publication without holding the broadcaster lock during later network work.
+func (b *Broadcaster) primaryActivityCurrent(activity *publishedActivity) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.primaryActivityCurrentLocked(activity)
+}
+
 // activityHealthIssue checks each account's own directory handle. This detects lost
 // publication, but cannot prove that another account can see or join the session.
 // The session loop owns observations and serializes any resulting recovery.

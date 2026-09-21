@@ -114,12 +114,9 @@ func (b *Broadcaster) canRecreateSignaling() bool {
 }
 
 // reportStaticActivityRecoveryFailure reports an unrecoverable primary activity
-// only if the probed publication is still current. The lock prevents an Update
-// from replacing the session between validation and the report.
+// only if the probed publication is still current.
 func (b *Broadcaster) reportStaticActivityRecoveryFailure(issue sessionHealthIssue) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if !b.primaryActivityCurrentLocked(issue.activity) {
+	if !b.primaryActivityCurrent(issue.activity) {
 		return
 	}
 	err := errors.New("cannot recover the primary Xbox activity with Config.Signaling; provide SignalingFactory to enable session recovery")
