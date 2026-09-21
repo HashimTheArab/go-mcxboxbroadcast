@@ -247,6 +247,37 @@ func TestActivityRecoveryIgnoresReplacedSubAccount(t *testing.T) {
 	}
 }
 
+func TestActivityRecoveryIgnoresReplacedPrimaryAccount(t *testing.T) {
+	b := activityTestBroadcaster(t, nil)
+	publication := b.publishedActivities()[0]
+	rebuilds := 0
+	b.conf.SignalingFactory = func(context.Context, Config) (nethernet.Signaling, error) {
+		rebuilds++
+		return nil, errors.New("unexpected recovery")
+	}
+	b.announcer = &room.XBLAnnouncer{Client: publication.client, SessionReference: publication.ref}
+	issue := sessionHealthIssue{reason: "published activity handle missing", activity: &publication}
+	if !b.recoverSession(issue) {
+		t.Fatal("stale activity issue stopped the session loop")
+	}
+	if rebuilds != 0 || b.recovering {
+		t.Fatalf("stale activity issue started recovery: rebuilds=%d recovering=%v", rebuilds, b.recovering)
+	}
+}
+
+func TestStaticActivityFailureIgnoresReplacedPrimaryAccount(t *testing.T) {
+	b := activityTestBroadcaster(t, nil)
+	publication := b.publishedActivities()[0]
+	b.conf.Signaling = &fakeSignaling{}
+	notices := 0
+	b.conf.Notifier = fakeNotifier{notify: func(context.Context, string) { notices++ }}
+	b.announcer = &room.XBLAnnouncer{Client: publication.client, SessionReference: publication.ref}
+	b.reportStaticActivityRecoveryFailure(sessionHealthIssue{reason: "published activity handle missing", activity: &publication})
+	if notices != 0 {
+		t.Fatalf("stale activity issue sent %d recovery failure notifications", notices)
+	}
+}
+
 func TestActivityRecoveryReplacesOnlyMissingSubAccount(t *testing.T) {
 	b := activityTestBroadcaster(t, func(*http.Request) (*http.Response, error) {
 		return broadcasterResponse(http.StatusOK, `{"results":[]}`), nil
