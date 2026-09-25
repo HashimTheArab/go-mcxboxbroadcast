@@ -11,8 +11,9 @@ const (
 	reconnectBackoffBase    = 5 * time.Second
 	reconnectBackoffMax     = 2 * time.Minute
 	sessionRecoveryAttempts = 6
-	// subAccountRetryTimeout bounds one pass over unpublished sub-accounts.
-	subAccountRetryTimeout = 30 * time.Second
+	// subAccountRetryTimeout bounds one pass over unpublished sub-accounts, which holds b.mu like
+	// targeted sub-account recovery does.
+	subAccountRetryTimeout = 15 * time.Second
 )
 
 // sessionLoop owns metadata updates and full recovery so the two cannot race

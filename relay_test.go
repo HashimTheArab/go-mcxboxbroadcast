@@ -660,3 +660,52 @@ func TestRelayAcceptsMemberDespiteStalledRefresh(t *testing.T) {
 		t.Fatalf("accepting the member took %v; a stalled refresh of another session held it up", elapsed)
 	}
 }
+
+// Repeated anonymous joins share session re-reads, spaced by the refresh interval.
+func TestRelaySpacesSessionRefreshes(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		syncs []time.Time
+	)
+	session := &recordingMemberSession{fakeMemberSession: fakeMemberSession{members: map[string]bool{"host": true}}, onSync: func() {
+		mu.Lock()
+		syncs = append(syncs, time.Now())
+		mu.Unlock()
+	}}
+	b := relayTestBroadcaster(&RelayConfig{}, func(context.Context, minecraft.Dialer, string, string) (relayServerConn, error) {
+		t.Error("non-member was relayed")
+		return nil, errors.New("unreachable")
+	})
+	b.sessionsOverride = func() []ownedSession { return []ownedSession{{owner: "host", session: session}} }
+	var wg sync.WaitGroup
+	for i := range 2 {
+		client := newFakeRelayConn()
+		client.anonymous = true
+		client.identity = login.IdentityData{XUID: fmt.Sprint("visitor-", i)}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			b.relay(client)
+		}()
+	}
+	wg.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	if len(syncs) != 2 {
+		t.Fatalf("sessions refreshed %d times, want once per join", len(syncs))
+	}
+	if gap := syncs[1].Sub(syncs[0]); gap < relayRefreshInterval-50*time.Millisecond {
+		t.Fatalf("refreshes %v apart, want at least %v", gap, relayRefreshInterval)
+	}
+}
+
+// recordingMemberSession reports each Sync.
+type recordingMemberSession struct {
+	fakeMemberSession
+	onSync func()
+}
+
+func (s *recordingMemberSession) Sync(ctx context.Context) error {
+	s.onSync()
+	return s.fakeMemberSession.Sync(ctx)
+}

@@ -237,8 +237,12 @@ func (b *Broadcaster) relay(conn relayClientConn) {
 	}
 }
 
-// relayVerifyTimeout bounds re-reading the published sessions for an anonymous relay client.
-const relayVerifyTimeout = 10 * time.Second
+const (
+	// relayVerifyTimeout bounds re-reading the published sessions for an anonymous relay client.
+	relayVerifyTimeout = 10 * time.Second
+	// relayRefreshInterval spaces those re-reads, so repeated joins cannot drive Xbox Live requests.
+	relayRefreshInterval = 2 * time.Second
+)
 
 // memberSession is the part of a published MPSD session that relay identity checks read.
 type memberSession interface {
@@ -267,9 +271,22 @@ func (b *Broadcaster) verifyRelayIdentity(ctx context.Context, conn relayClientC
 		return nil
 	}
 	// The join can reach the listener before the session change reaches us over RTA. Sessions are re-read in
-	// parallel, so a slow one cannot starve the one that lists the player.
+	// parallel, so a slow one cannot starve the one that lists the player, and at most once per interval.
 	ctx, cancel := context.WithTimeout(ctx, relayVerifyTimeout)
 	defer cancel()
+	b.relayRefreshMu.Lock()
+	defer b.relayRefreshMu.Unlock()
+	if sessionsHaveMember(sessions, xuid) {
+		return nil // a refresh for another client listed this one
+	}
+	if wait := time.Until(b.relayRefreshed.Add(relayRefreshInterval)); wait > 0 {
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return fmt.Errorf("not a member of any published session; refresh not started: %w", ctx.Err())
+		}
+	}
+	defer func() { b.relayRefreshed = time.Now() }()
 	type refresh struct {
 		member bool
 		err    error
