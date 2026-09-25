@@ -523,8 +523,9 @@ func TestFriendClientRemoveFriendEndsFriendship(t *testing.T) {
 		resp.Request = req
 		return resp, nil
 	})})}
-	if err := client.RemoveFriend(context.Background(), "123"); err != nil {
-		t.Fatalf("RemoveFriend() error = %v, want nil for an already removed friend", err)
+	// A 404 means no friendship was ended, so it must not pass as a freed slot.
+	if err := client.RemoveFriend(context.Background(), "123"); !isNotFound(err) {
+		t.Fatalf("RemoveFriend() error = %v, want the 404", err)
 	}
 	if want := "DELETE https://social.xboxlive.com/users/me/people/friends/v2/xuid(123)?deleteRelationships=friends"; strings.Join(requests, ",") != want {
 		t.Fatalf("requests = %v, want %s", requests, want)

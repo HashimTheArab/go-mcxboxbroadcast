@@ -780,6 +780,10 @@ func (f *fakeXbox) serve(req *http.Request) *http.Response {
 		delete(f.followers, xuid)
 		return response(http.StatusNoContent, "")
 	case req.Method == http.MethodDelete && strings.Contains(path, "/friends/v2/"):
+		// Ends a friendship or a pending request, never a one-way follow.
+		if mutual := f.following[xuid] && f.followers[xuid]; !f.pending[xuid] && !mutual {
+			return response(http.StatusNotFound, "")
+		}
 		delete(f.following, xuid)
 		delete(f.pending, xuid)
 		return response(http.StatusOK, "")
@@ -1049,5 +1053,25 @@ func TestFriendSyncAcceptedRequestClearsRemoval(t *testing.T) {
 	}
 	if removing, _ := history.Removing(context.Background(), "100"); len(removing) != 0 {
 		t.Fatalf("removal marks = %v, want cleared by the new friendship", removing)
+	}
+}
+
+// A one-way follow over maxFriends is unfollowed; ending a friendship would leave it holding the slot.
+func TestFriendSyncCleanupUnfollowsOneWayFollows(t *testing.T) {
+	x := newFakeXbox()
+	x.befriend("1", "2")
+	x.following["3"] = true
+	history := newMemoryHistory()
+	history.set("100", "3", time.Now().Add(-2*time.Hour))
+	history.set("100", "1", time.Now().Add(-time.Hour))
+	history.set("100", "2", time.Now())
+	s := &FriendSyncer{Client: x.client(), History: history, Account: "100",
+		Config: FriendSyncConfig{AutoFollow: true, Cleanup: FriendCleanupConfig{MaxFriends: 2}}}
+	s.runSync(context.Background(), false)
+	if got := strings.Join(slices.Sorted(maps.Keys(x.following)), ","); got != "1,2" {
+		t.Fatalf("following = %s, want 1,2 with the one-way follow of 3 removed", got)
+	}
+	if _, ok := history.get("100", "3"); ok {
+		t.Fatal("history for the unfollowed person should be forgotten")
 	}
 }

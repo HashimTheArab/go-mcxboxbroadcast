@@ -162,9 +162,10 @@ func (c FriendClient) Unfollow(ctx context.Context, xuid string) error {
 }
 
 // RemoveFriend ends the friendship with xuid, or declines their pending
-// request, so a new request is needed to be friends again.
+// request, so a new request is needed to be friends again. It does not remove
+// a one-way follow; a 404 means there was no friendship or request to end.
 func (c FriendClient) RemoveFriend(ctx context.Context, xuid string) error {
-	return ignoreNotFound(c.social().RemoveFriend(ctx, xuid))
+	return c.social().RemoveFriend(ctx, xuid)
 }
 
 // RemoveFollower drops xuid's follow of the authenticated account.
@@ -174,11 +175,16 @@ func (c FriendClient) RemoveFollower(ctx context.Context, xuid string) error {
 
 // ignoreNotFound treats a missing relationship as already removed.
 func ignoreNotFound(err error) error {
-	var responseErr *xblsocial.ResponseError
-	if errors.As(err, &responseErr) && responseErr.StatusCode == http.StatusNotFound {
+	if isNotFound(err) {
 		return nil
 	}
 	return err
+}
+
+// isNotFound reports whether err is a social 404.
+func isNotFound(err error) bool {
+	var responseErr *xblsocial.ResponseError
+	return errors.As(err, &responseErr) && responseErr.StatusCode == http.StatusNotFound
 }
 
 func (c FriendClient) social() *xblsocial.Client {

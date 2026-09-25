@@ -428,25 +428,42 @@ func (s *FriendSyncer) unfollow(ctx context.Context, p Person, result *friendSyn
 	return true
 }
 
-// removeFriend ends the friendship with p and reports whether it ended. When
-// p's follow of the account could not be dropped too, p is marked in History
-// so a later pass finishes the removal instead of following p back.
+// removeFriend ends the account's relationship with p and reports whether it
+// ended. When p's follow of the account could not be dropped too, p is marked
+// in History so a later pass finishes the removal instead of following p back.
 func (s *FriendSyncer) removeFriend(ctx context.Context, p Person, reason string, lastSeen time.Time, result *friendSyncResult) bool {
-	operationCtx, cancel := xboxOperationContext(ctx)
-	err := s.Client.RemoveFriend(operationCtx, p.XUID)
-	cancel()
-	if err != nil {
+	if err := s.endRelationship(ctx, p); err != nil {
 		s.debug(ctx, "failed to remove friend", "xuid", p.XUID, "gamertag", p.Gamertag, "reason", reason, "err", err)
 		result.unfollowRetryAfter = max(result.unfollowRetryAfter, retryDelay(err))
 		return false
 	}
 	s.info(ctx, "removed friend", "xuid", p.XUID, "gamertag", p.Gamertag, "reason", reason, "last_seen", lastSeen)
+	if !p.IsFollowingCaller {
+		s.forget(ctx, p.XUID)
+		return true
+	}
 	if result.unfollowBlocked() || !s.finishRemoval(ctx, p, result) {
 		if err := s.History.MarkRemoving(ctx, s.Account, time.Now(), p.XUID); err != nil && s.Log != nil {
 			s.Log.Error("record pending friend removal", "xuid", p.XUID, "err", err)
 		}
 	}
 	return true
+}
+
+// endRelationship frees p's slot on the account's list: a one-way follow is
+// unfollowed, and a friendship is ended, falling back to unfollowing when
+// Xbox has no friendship record for the mutual follow.
+func (s *FriendSyncer) endRelationship(ctx context.Context, p Person) error {
+	operationCtx, cancel := xboxOperationContext(ctx)
+	defer cancel()
+	if !p.IsFollowingCaller {
+		return s.Client.Unfollow(operationCtx, p.XUID)
+	}
+	err := s.Client.RemoveFriend(operationCtx, p.XUID)
+	if isNotFound(err) {
+		return s.Client.Unfollow(operationCtx, p.XUID)
+	}
+	return err
 }
 
 // finishRemoval drops a removed friend's follow of the account and reports

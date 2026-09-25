@@ -234,7 +234,7 @@ func TestFriendSyncerRemovesInactiveFriends(t *testing.T) {
 	history.set("me", "1", time.Now().Add(-48*time.Hour))
 	syncer := FriendSyncer{
 		Client: fakeFriendClient{
-			people:       []Person{{XUID: "1", Gamertag: "Old", IsFollowedByCaller: true}},
+			people:       []Person{{XUID: "1", Gamertag: "Old", IsFollowingCaller: true, IsFollowedByCaller: true}},
 			removeFriend: func(xuid string) { removed = xuid == "1" },
 		},
 		History: history,
