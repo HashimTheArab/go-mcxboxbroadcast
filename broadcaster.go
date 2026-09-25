@@ -1012,6 +1012,8 @@ func (b *Broadcaster) scheduleSubAccountRetry(id string) time.Duration {
 
 // retryUnpublishedSubAccounts publishes enabled sub-accounts that have no
 // session once their own backoff has passed, independently of the primary.
+// Each attempt gets its own time budget, so one stalled account is backed off
+// without starving the others.
 func (b *Broadcaster) retryUnpublishedSubAccounts(ctx context.Context) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -1034,15 +1036,20 @@ func (b *Broadcaster) retryUnpublishedSubAccounts(ctx context.Context) {
 	if len(due) == 0 {
 		return
 	}
-	status, err := b.status(ctx)
+	statusCtx, cancel := context.WithTimeout(ctx, subAccountRetryTimeout)
+	status, err := b.status(statusCtx)
+	cancel()
 	if err != nil {
 		b.warn("resolve status for sub-account retry", "err", err)
 		return
 	}
 	for _, account := range due {
-		if err := b.startSubAccountBounded(ctx, account, status); err != nil {
+		attemptCtx, cancel := context.WithTimeout(ctx, subAccountRetryTimeout)
+		err := b.startSubAccountBounded(attemptCtx, account, status)
+		cancel()
+		if err != nil {
 			if ctx.Err() != nil {
-				return
+				return // the broadcaster is stopping; this was no failure of the account
 			}
 			delay := b.scheduleSubAccountRetry(account.ID)
 			b.warn("retry sub-account session", "sub_account", account.ID, "err", err, "retry_in", delay)

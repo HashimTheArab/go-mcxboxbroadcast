@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/df-mc/go-xsapi/v2"
@@ -468,4 +469,39 @@ func TestRefreshSessionUpdatesPrimaryBeforeRetryingSubAccounts(t *testing.T) {
 	if !updatedFirst {
 		t.Fatal("sub-account retry ran before the primary's metadata update")
 	}
+}
+
+// A sub-account whose retry stalls is backed off without starving the next unpublished one.
+func TestStalledSubAccountRetryDoesNotStarveOthers(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		b := &Broadcaster{
+			log:       testBroadcasterLogger(),
+			ctx:       context.Background(),
+			started:   true,
+			announcer: &fakeAnnouncer{},
+			conf: Config{
+				XUID: "100",
+				SubAccounts: []SubAccountConfig{
+					{ID: "stalled", Enabled: true, XUID: "200", XBLClient: &xsapi.Client{}},
+					{ID: "healthy", Enabled: true, XUID: "300", XBLClient: &xsapi.Client{}},
+				},
+			},
+			subAccountAnnouncerFactory: func(ctx context.Context, account SubAccountConfig, _ mpsd.SessionReference) (room.Announcer, error) {
+				if account.ID == "stalled" {
+					<-ctx.Done()
+					return nil, ctx.Err()
+				}
+				return &fakeAnnouncer{}, nil
+			},
+		}
+		if err := b.refreshSession(sessionHealthIssue{}); err != nil {
+			t.Fatal(err)
+		}
+		if len(b.subAnnouncers) != 1 || b.subAnnouncers[0].id != "healthy" {
+			t.Fatalf("published sub-accounts = %#v, want the healthy one despite the stalled one", b.subAnnouncers)
+		}
+		if retry := b.subAccountRetries["stalled"]; retry == nil || !retry.next.After(time.Now()) {
+			t.Fatal("stalled sub-account was not backed off")
+		}
+	})
 }

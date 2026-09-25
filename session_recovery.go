@@ -11,7 +11,7 @@ const (
 	reconnectBackoffBase    = 5 * time.Second
 	reconnectBackoffMax     = 2 * time.Minute
 	sessionRecoveryAttempts = 6
-	// subAccountRetryTimeout bounds one pass over unpublished sub-accounts, which holds b.mu like
+	// subAccountRetryTimeout bounds each unpublished sub-account's retry, which holds b.mu like
 	// targeted sub-account recovery does.
 	subAccountRetryTimeout = 15 * time.Second
 )
@@ -95,9 +95,7 @@ func (b *Broadcaster) refreshSession(issue sessionHealthIssue) error {
 	err := b.Update(ctx)
 	cancel()
 	// Retries run after the primary's update so a stalled sub-account cannot delay it.
-	retryCtx, cancel := context.WithTimeout(b.ctx, subAccountRetryTimeout)
-	b.retryUnpublishedSubAccounts(retryCtx)
-	cancel()
+	b.retryUnpublishedSubAccounts(b.ctx)
 	return err
 }
 
