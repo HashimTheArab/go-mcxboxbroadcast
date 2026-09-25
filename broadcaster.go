@@ -35,9 +35,10 @@ const (
 	defaultNetherNetConnTimeout = 30 * time.Second
 	defaultTransferCloseTimeout = 15 * time.Second
 	defaultSignalingDialTimeout = 15 * time.Second
-	// defaultLoginTimeout bounds a joiner from transport setup to finished login.
-	defaultLoginTimeout = 30 * time.Second
-	// defaultMaximumPendingLogins caps joiners that have not logged in yet; one session admits 30 members.
+	// defaultLoginTimeout bounds a joiner from transport setup until its login is authenticated.
+	defaultLoginTimeout = 10 * time.Second
+	// defaultMaximumPendingLogins caps joiners that have not authenticated yet, evicting the oldest beyond
+	// it; one session admits 30 members.
 	defaultMaximumPendingLogins = 32
 )
 
