@@ -9,7 +9,7 @@ on:
 permissions:
   contents: read
 
-# Runs on main queue in order, so an older build can never overwrite a newer tag.
+# One run per ref at a time; publish also skips mutable tags once main has moved on.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -58,6 +58,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # A re-run or queued run of an older commit publishes only its SHA tags.
+      - name: Choose tags
+        id: tags
+        run: |
+          head=$(git ls-remote origin refs/heads/main | cut -f1)
+          {
+            echo 'standalone<<EOF'
+            echo "$DOCKER_IMAGE:$GITHUB_SHA"
+            if [ "$head" = "$GITHUB_SHA" ]; then echo "$DOCKER_IMAGE:latest"; fi
+            echo 'EOF'
+            echo 'pterodactyl<<EOF'
+            echo "$DOCKER_IMAGE:$GITHUB_SHA-pterodactyl"
+            if [ "$head" = "$GITHUB_SHA" ]; then echo "$DOCKER_IMAGE:pterodactyl"; fi
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         uses: docker/build-push-action@v7
         with:
@@ -65,9 +81,7 @@ jobs:
           file: Dockerfile
           target: standalone
           push: true
-          tags: |
-            ${{ env.DOCKER_IMAGE }}:${{ github.sha }}
-            ${{ env.DOCKER_IMAGE }}:latest
+          tags: ${{ steps.tags.outputs.standalone }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -78,8 +92,6 @@ jobs:
           file: Dockerfile
           target: pterodactyl
           push: true
-          tags: |
-            ${{ env.DOCKER_IMAGE }}:${{ github.sha }}-pterodactyl
-            ${{ env.DOCKER_IMAGE }}:pterodactyl
+          tags: ${{ steps.tags.outputs.pterodactyl }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

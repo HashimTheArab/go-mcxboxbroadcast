@@ -131,7 +131,7 @@ func TestPterodactylArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(workflow), "${{ env.DOCKER_IMAGE }}:pterodactyl") {
+	if !strings.Contains(string(workflow), "$DOCKER_IMAGE:pterodactyl") {
 		t.Fatal("docker workflow does not publish the pterodactyl tag")
 	}
 }

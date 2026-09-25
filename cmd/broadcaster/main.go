@@ -153,8 +153,12 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 	if err != nil {
 		return fmt.Errorf("configure: %w", err)
 	}
-	// A sub-account that cannot sign in is skipped so the primary still starts.
-	skipSubAccount := func(id string, err error) {
+	// A sub-account that cannot sign in is skipped so the primary still starts;
+	// shutdown during its sign-in stops startup instead.
+	skipSubAccount := func(id string, err error) error {
+		if ctx.Err() != nil {
+			return fmt.Errorf("sub-account %q: %w", id, err)
+		}
 		log.Warn("skipping sub-account", "sub_account", id, "err", err)
 		if notifier != nil {
 			notifyCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -163,6 +167,7 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 			}
 			cancel()
 		}
+		return nil
 	}
 	for _, account := range cfg.Accounts.SubAccounts {
 		if !account.Enabled {
@@ -174,13 +179,17 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 		}
 		subLive, err := deps.LoadAccountToken(authCtx, subCachePath, authOut, savePersistedToken(log, deps.SaveLiveToken, subCachePath), deps.SubAccountLoginTimeout)
 		if err != nil {
-			skipSubAccount(account.ID, fmt.Errorf("authenticate: %w", err))
+			if err := skipSubAccount(account.ID, fmt.Errorf("authenticate: %w", err)); err != nil {
+				return err
+			}
 			continue
 		}
 		subXBLSource := deps.NewXBLTokenSource(authCtx, subLive)
 		subXBLClient, err := deps.NewXSAPIClient(authCtx, subXBLSource, httpClient, log.With("sub_account", account.ID))
 		if err != nil {
-			skipSubAccount(account.ID, fmt.Errorf("authenticate xbox live: %w", err))
+			if err := skipSubAccount(account.ID, fmt.Errorf("authenticate xbox live: %w", err)); err != nil {
+				return err
+			}
 			continue
 		}
 		xblClients = append(xblClients, subXBLClient)

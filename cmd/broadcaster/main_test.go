@@ -569,6 +569,39 @@ func TestRunBroadcasterCommandSkipsSubAccountWhoseLoginFails(t *testing.T) {
 	}
 }
 
+// Shutdown during a sub-account sign-in must stop startup, not skip the account and start anyway.
+func TestRunBroadcasterCommandStopsWhenShutdownInterruptsSubAccountLogin(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var started bool
+	err := runBroadcasterCommand(ctx, commandOptions{ConfigPath: "/base/config.yml"}, commandDeps{
+		Stdout: io.Discard,
+		LoadConfig: func(string) (broadcaster.ConfigFile, error) {
+			cfg := broadcaster.DefaultConfigFile()
+			cfg.Session.SessionInfo.IP = "127.0.0.1"
+			cfg.Accounts.SubAccounts = []broadcaster.SubAccountFile{{ID: "alt", Enabled: true}}
+			return cfg, nil
+		},
+		LoadLiveToken: func(string) (*oauth2.Token, error) { return nil, errors.ErrUnsupported },
+		NewLiveTokenSource: func(context.Context, *oauth2.Token, io.Writer, func(*oauth2.Token)) oauth2.TokenSource {
+			return staticOAuthTokenSource{}
+		},
+		SaveLiveToken: func(string, *oauth2.Token) error { return nil },
+		LoadAccountToken: func(ctx context.Context, _ string, _ io.Writer, _ func(*oauth2.Token), _ time.Duration) (oauth2.TokenSource, error) {
+			cancel()
+			return nil, ctx.Err()
+		},
+		NewXBLTokenSource: func(context.Context, oauth2.TokenSource) xsapi.TokenSource { return nil },
+		NewXSAPIClient:    testNewXSAPIClient,
+		CloseXSAPIClients: func(*slog.Logger, []*xsapi.Client) {},
+		NewBroadcaster: func(broadcaster.Config) (commandBroadcaster, error) {
+			return fakeCommandBroadcaster{start: func(context.Context) error { started = true; return nil }, close: func() error { return nil }}, nil
+		},
+	})
+	if !errors.Is(err, context.Canceled) || started {
+		t.Fatalf("err = %v, started = %v; want startup stopped by cancellation", err, started)
+	}
+}
+
 // Relative and absolute spellings of one cache file must be caught as a duplicate.
 func TestRunBroadcasterCommandRejectsEquivalentCachePaths(t *testing.T) {
 	wd, err := os.Getwd()
