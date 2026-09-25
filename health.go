@@ -11,22 +11,23 @@ import (
 const minHealthStaleAfter = 5 * time.Minute
 
 // HealthHandler returns an http.Handler serving Kubernetes-style probes.
-// /healthz fails once no primary session publication has succeeded for
-// several update intervals; /readyz also fails while starting or recovering.
+// /healthz fails once Xbox has not confirmed the primary session for several
+// update intervals, or after the broadcaster stops; /readyz also fails while
+// starting or recovering.
 func (b *Broadcaster) HealthHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		if problem := b.staleness(time.Now()); problem != "" {
+		if problem := b.unhealthy(time.Now()); problem != "" {
 			http.Error(w, problem, http.StatusServiceUnavailable)
 			return
 		}
 		_, _ = fmt.Fprintln(w, "ok")
 	})
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
-		problem := b.staleness(time.Now())
+		problem := b.unhealthy(time.Now())
 		switch {
 		case problem != "":
-		case b.lastPublished.Load() == 0:
+		case b.lastVerified.Load() == 0:
 			problem = "starting"
 		case b.recovering.Load():
 			problem = "recovering the xbox live session"
@@ -40,10 +41,16 @@ func (b *Broadcaster) HealthHandler() http.Handler {
 	return mux
 }
 
-// staleness describes why the last primary publication is too old, or returns
-// "" when it is recent or none has been attempted yet.
-func (b *Broadcaster) staleness(now time.Time) string {
-	last := b.lastPublished.Load()
+// unhealthy describes why the broadcaster is stopped or its session is
+// unconfirmed for too long, or returns "" while starting or healthy.
+func (b *Broadcaster) unhealthy(now time.Time) string {
+	b.cancelMu.Lock()
+	ctx := b.ctx
+	b.cancelMu.Unlock()
+	if ctx != nil && ctx.Err() != nil {
+		return "stopped"
+	}
+	last := b.lastVerified.Load()
 	if last == 0 {
 		return ""
 	}
@@ -51,11 +58,11 @@ func (b *Broadcaster) staleness(now time.Time) string {
 	if age <= b.healthStaleAfter() {
 		return ""
 	}
-	return fmt.Sprintf("no successful xbox live session update for %s", age.Round(time.Second))
+	return fmt.Sprintf("xbox live has not confirmed the session for %s", age.Round(time.Second))
 }
 
-// healthStaleAfter is how long the primary session may go without a
-// successful publication before liveness fails.
+// healthStaleAfter is how long the primary session may go unconfirmed
+// before liveness fails.
 func (b *Broadcaster) healthStaleAfter() time.Duration {
 	return max(minHealthStaleAfter, 5*b.conf.UpdateInterval)
 }

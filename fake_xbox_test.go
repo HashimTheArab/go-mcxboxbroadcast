@@ -40,6 +40,7 @@ type fakeXbox struct {
 	failCustom int           // the next N custom property PUTs return 500
 	hangCustom chan struct{} // when set, custom property PUTs block until closed
 	failClose  bool
+	failGets   bool // session GETs return 503
 	subscribed chan struct{}
 }
 
@@ -84,6 +85,11 @@ func (f *fakeXbox) serve(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{}`))
 	case r.Method == http.MethodGet:
 		f.mu.Lock()
+		if f.failGets {
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		gone := f.deleted || !f.exists || !strings.EqualFold(path.Base(r.URL.Path), f.name)
 		body := f.bodyLocked()
 		f.mu.Unlock()

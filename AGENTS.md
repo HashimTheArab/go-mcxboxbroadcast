@@ -29,7 +29,9 @@ supervisor can restart it. See the constants there for retry limits and delays.
 
 `session_activity.go` checks directory advertisements separately from metadata
 updates. An unchanged announcement can return successfully from the local cache
-without contacting Xbox. Preserve these checks when changing recovery:
+without contacting Xbox, so `Update` confirms the primary session with a
+conditional GET and only that confirmation refreshes the health timestamp.
+Preserve these checks when changing recovery:
 
 - Match the publishing owner and current session with `SessionReference.Equal`.
   Session names and template names are case-insensitive.

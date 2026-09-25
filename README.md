@@ -85,8 +85,10 @@ restart enabled so the next process recreates authentication and client state.
 
 Set `health.listen` (for example `":8080"`) to serve probe endpoints:
 
-- `/healthz` fails when no Xbox session update has succeeded for five update
-  intervals (at least five minutes). Use it as a liveness probe.
+- `/healthz` fails when Xbox has not confirmed the session for five update
+  intervals (at least five minutes), or after the broadcaster stops. Each
+  update checks the session with Xbox, so a session Xbox deleted is found and
+  replaced. Use it as a liveness probe.
 - `/readyz` also fails while the broadcaster is starting or recovering.
 
 Before the first session is published, `/healthz` succeeds so a sign-in that

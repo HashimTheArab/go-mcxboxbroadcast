@@ -80,9 +80,9 @@ type Broadcaster struct {
 	loopWg sync.WaitGroup
 	// staleMu guards staleSessions, which recovery appends to without mu.
 	staleMu sync.Mutex
-	// lastPublished is the unix time in nanoseconds of the last successful
-	// primary session publication; zero until the first one.
-	lastPublished atomic.Int64
+	// lastVerified is the unix time in nanoseconds when Xbox last confirmed
+	// the primary session, by a publish or a verified Update; zero until then.
+	lastVerified atomic.Int64
 	// resolvedStatus is the status last resolved for the primary session. The
 	// room listener re-announces it so it never reverts a newer Update.
 	resolvedStatus atomic.Pointer[room.Status]
@@ -345,7 +345,7 @@ func (b *Broadcaster) installSessionStack(stack sessionStack) {
 		b.subAnnouncersByID[sub.id] = sub.announcer
 	}
 	b.listener = stack.listener
-	b.markPublished()
+	b.markVerified()
 	b.acceptWg.Add(1)
 	go func() {
 		defer b.acceptWg.Done()
@@ -421,9 +421,9 @@ func (b *Broadcaster) retryStaleSessionCloses() error {
 	return err
 }
 
-// markPublished records a successful primary session publication for health checks.
-func (b *Broadcaster) markPublished() {
-	b.lastPublished.Store(time.Now().UnixNano())
+// markVerified records that Xbox confirmed the primary session, for health checks.
+func (b *Broadcaster) markVerified() {
+	b.lastVerified.Store(time.Now().UnixNano())
 }
 
 // enabledSubAccounts returns the first enabled configuration for each ID and
@@ -1871,7 +1871,9 @@ func (b *Broadcaster) Update(ctx context.Context) error {
 	if err := b.announcer.Announce(ctx, status); err != nil {
 		return err
 	}
-	b.markPublished()
+	if err := b.verifyPrimarySession(ctx); err != nil {
+		return err
+	}
 	type failedSubAccountUpdate struct {
 		id  string
 		err error
@@ -1900,6 +1902,30 @@ func (b *Broadcaster) Update(ctx context.Context) error {
 	} else {
 		b.info("updated session")
 	}
+	return nil
+}
+
+// verifyPrimarySession confirms the primary session still exists with a
+// conditional GET, since an unchanged Announce is served from its local cache.
+// A session Xbox deleted is closed, so the next health check republishes it.
+// The caller must hold b.mu.
+func (b *Broadcaster) verifyPrimarySession(ctx context.Context) error {
+	xbl, ok := xblAnnouncer(b.announcer)
+	if !ok {
+		// Custom announcers report their own publication through Announce.
+		b.markVerified()
+		return nil
+	}
+	xbl.Lock()
+	session := xbl.Session
+	xbl.Unlock()
+	if session == nil {
+		return errors.New("verify session: no published session")
+	}
+	if err := session.Sync(ctx); err != nil {
+		return fmt.Errorf("verify session: %w", err)
+	}
+	b.markVerified()
 	return nil
 }
 
