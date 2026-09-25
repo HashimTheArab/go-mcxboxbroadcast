@@ -26,6 +26,7 @@ type FileHistoryStore struct {
 
 	mu       sync.Mutex
 	loaded   bool
+	dirty    bool // memory holds changes a failed save did not write
 	accounts map[string]*accountHistory
 	legacy   map[string]int64 // flat history from before entries were keyed by account
 }
@@ -132,7 +133,8 @@ func (s *FileHistoryStore) read(ctx context.Context, account string, pick func(*
 	return out, nil
 }
 
-// update applies change under the lock and saves when it reports a change.
+// update applies change under the lock and saves when it reports a change or
+// an earlier save failed, so a failed write is retried by the next update.
 func (s *FileHistoryStore) update(ctx context.Context, change func() bool) error {
 	if err := ctxErr(ctx); err != nil {
 		return err
@@ -142,10 +144,15 @@ func (s *FileHistoryStore) update(ctx context.Context, change func() bool) error
 	if err := s.load(); err != nil {
 		return err
 	}
-	if !change() {
+	if !change() && !s.dirty {
 		return nil
 	}
-	return s.save()
+	s.dirty = true
+	if err := s.save(); err != nil {
+		return err
+	}
+	s.dirty = false
+	return nil
 }
 
 // account returns account's history, creating it from legacy history if needed.

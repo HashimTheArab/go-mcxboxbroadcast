@@ -481,9 +481,10 @@ func (s *FriendSyncer) finishRemoval(ctx context.Context, p Person, result *frie
 	return true
 }
 
-// removing returns the people this account is still finishing removing.
+// removing returns the people this account is still finishing removing. It is
+// read even with cleanup off, so an earlier removal is never followed back.
 func (s *FriendSyncer) removing(ctx context.Context) map[string]time.Time {
-	if s.History == nil || !s.Config.Cleanup.enabled() {
+	if s.History == nil {
 		return nil
 	}
 	removing, err := s.History.Removing(ctx, s.Account)

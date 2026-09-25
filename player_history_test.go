@@ -147,3 +147,31 @@ func TestFileHistoryStoreMigratesFlatHistoryForEveryReadAccount(t *testing.T) {
 		t.Fatalf("sub-account history after restart = %v, want the migrated clock", sub)
 	}
 }
+
+// A failed write must be retried by the next update, even one that changes nothing.
+func TestFileHistoryStoreRetriesFailedSave(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.Join(t.TempDir(), "cache")
+	if err := os.Mkdir(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "player_history.json")
+	store := NewFileHistoryStore(path)
+	when := time.Now().Truncate(time.Second)
+	if err := store.Track(ctx, "me", when, "1"); err == nil {
+		t.Fatal("expected the save to fail in a read-only directory")
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Track(ctx, "me", when.Add(time.Hour), "1"); err != nil {
+		t.Fatal(err)
+	}
+	lastSeen, err := NewFileHistoryStore(path).LastSeen(ctx, "me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !lastSeen["1"].Equal(when) {
+		t.Fatalf("saved history = %v, want 1 tracked at %s", lastSeen, when)
+	}
+}

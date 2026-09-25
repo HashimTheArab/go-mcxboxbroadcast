@@ -385,7 +385,8 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 		SuppressSessionUpdateMessage: c.SuppressSessionUpdateMessage,
 		FriendSync:                   c.FriendSync.runtime(),
 	}
-	if cfg.FriendSync != nil && cfg.FriendSync.Cleanup.enabled() {
+	// Friend sync needs history even with cleanup off, to finish earlier removals.
+	if cfg.FriendSync != nil {
 		history := NewFileHistoryStore(resolvePath(in.BaseDir, c.FriendSync.Cleanup.HistoryPath))
 		history.Log = in.Log
 		cfg.FriendHistory = history

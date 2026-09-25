@@ -345,6 +345,19 @@ func TestConfigFileDisablesFriendSyncWhenNoActionsConfigured(t *testing.T) {
 	}
 }
 
+// With cleanup off, friend sync still needs history to finish earlier removals.
+func TestConfigFileKeepsFriendHistoryWithCleanupOff(t *testing.T) {
+	cfg := DefaultConfigFile()
+	cfg.FriendSync.Cleanup = FriendCleanupFile{HistoryPath: "cache/player_history.json"}
+	runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{XBLTokenSource: staticTokenSource{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.FriendSync == nil || runtime.FriendHistory == nil {
+		t.Fatalf("friend sync = %#v history = %v, want both set", runtime.FriendSync, runtime.FriendHistory)
+	}
+}
+
 func TestHTTPConfigClientConfiguresProxyTransport(t *testing.T) {
 	cfg := HTTPFileConfig{Proxy: "http://127.0.0.1:8080"}
 

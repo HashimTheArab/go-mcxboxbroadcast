@@ -1075,3 +1075,20 @@ func TestFriendSyncCleanupUnfollowsOneWayFollows(t *testing.T) {
 		t.Fatal("history for the unfollowed person should be forgotten")
 	}
 }
+
+// Turning cleanup off must not let a pending removal be followed back.
+func TestFriendSyncFinishesPendingRemovalWithCleanupOff(t *testing.T) {
+	x := newFakeXbox()
+	x.followers["42"] = true
+	history := newMemoryHistory()
+	_ = history.MarkRemoving(context.Background(), "100", time.Now(), "42")
+	s := &FriendSyncer{Client: x.client(), History: history, Account: "100",
+		Config: FriendSyncConfig{AutoFollow: true, AutoUnfollow: true}}
+	s.runSync(context.Background(), false)
+	if len(x.follows) != 0 || x.followers["42"] {
+		t.Fatalf("follows=%v follower=%v, want the removal finished and no follow-back", x.follows, x.followers["42"])
+	}
+	if removing, _ := history.Removing(context.Background(), "100"); len(removing) != 0 {
+		t.Fatalf("removal marks = %v, want cleared", removing)
+	}
+}
