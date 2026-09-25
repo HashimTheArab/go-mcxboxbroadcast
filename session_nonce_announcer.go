@@ -21,6 +21,9 @@ import (
 // sessionNonceAnnouncer publishes the session with a per-member nonce map. The
 // embedded XBLAnnouncer's mutex guards only Session and SessionReference, so
 // readers never wait on MPSD; busy serializes the network writes instead.
+// closeTimeout matches the MPSD session close budget.
+const closeTimeout = 15 * time.Second
+
 type sessionNonceAnnouncer struct {
 	*room.XBLAnnouncer
 
@@ -159,9 +162,14 @@ func (a *sessionNonceAnnouncer) Announce(ctx context.Context, status room.Status
 }
 
 // Close closes the published session once any in-flight write finishes, so a
-// session being published cannot be left open behind the close.
+// session being published cannot be left open behind the close. It gives up
+// after closeTimeout so a stuck writer cannot block shutdown.
 func (a *sessionNonceAnnouncer) Close() error {
-	a.busy <- struct{}{}
+	ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+	defer cancel()
+	if err := a.acquire(ctx); err != nil {
+		return fmt.Errorf("close session: %w", err)
+	}
 	defer a.release()
 	if session := a.session(); session != nil {
 		return session.Close()

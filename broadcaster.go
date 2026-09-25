@@ -1856,6 +1856,12 @@ func (b *Broadcaster) Update(ctx context.Context) error {
 	if b.recovering.Load() {
 		return errors.New("session recovery is in progress")
 	}
+	// Stop with the broadcaster so Close never waits on a caller's context.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if b.ctx != nil {
+		defer context.AfterFunc(b.ctx, cancel)()
+	}
 	status, err := b.status(ctx)
 	if err != nil {
 		return err

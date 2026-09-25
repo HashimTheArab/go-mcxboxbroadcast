@@ -368,3 +368,29 @@ func TestCloseCancelsInFlightRecovery(t *testing.T) {
 		t.Fatal("Close waited for in-flight recovery")
 	}
 }
+
+// Close must not wait for an Update whose caller context has no deadline.
+func TestCloseCancelsUpdateWithUnboundedContext(t *testing.T) {
+	f := newFakeXbox(t)
+	b, nonce := newFakeXboxBroadcaster(t, f)
+	f.mu.Lock()
+	f.hangCustom = make(chan struct{})
+	f.mu.Unlock()
+	b.conf.Status.Players = 3
+	updated := make(chan error, 1)
+	go func() { updated <- b.Update(context.Background()) }()
+	for len(nonce.busy) == 0 {
+		time.Sleep(time.Millisecond)
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- b.Close() }()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close waited for an Update stuck on a hung MPSD write")
+	}
+	if err := <-updated; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Update = %v, want %v", err, context.Canceled)
+	}
+}
