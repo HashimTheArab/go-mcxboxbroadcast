@@ -2033,8 +2033,8 @@ func (b *Broadcaster) Close() error {
 		err = b.listener.Close()
 	}
 	b.mu.Unlock()
-	// Client handlers read the published sessions under mu, so they drain
-	// without it held. No handler starts once the accept loops are done.
+	// Client handlers drain without mu held, and none starts once the accept
+	// loops are done.
 	<-b.done
 	b.clientWg.Wait()
 
