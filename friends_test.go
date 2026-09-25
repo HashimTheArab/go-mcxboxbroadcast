@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -487,20 +488,20 @@ func TestFriendClientAcceptIsolatesRefusedRequests(t *testing.T) {
 	}
 }
 
-// A full friend list applies to every request, so it stops without splitting.
-func TestFriendClientAcceptStopsWhenFriendListFull(t *testing.T) {
-	client, batches := bulkAddServer(t, []string{"1", "2", "3"}, func([]string) *http.Response {
-		return response(http.StatusBadRequest, `{"code":1028,"description":"full"}`)
+// A full-list refusal may be one requester's list, so it is narrowed to the people it applies to.
+func TestFriendClientAcceptSplitsFullListRefusals(t *testing.T) {
+	client, _ := bulkAddServer(t, []string{"1", "2", "3"}, func(batch []string) *http.Response {
+		if slices.Contains(batch, "2") {
+			return response(http.StatusBadRequest, `{"code":1028,"description":"full"}`)
+		}
+		return updated(batch)
 	})
 	result, err := client.AcceptPendingFriendRequests(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.ListFull || result.Waiting != 3 || len(result.Rejected) != 0 {
-		t.Fatalf("result = %+v, want list full with 3 waiting", result)
-	}
-	if len(*batches) != 1 {
-		t.Fatalf("bulk requests = %d, want 1", len(*batches))
+	if len(result.Accepted) != 2 || len(result.Rejected) != 1 || result.Rejected[0].Person.XUID != "2" || !errors.Is(result.Rejected[0].Err, xblsocial.ErrFriendListFull) {
+		t.Fatalf("result = %+v, want 1 and 3 accepted and 2 refused as list full", result)
 	}
 }
 

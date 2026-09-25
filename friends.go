@@ -41,13 +41,12 @@ type FriendRequestResult struct {
 	Rejected []RejectedFriendRequest
 	// Waiting counts requests still pending afterwards, including skipped ones.
 	Waiting int
-	// ListFull reports that Xbox refused requests because the friend list is full.
-	ListFull bool
 }
 
 // RejectedFriendRequest is an incoming friend request Xbox refused to accept.
 // Err matches [xblsocial.ErrFriendRestricted] when the person's privacy or
-// enforcement settings block the friendship.
+// enforcement settings block the friendship, and [xblsocial.ErrFriendListFull]
+// when either the account's or the requester's list is full.
 type RejectedFriendRequest struct {
 	Person Person
 	Err    error
@@ -74,8 +73,8 @@ func (c FriendClient) Friends(ctx context.Context) ([]Person, error) {
 
 // AcceptPendingFriendRequests accepts incoming Xbox friend requests in bounded
 // batches, leaving requests for which skip reports true pending. It stops at
-// the first rate limit, server error or full friend list; other refusals are
-// narrowed down to the people they apply to and reported in Rejected.
+// the first rate limit or server error; refusals are narrowed down to the
+// people they apply to and reported in Rejected.
 func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context, skip func(xuid string) bool) (FriendRequestResult, error) {
 	var result FriendRequestResult
 	pending, err := c.social().People(ctx, xblsocial.PeopleListIncomingFriendRequests, xblsocial.PeopleListConfig{Undecorated: true})
@@ -93,7 +92,7 @@ func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context, skip func
 			xuids = append(xuids, user.XUID)
 		}
 	}
-	for start := 0; start < len(xuids) && err == nil && !result.ListFull; start += addFriendsBatchSize {
+	for start := 0; start < len(xuids) && err == nil; start += addFriendsBatchSize {
 		err = c.acceptFriends(ctx, xuids[start:min(start+addFriendsBatchSize, len(xuids))], byXUID, &result)
 	}
 	result.Waiting = len(byXUID) - len(result.Accepted)
@@ -121,10 +120,8 @@ func (c FriendClient) acceptFriends(ctx context.Context, xuids []string, byXUID 
 		}
 		return nil
 	}
+	// A full-list refusal may be one requester's list, so it is split like any other.
 	switch {
-	case errors.Is(err, xblsocial.ErrFriendListFull):
-		result.ListFull = true
-		return nil
 	case !isRequestRefusal(err):
 		return err
 	case len(xuids) == 1:
@@ -132,7 +129,7 @@ func (c FriendClient) acceptFriends(ctx context.Context, xuids []string, byXUID 
 		return nil
 	}
 	middle := len(xuids) / 2
-	if err := c.acceptFriends(ctx, xuids[:middle], byXUID, result); err != nil || result.ListFull {
+	if err := c.acceptFriends(ctx, xuids[:middle], byXUID, result); err != nil {
 		return err
 	}
 	return c.acceptFriends(ctx, xuids[middle:], byXUID, result)

@@ -163,8 +163,10 @@ type friendSyncResult struct {
 	followRetryAfter   time.Duration
 	unfollowRetryAfter time.Duration
 	friendListFull     bool
-	waiting            int  // incoming friend requests left pending
-	madeRoom           bool // cleanup removed friends after the list was full
+	requests           FriendRequestResult // this pass's accept outcome
+	waiting            int                 // incoming friend requests left pending
+	joined             int                 // friends added this pass but not in its people snapshot
+	madeRoom           bool                // cleanup removed friends after the list was full
 }
 
 // Sync runs one full pass, ignoring backoff from earlier passes.
@@ -200,6 +202,7 @@ func (s *FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOptio
 		result.readRetryAfter = retryDelay(err)
 		return result, err
 	}
+	s.settleRequests(ctx, people, opts, &result)
 	s.confirmAccepted(ctx, people)
 	own := s.ownAccounts()
 	removing := s.removing(ctx)
@@ -242,6 +245,7 @@ func (s *FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOptio
 		if s.Config.AutoFollow && opts.autoFollow && !result.followBlocked() && p.IsFollowingCaller && !p.IsFollowedByCaller {
 			if s.follow(ctx, p, opts, &result) {
 				added++
+				result.joined++
 			}
 		}
 		if _, isOwn := own[p.XUID]; isOwn {
@@ -303,16 +307,7 @@ func (s *FriendSyncer) acceptPending(ctx context.Context, opts friendSyncOptions
 		s.state.accepted[p.XUID] = acceptedFriendRequest{person: p, at: now}
 		s.debug(ctx, "accepted friend request", "xuid", p.XUID, "gamertag", p.Gamertag)
 	}
-	result.waiting = requests.Waiting
-	for _, rejected := range requests.Rejected {
-		if s.rejectRequest(ctx, rejected, opts, result) {
-			result.waiting--
-		}
-	}
-	if requests.ListFull {
-		s.warn(ctx, "friend list full while accepting friend requests", "waiting", result.waiting)
-		result.friendListFull = true
-	}
+	result.requests = requests
 	if err != nil {
 		if delay := retryDelay(err); delay > 0 {
 			var responseErr *xblsocial.ResponseError
@@ -324,6 +319,39 @@ func (s *FriendSyncer) acceptPending(ctx context.Context, opts friendSyncOptions
 			}
 		}
 		s.warn(ctx, "accept pending friend requests", "err", err)
+	}
+}
+
+// settleRequests handles this pass's refused requests once the friend list is
+// known. A full-list refusal counts as the account's own list being full only
+// when the account is at the Xbox limit; otherwise it is the requester's list,
+// and just that request is retried later.
+func (s *FriendSyncer) settleRequests(ctx context.Context, people []Person, opts friendSyncOptions, result *friendSyncResult) {
+	requests := result.requests
+	result.waiting = requests.Waiting
+	following := make(map[string]struct{}, len(people))
+	for _, p := range people {
+		if p.IsFollowedByCaller && !isGuestXUID(p.XUID) {
+			following[p.XUID] = struct{}{}
+		}
+	}
+	for _, p := range requests.Accepted {
+		if _, ok := following[p.XUID]; !ok {
+			result.joined++
+		}
+	}
+	ownListFull := len(following)+result.joined >= XboxFriendLimit
+	for _, rejected := range requests.Rejected {
+		if ownListFull && errors.Is(rejected.Err, xblsocial.ErrFriendListFull) {
+			result.friendListFull = true
+			continue
+		}
+		if s.rejectRequest(ctx, rejected, opts, result) {
+			result.waiting--
+		}
+	}
+	if result.friendListFull {
+		s.warn(ctx, "friend list full while accepting friend requests", "friends", len(following), "waiting", result.waiting)
 	}
 }
 
@@ -520,8 +548,9 @@ func (s *FriendSyncer) cleanup(ctx context.Context, people []Person, own, unfoll
 	if lastSeen == nil {
 		lastSeen = map[string]time.Time{}
 	}
-	// Xbox caps the people the account follows, so that is what counts.
-	count := 0
+	// Xbox caps the people the account follows, so that is what counts,
+	// including friends this pass added after the snapshot was taken.
+	count := result.joined
 	var friends []Person
 	var untracked []string
 	for _, p := range people {

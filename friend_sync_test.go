@@ -842,45 +842,7 @@ func TestFriendSyncFinishesThrottledRemoval(t *testing.T) {
 	})
 }
 
-// With maxFriends set, a full list makes room for waiting requests instead of failing every pass.
-func TestFriendSyncMakesRoomWhenAcceptFindsListFull(t *testing.T) {
-	x := newFakeXbox()
-	x.limit = 3
-	x.befriend("1", "2", "3")
-	x.pending["9"] = true
-	history := newMemoryHistory()
-	history.set("100", "1", time.Now().Add(-3*24*time.Hour))
-	history.set("100", "2", time.Now().Add(-1*time.Hour))
-	history.set("100", "3", time.Now().Add(-2*24*time.Hour))
-	s := &FriendSyncer{Client: x.client(), History: history, Account: "100",
-		Config: FriendSyncConfig{AutoFollow: true, AutoUnfollow: true, Cleanup: FriendCleanupConfig{MaxFriends: 3}}}
 
-	if _, again := s.runSync(context.Background(), false); !again {
-		t.Fatal("expected another pass once room was made")
-	}
-	s.runSync(context.Background(), false)
-	if !x.following["9"] || x.following["1"] || !x.following["2"] || !x.following["3"] {
-		t.Fatalf("following = %v, want 9 added in place of 1, the least recently seen", x.following)
-	}
-	if !s.state.autoFollowUntil.IsZero() {
-		t.Fatal("a list made room for must not back off accepts")
-	}
-}
-
-// Without maxFriends, a full list backs off instead of retrying the same accept every pass.
-func TestFriendSyncBacksOffWhenAcceptFindsListFull(t *testing.T) {
-	x := newFakeXbox()
-	x.limit = 1
-	x.befriend("1")
-	x.pending["9"] = true
-	s := &FriendSyncer{Client: x.client(), Config: FriendSyncConfig{AutoFollow: true}}
-	for range 3 {
-		s.runSync(context.Background(), false)
-	}
-	if x.bulkPosts != 1 || s.state.autoFollowUntil.IsZero() {
-		t.Fatalf("bulk posts=%d backoff=%v, want one post then backoff", x.bulkPosts, s.state.autoFollowUntil)
-	}
-}
 
 // maxFriends leaves room for waiting requests by removing the least recently seen friends.
 func TestFriendSyncKeepsFriendsWithinMaxFriends(t *testing.T) {
@@ -988,23 +950,6 @@ func TestFriendSyncRestrictedRemovalHonoursRetryAfter(t *testing.T) {
 	}
 }
 
-// A full-list error while under maxFriends must not remove anyone, or a count mismatch could drain the list.
-func TestFriendSyncListFullUnderMaxFriendsDoesNotEvict(t *testing.T) {
-	x := newFakeXbox()
-	x.befriend("1", "2")
-	x.pending["9"] = true
-	x.bulkAdd = func([]string) *http.Response {
-		return response(http.StatusBadRequest, `{"code":1028,"description":"full"}`)
-	}
-	s := &FriendSyncer{Client: x.client(), History: newMemoryHistory(), Account: "100",
-		Config: FriendSyncConfig{AutoFollow: true, AutoUnfollow: true, Cleanup: FriendCleanupConfig{MaxFriends: 5}}}
-	for range 3 {
-		s.runSync(context.Background(), false)
-	}
-	if !x.following["1"] || !x.following["2"] || s.state.autoFollowUntil.IsZero() {
-		t.Fatalf("following=%v backoff=%v, want no removals and an accept backoff", x.following, s.state.autoFollowUntil)
-	}
-}
 
 // A removal whose follower side failed must survive a restart, or the next process follows the player back.
 func TestFriendSyncFinishesRemovalAfterRestart(t *testing.T) {
@@ -1090,5 +1035,94 @@ func TestFriendSyncFinishesPendingRemovalWithCleanupOff(t *testing.T) {
 	}
 	if removing, _ := history.Removing(context.Background(), "100"); len(removing) != 0 {
 		t.Fatalf("removal marks = %v, want cleared", removing)
+	}
+}
+
+// befriendMany makes n numbered mutual friends, starting at XUID 1000.
+func (f *fakeXbox) befriendMany(n int) {
+	for i := range n {
+		f.befriend(strconv.Itoa(1000 + i))
+	}
+}
+
+// At the Xbox limit, maxFriends makes room for a waiting request instead of failing every pass.
+func TestFriendSyncMakesRoomWhenAcceptFindsListFull(t *testing.T) {
+	x := newFakeXbox()
+	x.limit = XboxFriendLimit
+	x.befriendMany(XboxFriendLimit)
+	x.pending["9"] = true
+	history := newMemoryHistory()
+	history.set("100", "1000", time.Now().Add(-3*24*time.Hour))
+	s := &FriendSyncer{Client: x.client(), History: history, Account: "100",
+		Config: FriendSyncConfig{AutoFollow: true, AutoUnfollow: true, Cleanup: FriendCleanupConfig{MaxFriends: XboxFriendLimit}}}
+
+	if _, again := s.runSync(context.Background(), false); !again {
+		t.Fatal("expected another pass once room was made")
+	}
+	s.runSync(context.Background(), false)
+	if !x.following["9"] || x.following["1000"] || len(x.following) != XboxFriendLimit {
+		t.Fatalf("9 added=%v 1000 kept=%v size=%d, want 9 in place of 1000, the least recently seen", x.following["9"], x.following["1000"], len(x.following))
+	}
+	if !s.state.autoFollowUntil.IsZero() {
+		t.Fatal("a list made room for must not back off accepts")
+	}
+}
+
+// At the Xbox limit without maxFriends, accepts back off instead of retrying every pass.
+func TestFriendSyncBacksOffWhenAcceptFindsListFull(t *testing.T) {
+	x := newFakeXbox()
+	x.limit = XboxFriendLimit
+	x.befriendMany(XboxFriendLimit)
+	x.pending["9"] = true
+	s := &FriendSyncer{Client: x.client(), Config: FriendSyncConfig{AutoFollow: true}}
+	for range 3 {
+		s.runSync(context.Background(), false)
+	}
+	if x.bulkPosts != 1 || s.state.autoFollowUntil.IsZero() {
+		t.Fatalf("bulk posts=%d backoff=%v, want one post then backoff", x.bulkPosts, s.state.autoFollowUntil)
+	}
+}
+
+// Below the Xbox limit a full-list refusal is the requester's list: retry that request later, remove no one.
+func TestFriendSyncTreatsFullListBelowLimitAsRequesters(t *testing.T) {
+	x := newFakeXbox()
+	x.befriend("1", "2")
+	x.pending["9"], x.pending["10"] = true, true
+	x.bulkAdd = func(xuids []string) *http.Response {
+		if slices.Contains(xuids, "9") {
+			return response(http.StatusBadRequest, `{"code":1028,"description":"full"}`)
+		}
+		for _, xuid := range xuids {
+			delete(x.pending, xuid)
+			x.befriend(xuid)
+		}
+		return updated(xuids)
+	}
+	s := &FriendSyncer{Client: x.client(), History: newMemoryHistory(), Account: "100",
+		Config: FriendSyncConfig{AutoFollow: true, AutoUnfollow: true, Cleanup: FriendCleanupConfig{MaxFriends: 10}}}
+	s.runSync(context.Background(), false)
+	posts := x.bulkPosts
+	s.runSync(context.Background(), false)
+	if !x.following["10"] || !x.following["1"] || !x.following["2"] || x.bulkPosts != posts {
+		t.Fatalf("following=%v posts %d -> %d, want 10 accepted, nobody removed and 9 not retried yet", x.following, posts, x.bulkPosts)
+	}
+	if !s.state.autoFollowUntil.IsZero() {
+		t.Fatal("one requester's full list must not back off every accept")
+	}
+}
+
+// Follow-backs in this pass count toward maxFriends before the next snapshot.
+func TestFriendSyncCountsThisPassFollowsTowardMaxFriends(t *testing.T) {
+	x := newFakeXbox()
+	x.befriend("1", "2")
+	x.followers["3"], x.followers["4"] = true, true
+	history := newMemoryHistory()
+	history.set("100", "1", time.Now().Add(-time.Hour))
+	history.set("100", "2", time.Now())
+	s := &FriendSyncer{Client: x.client(), History: history, Account: "100",
+		Config: FriendSyncConfig{AutoFollow: true, AutoUnfollow: true, Cleanup: FriendCleanupConfig{MaxFriends: 3}}}
+	s.runSync(context.Background(), false)
+	if len(x.following) != 3 || x.following["1"] {
+		t.Fatalf("following = %v, want 3 friends with 1, the least recently seen, removed", x.following)
 	}
 }
