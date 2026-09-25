@@ -55,7 +55,7 @@ require (
 
 replace (
 	// Temporary until the pending go-xsapi fixes are merged upstream.
-	github.com/df-mc/go-xsapi/v2 => github.com/hashimthearab/go-xsapi/v2 v2.0.0-20260925121408-0e3604139c87
+	github.com/df-mc/go-xsapi/v2 => github.com/hashimthearab/go-xsapi/v2 v2.0.0-20260925124241-c1f8330e3f6f
 	github.com/sandertv/go-raknet => github.com/hashimthearab/go-raknet v1.15.1-0.20260908193618-2049463566ca
 	github.com/sandertv/gophertunnel => github.com/hashimthearab/gophertunnel v1.25.3-0.20260925110759-04fe256acb1f
 )
