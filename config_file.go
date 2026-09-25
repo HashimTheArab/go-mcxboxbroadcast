@@ -1,8 +1,10 @@
 package broadcaster
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -20,7 +22,17 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const CurrentConfigVersion = 3
+const CurrentConfigVersion = 4
+
+// exampleServerHost is the placeholder target in generated configs; the
+// broadcaster refuses to start until an operator replaces it.
+const exampleServerHost = "play.example.net"
+
+// ErrConfigCreated reports that LoadConfigFile wrote a default config because
+// none existed; the operator must edit it before starting again.
+var ErrConfigCreated = errors.New("created a default config")
+
+var errExampleServerHost = errors.New("session.sessionInfo.ip is still the example host " + exampleServerHost)
 
 type ConfigFile struct {
 	ConfigVersion                int                `yaml:"configVersion" toml:"configVersion"`
@@ -70,14 +82,6 @@ type SessionInfoFile struct {
 	MaxPlayers int    `yaml:"maxPlayers" toml:"maxPlayers"`
 	IP         string `yaml:"ip" toml:"ip"`
 	Port       uint16 `yaml:"port" toml:"port"`
-	// Protocol overrides the network protocol advertised in the session.
-	// Zero uses the protocol library's current protocol.
-	Protocol int32 `yaml:"protocol,omitempty" toml:"protocol,omitempty"`
-	// Version overrides the game version advertised in the session document.
-	// Empty uses the protocol library's version. Clients hide friend worlds
-	// older than their own game version, so set this when a client update
-	// ships before the protocol library catches up.
-	Version string `yaml:"version,omitempty" toml:"version,omitempty"`
 }
 
 type FriendFileConfig struct {
@@ -149,7 +153,7 @@ func DefaultConfigFile() ConfigFile {
 				WorldName:  "Minecraft World",
 				Players:    0,
 				MaxPlayers: 20,
-				IP:         "play.example.net",
+				IP:         exampleServerHost,
 				Port:       19132,
 			},
 		},
@@ -217,18 +221,26 @@ func proxyTransport(base http.RoundTripper, proxyURL *url.URL) (http.RoundTrippe
 	return transport, nil
 }
 
+// LoadConfigFile returns the config at path, migrated to CurrentConfigVersion.
+// Unknown keys are errors; a missing file is written with defaults and
+// reported as ErrConfigCreated.
 func LoadConfigFile(path string) (ConfigFile, error) {
 	cfg := DefaultConfigFile()
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return cfg, SaveConfigFile(path, cfg)
+		if err := SaveConfigFile(path, cfg); err != nil {
+			return ConfigFile{}, fmt.Errorf("write default config: %w", err)
+		}
+		return ConfigFile{}, fmt.Errorf("%w at %s: set session.sessionInfo.ip and port to your Bedrock server, then start again", ErrConfigCreated, path)
 	}
 	if err != nil {
 		return ConfigFile{}, err
 	}
-	if err := decodeConfig(path, data, &cfg); err != nil {
-		return ConfigFile{}, err
+	notes, err := decodeConfig(path, data, &cfg)
+	if err != nil {
+		return ConfigFile{}, fmt.Errorf("parse %s: %w", path, err)
 	}
+	cfg.Notes = append(cfg.Notes, notes...)
 	loadedVersion := cfg.ConfigVersion
 	cfg.migrate()
 	if loadedVersion != cfg.ConfigVersion {
@@ -236,18 +248,60 @@ func LoadConfigFile(path string) (ConfigFile, error) {
 			cfg.Notes = append(cfg.Notes, fmt.Sprintf("could not persist migrated config: %v", err))
 		}
 	}
+	if strings.EqualFold(strings.TrimSpace(cfg.Session.SessionInfo.IP), exampleServerHost) {
+		return ConfigFile{}, fmt.Errorf("%s: %w; set it to your Bedrock server", path, errExampleServerHost)
+	}
 	return cfg, nil
 }
 
+// SaveConfigFile atomically replaces path with cfg, readable only by its owner.
 func SaveConfigFile(path string, cfg ConfigFile) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
 	data, err := encodeConfig(path, cfg)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o600)
+	return writeFileAtomic(path, data)
+}
+
+// configMigrations[v] rewrites a raw version v-1 document into version v and
+// returns one operator note per change; no note means the document is unchanged.
+var configMigrations = map[int]func(doc map[string]any) []string{
+	4: migrateDropSessionOverrides,
+}
+
+// migrateDropSessionOverrides removes keys this broadcaster never honours or
+// no longer supports: the advertised version override, which can advertise a
+// version the listener rejects, and the Geyser-extension-only target keys.
+func migrateDropSessionOverrides(doc map[string]any) []string {
+	var notes []string
+	protocol := deleteConfigKey(doc, "session", "sessionInfo", "protocol")
+	version := deleteConfigKey(doc, "session", "sessionInfo", "version")
+	if protocol || version {
+		notes = append(notes, "removed session.sessionInfo.protocol/version: sessions now always advertise the version this build accepts")
+	}
+	for _, key := range []string{"remoteAddress", "remotePort"} {
+		if deleteConfigKey(doc, "session", key) {
+			notes = append(notes, fmt.Sprintf("removed unused session.%s: the target is session.sessionInfo.ip/port", key))
+		}
+	}
+	return notes
+}
+
+// deleteConfigKey removes the value at the nested key path and reports whether it existed.
+func deleteConfigKey(doc map[string]any, path ...string) bool {
+	for _, key := range path[:len(path)-1] {
+		next, ok := doc[key].(map[string]any)
+		if !ok {
+			return false
+		}
+		doc = next
+	}
+	last := path[len(path)-1]
+	if _, ok := doc[last]; !ok {
+		return false
+	}
+	delete(doc, last)
+	return true
 }
 
 func (c *ConfigFile) migrate() {
@@ -305,8 +359,6 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 			HostName:         c.Session.SessionInfo.HostName,
 			WorldName:        c.Session.SessionInfo.WorldName,
 			WorldType:        c.Session.WorldType,
-			Protocol:         c.Session.SessionInfo.Protocol,
-			Version:          c.Session.SessionInfo.Version,
 			Players:          c.Session.SessionInfo.Players,
 			MaxPlayers:       c.Session.SessionInfo.MaxPlayers,
 			Broadcast:        c.Session.BroadcastSetting,
@@ -382,22 +434,78 @@ func (f FriendFileConfig) runtime() *FriendSyncConfig {
 	}
 }
 
-func decodeConfig(path string, data []byte, out *ConfigFile) error {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".toml":
-		return toml.Unmarshal(data, out)
-	default:
-		return yaml.Unmarshal(data, out)
+// decodeConfig strictly decodes data into out after applying the raw-document
+// migrations newer than its configVersion, returning their notes.
+func decodeConfig(path string, data []byte, out *ConfigFile) ([]string, error) {
+	codec := configCodecFor(path)
+	var doc map[string]any
+	if err := codec.unmarshal(data, &doc); err != nil {
+		return nil, err
 	}
+	if len(doc) == 0 {
+		return nil, nil
+	}
+	var probe struct {
+		ConfigVersion int `yaml:"configVersion" toml:"configVersion"`
+	}
+	if err := codec.unmarshal(data, &probe); err != nil {
+		return nil, err
+	}
+	var notes []string
+	for v := probe.ConfigVersion + 1; v <= CurrentConfigVersion; v++ {
+		if migrate := configMigrations[v]; migrate != nil {
+			notes = append(notes, migrate(doc)...)
+		}
+	}
+	if len(notes) > 0 {
+		// Re-encode only when a step changed the document so errors keep the
+		// operator's line numbers otherwise.
+		migrated, err := codec.marshal(doc)
+		if err != nil {
+			return nil, err
+		}
+		data = migrated
+	}
+	return notes, codec.decodeStrict(data, out)
+}
+
+type configCodec struct {
+	unmarshal    func([]byte, any) error
+	marshal      func(any) ([]byte, error)
+	decodeStrict func([]byte, *ConfigFile) error
+}
+
+func configCodecFor(path string) configCodec {
+	if strings.EqualFold(filepath.Ext(path), ".toml") {
+		return configCodec{unmarshal: toml.Unmarshal, marshal: toml.Marshal, decodeStrict: decodeTOMLStrict}
+	}
+	return configCodec{unmarshal: yaml.Unmarshal, marshal: yaml.Marshal, decodeStrict: decodeYAMLStrict}
+}
+
+func decodeYAMLStrict(data []byte, out *ConfigFile) error {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(out); err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	return nil
+}
+
+func decodeTOMLStrict(data []byte, out *ConfigFile) error {
+	err := toml.NewDecoder(bytes.NewReader(data)).DisallowUnknownFields().Decode(out)
+	var strict *toml.StrictMissingError
+	if !errors.As(err, &strict) {
+		return err
+	}
+	keys := make([]string, 0, len(strict.Errors))
+	for _, e := range strict.Errors {
+		keys = append(keys, strings.Join(e.Key(), "."))
+	}
+	return fmt.Errorf("unknown config keys: %s", strings.Join(keys, ", "))
 }
 
 func encodeConfig(path string, cfg ConfigFile) ([]byte, error) {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".toml":
-		return toml.Marshal(cfg)
-	default:
-		return yaml.Marshal(cfg)
-	}
+	return configCodecFor(path).marshal(cfg)
 }
 
 func resolvePath(base, path string) string {
