@@ -961,3 +961,21 @@ func TestFriendSyncRestrictedRemovalHonoursRetryAfter(t *testing.T) {
 		t.Fatalf("attempts=%d retry=%s, want 1 attempt and a 1m backoff", attempts, result.unfollowRetryAfter)
 	}
 }
+
+// A full-list error while under maxFriends must not remove anyone, or a count mismatch could drain the list.
+func TestFriendSyncListFullUnderMaxFriendsDoesNotEvict(t *testing.T) {
+	x := newFakeXbox()
+	x.befriend("1", "2")
+	x.pending["9"] = true
+	x.bulkAdd = func([]string) *http.Response {
+		return response(http.StatusBadRequest, `{"code":1028,"description":"full"}`)
+	}
+	s := &FriendSyncer{Client: x.client(), History: newMemoryHistory(), Account: "100",
+		Config: FriendSyncConfig{AutoFollow: true, AutoUnfollow: true, Cleanup: FriendCleanupConfig{MaxFriends: 5}}}
+	for range 3 {
+		s.runSync(context.Background(), false)
+	}
+	if !x.following["1"] || !x.following["2"] || s.state.autoFollowUntil.IsZero() {
+		t.Fatalf("following=%v backoff=%v, want no removals and an accept backoff", x.following, s.state.autoFollowUntil)
+	}
+}

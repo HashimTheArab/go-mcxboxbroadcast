@@ -173,7 +173,6 @@ type friendSyncResult struct {
 	followRetryAfter   time.Duration
 	unfollowRetryAfter time.Duration
 	friendListFull     bool
-	needRoom           int  // slots Xbox needed when it reported the list full
 	waiting            int  // incoming friend requests left pending
 	madeRoom           bool // cleanup removed friends after the list was full
 }
@@ -323,7 +322,6 @@ func (s *FriendSyncer) acceptPending(ctx context.Context, opts friendSyncOptions
 	if requests.ListFull {
 		s.warn(ctx, "friend list full while accepting friend requests", "waiting", result.waiting)
 		result.friendListFull = true
-		result.needRoom = max(result.needRoom, result.waiting)
 	}
 	if err != nil {
 		if delay := retryDelay(err); delay > 0 {
@@ -398,7 +396,6 @@ func (s *FriendSyncer) follow(ctx context.Context, p Person, opts friendSyncOpti
 		}
 	case errors.Is(err, xblsocial.ErrFriendListFull):
 		result.friendListFull = true
-		result.needRoom = max(result.needRoom, 1)
 	default:
 		if delay := retryDelay(err); delay > 0 {
 			result.followRetryAfter = delay
@@ -540,10 +537,9 @@ func (s *FriendSyncer) cleanup(ctx context.Context, people []Person, own, unfoll
 	}
 	inactive := len(candidates)
 	if conf.MaxFriends > 0 {
+		// Only ever down to MaxFriends: a full-list error alone never forces
+		// removals, so a mismatch with Xbox's count cannot drain the list.
 		need := count - inactive + result.waiting - conf.MaxFriends
-		if result.friendListFull {
-			need = max(need, result.needRoom)
-		}
 		for _, p := range friends[inactive:min(len(friends), inactive+max(need, 0))] {
 			candidates = append(candidates, friendCleanupCandidate{p, lastSeen[p.XUID], "over_capacity"})
 		}

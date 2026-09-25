@@ -78,9 +78,10 @@ friendSync:
 ```
 
 `maxFriends` is checked on every friend sync. When friends plus waiting friend
-requests would go over it, or Xbox reports the list as full, the bot removes the
-friends it has seen least recently to make exactly that much room. A lower value
-leaves space for requests that arrive between syncs. Removal ends the friendship
+requests would go over it, the bot removes the friends it has seen least
+recently to make exactly that much room, then accepts the waiting requests. It
+never removes friends below `maxFriends`. A lower value leaves space for
+requests that arrive between syncs. Removal ends the friendship
 in both directions, so a removed player is not followed back. The bot's own
 primary and sub-accounts are never removed.
 
