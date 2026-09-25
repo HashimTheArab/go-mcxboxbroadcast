@@ -122,9 +122,9 @@ func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]Person
 // batches. Successful work from the first half is retained if the second half
 // fails for an unrelated reason such as rate limiting.
 func addFriends(ctx context.Context, client *xblsocial.Client, xuids []string) ([]string, error) {
-	updated, err := client.AddFriends(ctx, xuids)
+	result, err := client.AddFriends(ctx, xuids)
 	if err == nil || len(xuids) == 1 || !isBulkOperationLimit(err) {
-		return updated, err
+		return result.Updated, err
 	}
 
 	middle := len(xuids) / 2

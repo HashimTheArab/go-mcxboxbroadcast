@@ -8,8 +8,8 @@ broadcaster. Put maintenance guidance and implementation constraints here.
 Treat `go.mod` as the source of truth for versions and replacements.
 
 - `go-xsapi/v2` owns Xbox Live MPSD/RTA sessions, social APIs, and presence.
-  It temporarily uses the `HashimTheArab/go-xsapi` fork for a deleted-session
-  fix pending upstream; return to the upstream module once it is merged.
+  It temporarily uses the `HashimTheArab/go-xsapi` fork's `lunar` branch for
+  fixes pending upstream; return to the upstream module once they are merged.
 - `go-nethernet` owns NetherNet/WebRTC transport. It uses the upstream module,
   which contains the networking changes previously maintained in Lunar's fork.
 - `gophertunnel` owns Bedrock protocol handling, signaling, room announcements
