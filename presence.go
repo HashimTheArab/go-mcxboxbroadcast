@@ -11,7 +11,6 @@ import (
 
 const (
 	defaultPresenceHeartbeat = 300 * time.Second
-	minPresenceRetry         = 20 * time.Second
 )
 
 // PresenceClient updates Xbox user presence so the broadcaster account remains
@@ -21,8 +20,6 @@ type PresenceClient struct {
 	Presence *presence.Client
 }
 
-// Update marks the account active and returns when to update next; after a
-// failure that is the service's Retry-After when it gave one.
 func (c PresenceClient) Update(ctx context.Context) (time.Duration, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -34,10 +31,6 @@ func (c PresenceClient) Update(ctx context.Context) (time.Duration, error) {
 	result, err := c.Presence.Update(operationCtx, presence.TitleRequest{State: presence.StateActive})
 	cancel()
 	if err != nil {
-		var responseErr *presence.ResponseError
-		if errors.As(err, &responseErr) && responseErr.RetryAfter > 0 {
-			return max(responseErr.RetryAfter, minPresenceRetry), err
-		}
 		return defaultPresenceHeartbeat, err
 	}
 	if result.HeartbeatAfter <= 0 {
@@ -57,7 +50,7 @@ func (c PresenceClient) Run(ctx context.Context, log *slog.Logger) {
 				return
 			}
 			if log != nil {
-				log.Error("update presence", "err", err, "retry_in", heartbeat)
+				log.Error("update presence", "err", err)
 			}
 		} else if log != nil {
 			log.Debug("presence updated", "next_update", heartbeat)
