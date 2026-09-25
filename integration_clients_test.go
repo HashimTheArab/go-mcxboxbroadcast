@@ -108,16 +108,21 @@ func TestSessionUpdateFailureNotificationIgnoresSuppressFlag(t *testing.T) {
 func TestSessionUpdateFailureNotificationUsesLiveContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
+	var notified bool
 	var gotErr error
 	b := &Broadcaster{
 		ctx: context.Background(),
 		conf: Config{
 			Notifier: fakeNotifier{notify: func(ctx context.Context, _ string) {
+				notified = true
 				gotErr = ctx.Err()
 			}},
 		},
 	}
 	b.notifySessionUpdateFailure(ctx, errors.New("boom"))
+	if !notified {
+		t.Fatal("session update failure was not notified")
+	}
 	if gotErr != nil {
 		t.Fatalf("notification used expired context: %v", gotErr)
 	}
@@ -126,16 +131,21 @@ func TestSessionUpdateFailureNotificationUsesLiveContext(t *testing.T) {
 func TestNotifyUsesLiveContextWhenInputContextIsCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
+	var notified bool
 	var gotErr error
 	b := &Broadcaster{
 		ctx: context.Background(),
 		conf: Config{
 			Notifier: fakeNotifier{notify: func(ctx context.Context, _ string) {
+				notified = true
 				gotErr = ctx.Err()
 			}},
 		},
 	}
 	b.notify(ctx, "message")
+	if !notified {
+		t.Fatal("notification was skipped")
+	}
 	if gotErr != nil {
 		t.Fatalf("notification used canceled context: %v", gotErr)
 	}
@@ -525,8 +535,15 @@ func TestStartAdvertisesOpaqueNetherNetID(t *testing.T) {
 }
 
 func TestStartTimesOutDefaultSignalingDial(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
 	blockingClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		select {}
+		select {
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		case <-release:
+			return nil, errors.New("test finished")
+		}
 	})}
 	b, err := New(Config{
 		Server:               ServerInfo{Host: "127.0.0.1", Port: 19132},
