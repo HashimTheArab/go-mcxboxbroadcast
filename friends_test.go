@@ -505,6 +505,17 @@ func TestFriendClientAcceptSplitsFullListRefusals(t *testing.T) {
 	}
 }
 
+// Only per-person or bulk-size refusals are split; an account-wide one fails the request once.
+func TestFriendClientAcceptDoesNotSplitAccountWideRefusals(t *testing.T) {
+	client, batches := bulkAddServer(t, []string{"1", "2", "3"}, func([]string) *http.Response {
+		return response(http.StatusForbidden, "")
+	})
+	result, err := client.AcceptPendingFriendRequests(context.Background(), nil)
+	if err == nil || len(*batches) != 1 || len(result.Rejected) != 0 || result.Waiting != 3 {
+		t.Fatalf("err=%v batches=%v result=%+v, want one failed request and nobody marked rejected", err, *batches, result)
+	}
+}
+
 func TestFriendClientAcceptSkipsRequests(t *testing.T) {
 	client, batches := bulkAddServer(t, []string{"1", "2"}, updated)
 	result, err := client.AcceptPendingFriendRequests(context.Background(), func(xuid string) bool { return xuid == "1" })

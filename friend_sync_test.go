@@ -842,8 +842,6 @@ func TestFriendSyncFinishesThrottledRemoval(t *testing.T) {
 	})
 }
 
-
-
 // maxFriends leaves room for waiting requests by removing the least recently seen friends.
 func TestFriendSyncKeepsFriendsWithinMaxFriends(t *testing.T) {
 	x := newFakeXbox()
@@ -949,7 +947,6 @@ func TestFriendSyncRestrictedRemovalHonoursRetryAfter(t *testing.T) {
 		t.Fatalf("attempts=%d retry=%s, want 1 attempt and a 1m backoff", attempts, result.unfollowRetryAfter)
 	}
 }
-
 
 // A removal whose follower side failed must survive a restart, or the next process follows the player back.
 func TestFriendSyncFinishesRemovalAfterRestart(t *testing.T) {
@@ -1124,5 +1121,60 @@ func TestFriendSyncCountsThisPassFollowsTowardMaxFriends(t *testing.T) {
 	s.runSync(context.Background(), false)
 	if len(x.following) != 3 || x.following["1"] {
 		t.Fatalf("following = %v, want 3 friends with 1, the least recently seen, removed", x.following)
+	}
+}
+
+// The pending-removal mark must be saved before Xbox changes, and undone if the change fails.
+func TestFriendSyncMarksRemovalBeforeRemoving(t *testing.T) {
+	history := newMemoryHistory()
+	old := time.Now().Add(-20 * 24 * time.Hour).Truncate(time.Second)
+	history.set("100", "42", old)
+	markedFirst, calls := false, 0
+	client := &syncFriendClient{
+		people: []Person{{XUID: "42", IsFollowingCaller: true, IsFollowedByCaller: true}},
+		removeFriend: func(context.Context, string) error {
+			calls++
+			removing, _ := history.Removing(context.Background(), "100")
+			_, markedFirst = removing["42"]
+			return &xblsocial.ResponseError{StatusCode: http.StatusInternalServerError}
+		},
+	}
+	s := &FriendSyncer{Client: client, History: history, Account: "100",
+		Config: FriendSyncConfig{AutoUnfollow: true, Cleanup: FriendCleanupConfig{InactiveDays: 15}}}
+	s.runSync(context.Background(), true)
+	if calls != 1 || !markedFirst {
+		t.Fatalf("RemoveFriend calls=%d marked before=%v, want the mark saved first", calls, markedFirst)
+	}
+	removing, _ := history.Removing(context.Background(), "100")
+	if seen, ok := history.get("100", "42"); len(removing) != 0 || !ok || !seen.Equal(old) {
+		t.Fatalf("after a failed removal marks=%v seen=%v, want the mark undone and the old clock kept", removing, seen)
+	}
+}
+
+// A mark left by a removal that never reached Xbox is dropped while the friendship stands.
+func TestFriendSyncDropsMarkForCurrentFriend(t *testing.T) {
+	x := newFakeXbox()
+	x.befriend("42")
+	history := newMemoryHistory()
+	_ = history.MarkRemoving(context.Background(), "100", time.Now(), "42")
+	s := &FriendSyncer{Client: x.client(), History: history, Account: "100",
+		Config: FriendSyncConfig{AutoFollow: true, AutoUnfollow: true, Cleanup: FriendCleanupConfig{InactiveDays: 15}}}
+	s.runSync(context.Background(), true)
+	if removing, _ := history.Removing(context.Background(), "100"); len(removing) != 0 || !x.following["42"] {
+		t.Fatalf("marks=%v following=%v, want the stale mark dropped and 42 kept", removing, x.following["42"])
+	}
+}
+
+// An account-wide refusal of a bulk accept backs off instead of repeating every pass.
+func TestFriendSyncBacksOffAccountWideAcceptRefusal(t *testing.T) {
+	x := newFakeXbox()
+	x.pending["1"], x.pending["2"] = true, true
+	x.bulkAdd = func([]string) *http.Response { return response(http.StatusForbidden, "") }
+	s := &FriendSyncer{Client: x.client(), Config: FriendSyncConfig{AutoFollow: true}}
+	for range 3 {
+		s.runSync(context.Background(), false)
+	}
+	if x.bulkPosts != 1 || s.state.followRetryUntil.IsZero() {
+		t.Fatalf("bulk posts=%d backoff=%v, want one post then backoff", x.bulkPosts, s.state.followRetryUntil)
 	}
 }

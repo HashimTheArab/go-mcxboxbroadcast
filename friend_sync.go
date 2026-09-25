@@ -309,14 +309,17 @@ func (s *FriendSyncer) acceptPending(ctx context.Context, opts friendSyncOptions
 	}
 	result.requests = requests
 	if err != nil {
-		if delay := retryDelay(err); delay > 0 {
-			var responseErr *xblsocial.ResponseError
-			if errors.As(err, &responseErr) && responseErr.Method == http.MethodGet {
-				// The pending list shares PeopleHub's read quota with Friends.
-				result.readRetryAfter = delay
-			} else {
-				result.followRetryAfter = delay
-			}
+		var responseErr *xblsocial.ResponseError
+		isResponse := errors.As(err, &responseErr)
+		switch delay := retryDelay(err); {
+		case delay > 0 && isResponse && responseErr.Method == http.MethodGet:
+			// The pending list shares PeopleHub's read quota with Friends.
+			result.readRetryAfter = delay
+		case delay > 0:
+			result.followRetryAfter = delay
+		case isResponse && responseErr.StatusCode >= 400 && responseErr.StatusCode < 500:
+			// Xbox refused the request as a whole; don't repeat it every pass.
+			result.followRetryAfter = friendRequestRetryDelay
 		}
 		s.warn(ctx, "accept pending friend requests", "err", err)
 	}
@@ -457,25 +460,41 @@ func (s *FriendSyncer) unfollow(ctx context.Context, p Person, result *friendSyn
 }
 
 // removeFriend ends the account's relationship with p and reports whether it
-// ended. When p's follow of the account could not be dropped too, p is marked
-// in History so a later pass finishes the removal instead of following p back.
+// ended. A follower is marked in History before anything changes on Xbox, so
+// a crash or a failed follower removal leaves a later pass to finish the
+// removal instead of following p back.
 func (s *FriendSyncer) removeFriend(ctx context.Context, p Person, reason string, lastSeen time.Time, result *friendSyncResult) bool {
+	if p.IsFollowingCaller {
+		if err := s.History.MarkRemoving(ctx, s.Account, time.Now(), p.XUID); err != nil {
+			if s.Log != nil {
+				s.Log.Error("record pending friend removal", "xuid", p.XUID, "err", err)
+			}
+			return false
+		}
+	}
 	if err := s.endRelationship(ctx, p); err != nil {
 		s.debug(ctx, "failed to remove friend", "xuid", p.XUID, "gamertag", p.Gamertag, "reason", reason, "err", err)
 		result.unfollowRetryAfter = max(result.unfollowRetryAfter, retryDelay(err))
+		if p.IsFollowingCaller {
+			s.restoreTracking(ctx, p.XUID, lastSeen)
+		}
 		return false
 	}
 	s.info(ctx, "removed friend", "xuid", p.XUID, "gamertag", p.Gamertag, "reason", reason, "last_seen", lastSeen)
 	if !p.IsFollowingCaller {
 		s.forget(ctx, p.XUID)
-		return true
-	}
-	if result.unfollowBlocked() || !s.finishRemoval(ctx, p, result) {
-		if err := s.History.MarkRemoving(ctx, s.Account, time.Now(), p.XUID); err != nil && s.Log != nil {
-			s.Log.Error("record pending friend removal", "xuid", p.XUID, "err", err)
-		}
+	} else if !result.unfollowBlocked() {
+		s.finishRemoval(ctx, p, result)
 	}
 	return true
+}
+
+// restoreTracking undoes a removal mark for a friend who was not removed.
+func (s *FriendSyncer) restoreTracking(ctx context.Context, xuid string, lastSeen time.Time) {
+	s.forget(ctx, xuid)
+	if err := s.History.Track(ctx, s.Account, lastSeen, xuid); err != nil && s.Log != nil {
+		s.Log.Error("record player history", "xuid", xuid, "err", err)
+	}
 }
 
 // endRelationship frees p's slot on the account's list: a one-way follow is
@@ -649,7 +668,11 @@ func (s *FriendSyncer) pruneHistory(ctx context.Context, lastSeen, removing map[
 		}
 	}
 	for xuid := range removing {
-		if _, ok := followers[xuid]; !ok {
+		// A mark for someone who no longer follows needs no finishing; one
+		// for a current friend is left by a removal that never reached Xbox.
+		_, follows := followers[xuid]
+		_, friend := current[xuid]
+		if !follows || friend {
 			gone = append(gone, xuid)
 		}
 	}

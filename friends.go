@@ -135,15 +135,22 @@ func (c FriendClient) acceptFriends(ctx context.Context, xuids []string, byXUID 
 	return c.acceptFriends(ctx, xuids[middle:], byXUID, result)
 }
 
-// isRequestRefusal reports whether err is a client error that may apply to
-// only some people in a bulk request, rather than a rate limit or auth failure.
+// isRequestRefusal reports whether err may apply to only some people in a
+// bulk request, or to its size: a 400 without a code, or a known per-person
+// or bulk-limit code. Other client errors fail the whole request.
 func isRequestRefusal(err error) bool {
 	var responseErr *xblsocial.ResponseError
 	if !errors.As(err, &responseErr) {
 		return false
 	}
-	code := responseErr.StatusCode
-	return code >= 400 && code < 500 && code != http.StatusTooManyRequests && code != http.StatusUnauthorized
+	switch responseErr.Code {
+	case 0:
+		return responseErr.StatusCode == http.StatusBadRequest
+	case 1011, 1015, 1028, 1039, 1049, 1050:
+		return true
+	default:
+		return false
+	}
 }
 
 // Follow follows the XUID, which makes the user a friend when they also follow
