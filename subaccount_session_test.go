@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/df-mc/go-xsapi/v2"
 	"github.com/df-mc/go-xsapi/v2/mpsd"
@@ -363,5 +364,82 @@ func TestBroadcasterRejectsDuplicateIDBeforeCredentialFiltering(t *testing.T) {
 	}
 	if factoryCalls != 0 {
 		t.Fatalf("announcer factory calls = %d, want 0 for ambiguous duplicate ID", factoryCalls)
+	}
+}
+
+// A sub-account whose first publish fails is retried on its own backoff until it publishes.
+func TestUnpublishedSubAccountIsRetriedWithBackoff(t *testing.T) {
+	failures := 2
+	calls := 0
+	b := &Broadcaster{
+		log:       testBroadcasterLogger(),
+		ctx:       context.Background(),
+		started:   true,
+		announcer: &fakeAnnouncer{},
+		conf: Config{
+			XUID:        "100",
+			SubAccounts: []SubAccountConfig{{ID: "sub", Enabled: true, XUID: "200", XBLClient: &xsapi.Client{}}},
+		},
+		subAccountRetryBase: time.Minute,
+		subAccountAnnouncerFactory: func(context.Context, SubAccountConfig, mpsd.SessionReference) (room.Announcer, error) {
+			calls++
+			if calls <= failures {
+				return nil, errors.New("temporary publish failure")
+			}
+			return &fakeAnnouncer{}, nil
+		},
+	}
+	b.mu.Lock()
+	err := b.startSubAccounts(b.ctx, room.Status{})
+	b.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	b.retryUnpublishedSubAccounts(b.ctx)
+	if calls != 1 {
+		t.Fatalf("publish attempts = %d, want the retry held back by its backoff", calls)
+	}
+	b.subAccountRetries["sub"].next = time.Time{}
+	b.retryUnpublishedSubAccounts(b.ctx)
+	if calls != 2 || b.subAccountRetries["sub"].delay != 2*time.Minute {
+		t.Fatalf("attempts = %d, delay = %v; want a second attempt and a doubled backoff", calls, b.subAccountRetries["sub"].delay)
+	}
+	b.subAccountRetries["sub"].next = time.Time{}
+	b.retryUnpublishedSubAccounts(b.ctx)
+	if len(b.subAnnouncers) != 1 || b.subAnnouncers[0].id != "sub" {
+		t.Fatalf("sub-account not published after a successful retry: %#v", b.subAnnouncers)
+	}
+	if _, pending := b.subAccountRetries["sub"]; pending {
+		t.Fatal("published sub-account still has a pending retry")
+	}
+	b.retryUnpublishedSubAccounts(b.ctx)
+	if calls != 3 {
+		t.Fatalf("publish attempts = %d, want no retry once published", calls)
+	}
+}
+
+// Recovering one sub-account must not skip the primary's scheduled metadata update.
+func TestRefreshSessionUpdatesPrimaryAfterSubAccountRecovery(t *testing.T) {
+	primary := &contextCheckingAnnouncer{}
+	b := &Broadcaster{
+		log:           testBroadcasterLogger(),
+		ctx:           context.Background(),
+		started:       true,
+		announcer:     primary,
+		subAnnouncers: []publishedSubAccount{{id: "sub", xuid: "200", announcer: &fakeAnnouncer{}}},
+		conf: Config{
+			XUID:        "100",
+			SubAccounts: []SubAccountConfig{{ID: "sub", Enabled: true, XUID: "200", XBLClient: &xsapi.Client{}}},
+		},
+		subAccountAnnouncerFactory: func(context.Context, SubAccountConfig, mpsd.SessionReference) (room.Announcer, error) {
+			return &fakeAnnouncer{}, nil
+		},
+	}
+	if err := b.refreshSession(sessionHealthIssue{reason: "sub-account session lost", subAccountID: "sub"}); err != nil {
+		t.Fatal(err)
+	}
+	if primary.updates != 1 {
+		t.Fatalf("primary updates = %d after a successful sub-account recovery, want 1", primary.updates)
 	}
 }

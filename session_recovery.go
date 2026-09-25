@@ -11,6 +11,8 @@ const (
 	reconnectBackoffBase    = 5 * time.Second
 	reconnectBackoffMax     = 2 * time.Minute
 	sessionRecoveryAttempts = 6
+	// subAccountRetryTimeout bounds one pass over unpublished sub-accounts.
+	subAccountRetryTimeout = 30 * time.Second
 )
 
 // sessionLoop owns metadata updates and full recovery so the two cannot race
@@ -74,8 +76,9 @@ func (b *Broadcaster) sessionLoop() {
 	}
 }
 
-// refreshSession repairs an unhealthy sub-account, then updates metadata with
-// its own request budget so an optional account cannot consume the primary's time.
+// refreshSession repairs an unhealthy sub-account and retries unpublished ones,
+// then updates metadata, each with its own request budget so optional accounts
+// cannot consume the primary's time.
 func (b *Broadcaster) refreshSession(issue sessionHealthIssue) error {
 	if issue.subAccountID != "" {
 		ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
@@ -85,9 +88,11 @@ func (b *Broadcaster) refreshSession(issue sessionHealthIssue) error {
 			b.log.Error("recover sub-account session health", "sub_account", issue.subAccountID, "reason", issue.reason, "err", err)
 		} else {
 			b.info("sub-account session recovered", "sub_account", issue.subAccountID, "reason", issue.reason)
-			return nil
 		}
 	}
+	retryCtx, cancel := context.WithTimeout(b.ctx, subAccountRetryTimeout)
+	b.retryUnpublishedSubAccounts(retryCtx)
+	cancel()
 	ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
 	defer cancel()
 	return b.Update(ctx)
