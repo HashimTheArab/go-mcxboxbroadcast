@@ -61,8 +61,10 @@ jobs:
       # A re-run or queued run of an older commit publishes only its SHA tags.
       - name: Choose tags
         id: tags
+        shell: bash
         run: |
           head=$(git ls-remote origin refs/heads/main | cut -f1)
+          test -n "$head"
           {
             echo 'standalone<<EOF'
             echo "$DOCKER_IMAGE:$GITHUB_SHA"
