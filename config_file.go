@@ -295,7 +295,7 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	// Some clients join without a NetherNet identity; relay mode verifies those separately.
+	// Some clients join without a NetherNet identity; transfer mode admits them and relay mode refuses them.
 	netherNetListenConfig.AllowAnonymous = true
 	cfg := Config{
 		XBLClient:            in.XBLClient,

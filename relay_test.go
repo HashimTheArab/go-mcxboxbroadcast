@@ -96,6 +96,7 @@ func (c *fakeRelayConn) Close() error {
 
 func (c *fakeRelayConn) Abort() error                       { return c.Close() }
 func (c *fakeRelayConn) LoginKeyProven() bool               { return !c.anonymous }
+func (c *fakeRelayConn) Authenticated() bool                { return c.identity.XUID != "" }
 func (c *fakeRelayConn) ReadPacket() (packet.Packet, error) { return nil, net.ErrClosed }
 func (c *fakeRelayConn) SetReadDeadline(time.Time) error    { return nil }
 func (c *fakeRelayConn) IdentityData() login.IdentityData   { return c.identity }
@@ -240,6 +241,7 @@ func TestBroadcasterRelayUsesResolvedTarget(t *testing.T) {
 
 func TestBroadcasterRelayDisconnectsClientWhenTargetResolutionFails(t *testing.T) {
 	client := newFakeRelayConn()
+	client.identity = login.IdentityData{XUID: "visitor"}
 	dialed := false
 	b := relayTestBroadcaster(&RelayConfig{
 		ResolveTarget: func(context.Context, login.IdentityData, login.ClientData) (string, error) {
@@ -259,6 +261,7 @@ func TestBroadcasterRelayDisconnectsClientWhenTargetResolutionFails(t *testing.T
 
 func TestBroadcasterRelayDisconnectsClientWhenDialFails(t *testing.T) {
 	client := newFakeRelayConn()
+	client.identity = login.IdentityData{XUID: "visitor"}
 	b := relayTestBroadcaster(&RelayConfig{}, func(context.Context, minecraft.Dialer, string, string) (relayServerConn, error) {
 		return nil, errors.New("connection refused")
 	})
@@ -473,92 +476,6 @@ func waitFor(t *testing.T, cond func() bool, msg string) {
 	t.Fatal(msg)
 }
 
-// fakeMemberSession is a published session whose members appear on Sync once joined is set.
-type fakeMemberSession struct {
-	mu      sync.Mutex
-	members map[string]bool
-	joined  string
-	syncs   int
-	// stalled makes Sync wait for its context, like a refresh that never answers.
-	stalled bool
-}
-
-func (s *fakeMemberSession) MemberByXUID(xuid string) (mpsd.MemberDescription, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return mpsd.MemberDescription{}, s.members[xuid]
-}
-
-func (s *fakeMemberSession) Sync(ctx context.Context) error {
-	if s.stalled {
-		<-ctx.Done()
-		return ctx.Err()
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.syncs++
-	if s.joined != "" {
-		s.members[s.joined] = true
-	}
-	return nil
-}
-
-// relayWithSessions relays an anonymous client claiming xuid and reports whether the backend was dialed.
-func relayWithSessions(t *testing.T, xuid string, sessions ...ownedSession) (dialed bool, client *fakeRelayConn) {
-	t.Helper()
-	client = newFakeRelayConn()
-	client.anonymous = true
-	client.identity = login.IdentityData{XUID: xuid}
-	server := newFakeRelayConn()
-	server.Close()
-	b := relayTestBroadcaster(&RelayConfig{}, func(context.Context, minecraft.Dialer, string, string) (relayServerConn, error) {
-		dialed = true
-		return server, nil
-	})
-	b.sessionsOverride = func() []ownedSession { return sessions }
-	b.relay(client)
-	return dialed, client
-}
-
-// An anonymous transport cannot prove the login key, so a replayed login must not reach the backend.
-func TestRelayRejectsAnonymousLoginOutsidePublishedSessions(t *testing.T) {
-	session := &fakeMemberSession{members: map[string]bool{"host": true, "other": true}}
-	dialed, client := relayWithSessions(t, "visitor", ownedSession{owner: "host", session: session})
-	if dialed {
-		t.Fatal("anonymous login from a non-member was relayed to the backend")
-	}
-	assertDisconnected(t, client)
-	if session.syncs != 1 {
-		t.Fatalf("session synced %d times, want one refresh before rejecting", session.syncs)
-	}
-}
-
-// Only the player's own account can join the session, so membership vouches for an anonymous login.
-func TestRelayAcceptsAnonymousSessionMember(t *testing.T) {
-	session := &fakeMemberSession{members: map[string]bool{"host": true, "visitor": true}}
-	if dialed, _ := relayWithSessions(t, "visitor", ownedSession{owner: "host", session: session}); !dialed {
-		t.Fatal("anonymous login from a session member was not relayed")
-	}
-}
-
-// A join can reach the listener before the membership update does, so sessions are re-read first.
-func TestRelayRefreshesSessionsBeforeRejectingAnonymousLogin(t *testing.T) {
-	primary := &fakeMemberSession{members: map[string]bool{"host": true}}
-	sub := &fakeMemberSession{members: map[string]bool{"sub": true}, joined: "visitor"}
-	dialed, _ := relayWithSessions(t, "visitor", ownedSession{owner: "host", session: primary}, ownedSession{owner: "sub", session: sub})
-	if !dialed {
-		t.Fatal("anonymous login was rejected although the refreshed sub-account session lists the player")
-	}
-}
-
-// Every session lists its owner, so a login claiming an owner's XUID proves nothing.
-func TestRelayRejectsAnonymousLoginClaimingSessionOwner(t *testing.T) {
-	session := &fakeMemberSession{members: map[string]bool{"host": true}}
-	if dialed, _ := relayWithSessions(t, "host", ownedSession{owner: "host", session: session}); dialed {
-		t.Fatal("anonymous login claiming the session owner was relayed")
-	}
-}
-
 // stallingRelayConn is a peer that stopped reading: writes and graceful closes block until aborted.
 type stallingRelayConn struct {
 	*fakeRelayConn
@@ -651,69 +568,6 @@ func TestCloseWaitsForStalledRelay(t *testing.T) {
 	}
 }
 
-// A session whose refresh stalls must not delay accepting a player that another refreshed session lists.
-func TestRelayAcceptsMemberDespiteStalledRefresh(t *testing.T) {
-	primary := &fakeMemberSession{members: map[string]bool{"host": true}, stalled: true}
-	sub := &fakeMemberSession{members: map[string]bool{"sub": true}, joined: "visitor"}
-	start := time.Now()
-	dialed, _ := relayWithSessions(t, "visitor", ownedSession{owner: "host", session: primary}, ownedSession{owner: "sub", session: sub})
-	if !dialed {
-		t.Fatal("member of the sub-account session was rejected")
-	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("accepting the member took %v; a stalled refresh of another session held it up", elapsed)
-	}
-}
-
-// Repeated anonymous joins share session re-reads, spaced by the refresh interval.
-func TestRelaySpacesSessionRefreshes(t *testing.T) {
-	var (
-		mu    sync.Mutex
-		syncs []time.Time
-	)
-	session := &recordingMemberSession{fakeMemberSession: fakeMemberSession{members: map[string]bool{"host": true}}, onSync: func() {
-		mu.Lock()
-		syncs = append(syncs, time.Now())
-		mu.Unlock()
-	}}
-	b := relayTestBroadcaster(&RelayConfig{}, func(context.Context, minecraft.Dialer, string, string) (relayServerConn, error) {
-		t.Error("non-member was relayed")
-		return nil, errors.New("unreachable")
-	})
-	b.sessionsOverride = func() []ownedSession { return []ownedSession{{owner: "host", session: session}} }
-	var wg sync.WaitGroup
-	for i := range 2 {
-		client := newFakeRelayConn()
-		client.anonymous = true
-		client.identity = login.IdentityData{XUID: fmt.Sprint("visitor-", i)}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			b.relay(client)
-		}()
-	}
-	wg.Wait()
-	mu.Lock()
-	defer mu.Unlock()
-	if len(syncs) != 2 {
-		t.Fatalf("sessions refreshed %d times, want once per join", len(syncs))
-	}
-	if gap := syncs[1].Sub(syncs[0]); gap < relayRefreshInterval-50*time.Millisecond {
-		t.Fatalf("refreshes %v apart, want at least %v", gap, relayRefreshInterval)
-	}
-}
-
-// recordingMemberSession reports each Sync.
-type recordingMemberSession struct {
-	fakeMemberSession
-	onSync func()
-}
-
-func (s *recordingMemberSession) Sync(ctx context.Context) error {
-	s.onSync()
-	return s.fakeMemberSession.Sync(ctx)
-}
-
 // slowRelayConn delivers writes after a delay and fails them once aborted, like a client on a slow link.
 type slowRelayConn struct {
 	*fakeRelayConn
@@ -745,5 +599,25 @@ func TestRelayDeliversBackendTransferBeforeTeardown(t *testing.T) {
 	}
 	if _, ok := written[0].(*packet.Transfer); !ok {
 		t.Fatalf("client received %T, want Transfer", written[0])
+	}
+}
+
+// A client that did not prove its login key, or has no Xbox identity, must not be relayed as that player.
+func TestRelayRejectsUnprovenLogins(t *testing.T) {
+	for name, client := range map[string]*fakeRelayConn{
+		"anonymous transport": {anonymous: true, identity: login.IdentityData{XUID: "visitor"}},
+		"no xbox identity":    {},
+	} {
+		client.batches, client.closed = make(chan []packet.Packet), make(chan struct{})
+		dialed := false
+		b := relayTestBroadcaster(&RelayConfig{}, func(context.Context, minecraft.Dialer, string, string) (relayServerConn, error) {
+			dialed = true
+			return nil, errors.New("unreachable")
+		})
+		b.relay(client)
+		if dialed {
+			t.Fatalf("%s: relayed a login that may be replayed", name)
+		}
+		assertDisconnected(t, client)
 	}
 }

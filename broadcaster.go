@@ -84,12 +84,6 @@ type Broadcaster struct {
 	relays relaySet
 	// relayDial overrides the backend dial; nil dials with the configured Dialer.
 	relayDial relayDialFunc
-	// sessionsOverride replaces the published sessions read by relay identity checks.
-	sessionsOverride func() []ownedSession
-	// relayRefreshMu serializes session re-reads for anonymous relay clients; relayRefreshed is when the
-	// last one ended.
-	relayRefreshMu sync.Mutex
-	relayRefreshed time.Time
 	// subAccountStartTimeout bounds each sub-account's session publish so a hung
 	// directory or RTA call degrades to a skipped sub-account instead of
 	// blocking broadcaster startup. Zero uses the default.

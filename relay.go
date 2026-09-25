@@ -13,7 +13,6 @@ import (
 	"github.com/sandertv/gophertunnel/minecraft"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/login"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
-	"github.com/sandertv/gophertunnel/minecraft/room"
 	"github.com/sandertv/gophertunnel/minecraft/text"
 )
 
@@ -33,8 +32,9 @@ const (
 // carries the player's verified XUID, so it must trust this relay: Geyser with
 // validate-bedrock-login off, BDS with online-mode off, or a gophertunnel
 // listener with AuthenticationDisabled. Public servers that verify chains
-// cannot be relayed to. Clients whose transport does not prove their login key
-// are relayed only while they are members of a published session.
+// cannot be relayed to. Only clients that prove their login key are relayed:
+// vanilla clients from 1.26.40 send a NetherNet identity, and clients without
+// one can join through transfer mode instead.
 type RelayConfig struct {
 	// ResolveTarget picks the backend address for a client. Nil relays every
 	// client to Config.Server.
@@ -81,6 +81,7 @@ type relayClientConn interface {
 	relayServerConn
 	ClientData() login.ClientData
 	Proto() minecraft.Protocol
+	Authenticated() bool
 	LoginKeyProven() bool
 }
 
@@ -189,9 +190,11 @@ func (b *Broadcaster) relay(conn relayClientConn) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := b.verifyRelayIdentity(ctx, conn); err != nil {
-		b.log.Warn("rejected relay client whose login may be replayed", "xuid", id.XUID, "name", id.DisplayName, "err", err)
-		b.disconnectRelayClient(conn, "We couldn't check your Xbox account. Join again from your friends list.")
+	// NetherNet has no Minecraft encryption, so without a transport identity a Login captured elsewhere could
+	// be replayed and relayed as its player.
+	if !conn.Authenticated() || !conn.LoginKeyProven() {
+		b.info("rejected relay client that did not prove its login key", "xuid", id.XUID, "name", id.DisplayName)
+		b.disconnectRelayClient(conn, "Please update Minecraft to the latest version to join this world.")
 		return
 	}
 	b.relays.add(conn, id.XUID)
@@ -249,121 +252,6 @@ func (b *Broadcaster) relay(conn relayClientConn) {
 	for ; pending > 0; pending-- {
 		<-errs
 	}
-}
-
-const (
-	// relayVerifyTimeout bounds re-reading the published sessions for an anonymous relay client.
-	relayVerifyTimeout = 10 * time.Second
-	// relayRefreshInterval spaces those re-reads, so repeated joins cannot drive Xbox Live requests.
-	relayRefreshInterval = 2 * time.Second
-)
-
-// memberSession is the part of a published MPSD session that relay identity checks read.
-type memberSession interface {
-	MemberByXUID(xuid string) (mpsd.MemberDescription, bool)
-	Sync(ctx context.Context) error
-}
-
-// ownedSession is a published session and the account that owns it.
-type ownedSession struct {
-	owner   string
-	session memberSession
-}
-
-// verifyRelayIdentity returns an error when conn's login may be a replay: the transport did not prove the
-// login key, and the player is not a member of any published session, which only their own account can join.
-func (b *Broadcaster) verifyRelayIdentity(ctx context.Context, conn relayClientConn) error {
-	if conn.LoginKeyProven() {
-		return nil
-	}
-	xuid := conn.IdentityData().XUID
-	if xuid == "" {
-		return errors.New("login carries no xuid")
-	}
-	sessions := b.publishedSessions()
-	if sessionsHaveMember(sessions, xuid) {
-		return nil
-	}
-	// The join can reach the listener before the session change reaches us over RTA. Sessions are re-read in
-	// parallel, so a slow one cannot starve the one that lists the player, and at most once per interval.
-	ctx, cancel := context.WithTimeout(ctx, relayVerifyTimeout)
-	defer cancel()
-	b.relayRefreshMu.Lock()
-	defer b.relayRefreshMu.Unlock()
-	if sessionsHaveMember(sessions, xuid) {
-		return nil // a refresh for another client listed this one
-	}
-	if wait := time.Until(b.relayRefreshed.Add(relayRefreshInterval)); wait > 0 {
-		select {
-		case <-time.After(wait):
-		case <-ctx.Done():
-			return fmt.Errorf("not a member of any published session; refresh not started: %w", ctx.Err())
-		}
-	}
-	defer func() { b.relayRefreshed = time.Now() }()
-	type refresh struct {
-		member bool
-		err    error
-	}
-	refreshed := make(chan refresh, len(sessions))
-	for _, s := range sessions {
-		go func() {
-			err := s.session.Sync(ctx)
-			refreshed <- refresh{member: err == nil && sessionsHaveMember([]ownedSession{s}, xuid), err: err}
-		}()
-	}
-	var syncErr error
-	for range sessions {
-		r := <-refreshed
-		if r.member {
-			return nil
-		}
-		syncErr = errors.Join(syncErr, r.err)
-	}
-	if syncErr != nil {
-		return fmt.Errorf("not a member of any published session; refresh failed: %w", syncErr)
-	}
-	return errors.New("not a member of any published session")
-}
-
-// sessionsHaveMember reports whether xuid is a member of a session it does not own.
-func sessionsHaveMember(sessions []ownedSession, xuid string) bool {
-	for _, s := range sessions {
-		if s.owner == xuid {
-			continue
-		}
-		if _, ok := s.session.MemberByXUID(xuid); ok {
-			return true
-		}
-	}
-	return false
-}
-
-// publishedSessions returns the primary and sub-account sessions currently published.
-func (b *Broadcaster) publishedSessions() []ownedSession {
-	if b.sessionsOverride != nil {
-		return b.sessionsOverride()
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	var sessions []ownedSession
-	add := func(announcer room.Announcer, owner string) {
-		xbl, ok := xblAnnouncer(announcer)
-		if !ok {
-			return
-		}
-		xbl.Lock()
-		session := xbl.Session
-		xbl.Unlock()
-		if session != nil && session.Context().Err() == nil {
-			sessions = append(sessions, ownedSession{owner: owner, session: session})
-		}
-	}
-	add(b.announcer, b.primaryXUID())
-	for _, sub := range b.subAnnouncers {
-		add(sub.announcer, sub.xuid)
-	}
-	return sessions
 }
 
 func (b *Broadcaster) resolveRelayTarget(ctx context.Context, id login.IdentityData, client login.ClientData) (string, error) {
