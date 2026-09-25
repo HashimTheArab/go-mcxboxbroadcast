@@ -82,6 +82,31 @@ func TestPresenceClientUpdateDefaultsHeartbeatWhenHeaderInvalid(t *testing.T) {
 	}
 }
 
+// A throttled presence update waits as long as the service asks, not the fixed heartbeat.
+func TestPresenceClientUpdateHonoursRetryAfter(t *testing.T) {
+	for _, tt := range []struct {
+		retryAfter string
+		want       time.Duration
+	}{
+		{"600", 600 * time.Second},
+		{"1", minPresenceRetry},
+		{"", defaultPresenceHeartbeat},
+	} {
+		client := PresenceClient{
+			Presence: presence.New(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				resp := response(http.StatusTooManyRequests, "")
+				resp.Header.Set("Retry-After", tt.retryAfter)
+				resp.Request = req
+				return resp, nil
+			})}, xsts.UserInfo{XUID: "1"}),
+		}
+		next, err := client.Update(context.Background())
+		if err == nil || next != tt.want {
+			t.Fatalf("Retry-After %q: next update in %s (err %v), want %s", tt.retryAfter, next, err, tt.want)
+		}
+	}
+}
+
 func TestPresenceClientUpdateBoundsRequestContext(t *testing.T) {
 	client := PresenceClient{
 		Presence: presence.New(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {

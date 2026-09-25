@@ -226,22 +226,31 @@ func TestBroadcasterStartSubAccountsStopsQuietlyOnContextCancel(t *testing.T) {
 	}
 }
 
-func TestBroadcasterPrimarySyncerDisablesPruningWithSubAccountSyncers(t *testing.T) {
+// Each syncer keys history by its own account and never removes any bot account.
+func TestBroadcasterFriendSyncerKeysHistoryByAccount(t *testing.T) {
 	conf := Config{
-		XBLClient:  &xsapi.Client{},
-		XUID:       "100",
-		FriendSync: &FriendSyncConfig{AutoFollow: true, ExpiryEnabled: true},
+		XBLClient:   &xsapi.Client{},
+		XUID:        "100",
+		FriendSync:  &FriendSyncConfig{AutoFollow: true, Cleanup: FriendCleanupConfig{InactiveDays: 15}},
+		SubAccounts: []SubAccountConfig{{ID: "sub", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "200"}},
 	}
-
-	solo := &Broadcaster{log: testBroadcasterLogger(), conf: conf}
-	if !solo.friendSyncer().PruneHistory {
-		t.Fatal("primary syncer should prune when it owns the history store alone")
+	syncer := (&Broadcaster{log: testBroadcasterLogger(), conf: conf}).friendSyncer()
+	if syncer.Account != "100" {
+		t.Fatalf("primary syncer account = %q, want 100", syncer.Account)
 	}
+	if got := strings.Join(syncer.OwnAccounts, ","); got != "100,200" {
+		t.Fatalf("own accounts = %q, want 100,200", got)
+	}
+}
 
-	conf.SubAccounts = []SubAccountConfig{{ID: "sub", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "200"}}
-	shared := &Broadcaster{log: testBroadcasterLogger(), conf: conf}
-	if shared.friendSyncer().PruneHistory {
-		t.Fatal("primary syncer must not prune a history store shared with sub-account syncers")
+func TestNewRejectsFriendLimitAboveXboxCap(t *testing.T) {
+	_, err := New(Config{
+		XBLTokenSource: staticTokenSource{},
+		Server:         ServerInfo{Host: "127.0.0.1", Port: 19132},
+		FriendSync:     &FriendSyncConfig{Cleanup: FriendCleanupConfig{MaxFriends: XboxFriendLimit + 1}},
+	})
+	if err == nil {
+		t.Fatal("expected maxFriends above the Xbox friend limit to be rejected")
 	}
 }
 

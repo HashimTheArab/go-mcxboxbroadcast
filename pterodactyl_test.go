@@ -2,6 +2,7 @@ package broadcaster
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -94,6 +95,9 @@ func TestPterodactylArtifacts(t *testing.T) {
 		if !strings.Contains(egg.Scripts.Installation.Script, want) {
 			t.Fatalf("installation script does not contain %q", want)
 		}
+	}
+	if want := fmt.Sprintf("configVersion: %d\n", CurrentConfigVersion); !strings.Contains(egg.Scripts.Installation.Script, want) {
+		t.Fatalf("installation script does not write %q", want)
 	}
 	if strings.Contains(egg.Scripts.Installation.Script, "signalingMode:") {
 		t.Fatal("installation script should rely on the default signaling mode")

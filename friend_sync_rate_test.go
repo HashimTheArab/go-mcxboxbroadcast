@@ -76,7 +76,7 @@ func TestFriendSyncReadRetryRunsWithoutAnotherTrigger(t *testing.T) {
 		})
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		go (FriendSyncer{Client: client, Config: FriendSyncConfig{
+		go (&FriendSyncer{Client: client, Config: FriendSyncConfig{
 			AutoFollow: true, UpdateInterval: time.Hour}}).Run(ctx)
 		synctest.Wait()
 		assertFriendRateReads(t, reads, 0, pendingRequestsURL)
@@ -100,7 +100,7 @@ func TestFriendSyncTriggerSpacingStartsAfterPassCompletes(t *testing.T) {
 		trigger := make(chan struct{}, 16)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		go (FriendSyncer{Client: client, Trigger: trigger, Config: FriendSyncConfig{
+		go (&FriendSyncer{Client: client, Trigger: trigger, Config: FriendSyncConfig{
 			AutoFollow: true, UpdateInterval: time.Hour}}).Run(ctx)
 		synctest.Wait()
 		assertFriendRateReads(t, reads, 0, friendRateReadURLs...)
@@ -131,10 +131,10 @@ func TestFriendSyncTriggerSpacingStartsAfterPassCompletes(t *testing.T) {
 	})
 }
 
-func TestFriendSyncCoalescesPollExpiryAndTrigger(t *testing.T) {
+func TestFriendSyncCoalescesPollCleanupAndTrigger(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		passes := make(chan timedFriendRead, 16)
-		expiries := make(chan timedFriendRead, 16)
+		cleanups := make(chan timedFriendRead, 16)
 		start := time.Now()
 		client := &syncFriendClient{people: []Person{{XUID: "123", IsFollowedByCaller: true, IsFollowingCaller: true}},
 			accept: func(context.Context) ([]Person, error) {
@@ -144,12 +144,12 @@ func TestFriendSyncCoalescesPollExpiryAndTrigger(t *testing.T) {
 		trigger := make(chan struct{}, 16)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		go (FriendSyncer{Client: client, Trigger: trigger, History: &friendRateHistory{start, expiries},
-			Config: FriendSyncConfig{AutoFollow: true, ExpiryEnabled: true,
-				UpdateInterval: 20 * time.Second, ExpiryCheck: 20 * time.Second}}).Run(ctx)
+		go (&FriendSyncer{Client: client, Trigger: trigger, History: &friendRateHistory{start, cleanups},
+			Config: FriendSyncConfig{AutoFollow: true, UpdateInterval: 20 * time.Second,
+				Cleanup: FriendCleanupConfig{InactiveDays: 15, Interval: 20 * time.Second}}}).Run(ctx)
 		synctest.Wait()
 		assertFriendRateReads(t, passes, 0, "pass")
-		assertFriendRateReads(t, expiries, 0, "expiry")
+		assertFriendRateReads(t, cleanups, 0, "cleanup")
 		time.Sleep(19 * time.Second)
 		for range cap(trigger) {
 			trigger <- struct{}{}
@@ -160,7 +160,7 @@ func TestFriendSyncCoalescesPollExpiryAndTrigger(t *testing.T) {
 			time.Sleep(at - time.Since(start))
 			synctest.Wait()
 			assertFriendRateReads(t, passes, at, "pass")
-			assertFriendRateReads(t, expiries, at, "expiry")
+			assertFriendRateReads(t, cleanups, at, "cleanup")
 		}
 	})
 }
@@ -205,17 +205,18 @@ func assertFriendRateReads(t *testing.T, reads <-chan timedFriendRead, at time.D
 	}
 }
 
-// friendRateHistory records expiry scans while keeping the test friend active.
+// friendRateHistory records cleanup scans while keeping the test friend active.
 type friendRateHistory struct {
 	start time.Time
 	reads chan<- timedFriendRead
 }
 
-// LastSeen records that expiry ran and returns a recent visit so no removal is needed.
-func (h *friendRateHistory) LastSeen(context.Context, string) (time.Time, bool, error) {
-	h.reads <- timedFriendRead{"expiry", time.Since(h.start)}
-	return time.Now(), true, nil
+// LastSeen records that cleanup ran and returns a recent visit so no removal is needed.
+func (h *friendRateHistory) LastSeen(context.Context, string) (map[string]time.Time, error) {
+	h.reads <- timedFriendRead{"cleanup", time.Since(h.start)}
+	return map[string]time.Time{"123": time.Now()}, nil
 }
 
-// Clear satisfies HistoryStore; the active test friend never needs removal.
-func (h *friendRateHistory) Clear(context.Context, string) error { return nil }
+func (h *friendRateHistory) Track(context.Context, string, time.Time, ...string) error { return nil }
+func (h *friendRateHistory) Seen(context.Context, string, time.Time) error             { return nil }
+func (h *friendRateHistory) Forget(context.Context, string, ...string) error           { return nil }

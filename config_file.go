@@ -20,7 +20,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const CurrentConfigVersion = 3
+const CurrentConfigVersion = 4
 
 type ConfigFile struct {
 	ConfigVersion                int                `yaml:"configVersion" toml:"configVersion"`
@@ -81,19 +81,35 @@ type SessionInfoFile struct {
 }
 
 type FriendFileConfig struct {
-	UpdateInterval int              `yaml:"updateInterval" toml:"updateInterval"`
-	AutoFollow     bool             `yaml:"autoFollow" toml:"autoFollow"`
-	AutoUnfollow   bool             `yaml:"autoUnfollow" toml:"autoUnfollow"`
-	InitialInvite  bool             `yaml:"initialInvite" toml:"initialInvite"`
-	Expiry         FriendExpiryFile `yaml:"expiry" toml:"expiry"`
+	UpdateInterval int               `yaml:"updateInterval" toml:"updateInterval"`
+	AutoFollow     bool              `yaml:"autoFollow" toml:"autoFollow"`
+	AutoUnfollow   bool              `yaml:"autoUnfollow" toml:"autoUnfollow"`
+	InitialInvite  bool              `yaml:"initialInvite" toml:"initialInvite"`
+	Cleanup        FriendCleanupFile `yaml:"cleanup" toml:"cleanup"`
 }
 
-type FriendExpiryFile struct {
+// FriendCleanupFile is the file form of FriendCleanupConfig, with Interval in seconds.
+type FriendCleanupFile struct {
+	InactiveDays int    `yaml:"inactiveDays" toml:"inactiveDays"`
+	MaxFriends   int    `yaml:"maxFriends" toml:"maxFriends"`
+	Interval     int    `yaml:"interval" toml:"interval"`
+	HistoryPath  string `yaml:"historyPath" toml:"historyPath"`
+}
+
+// friendExpiryFile is the friendSync.expiry block that configVersion 4
+// replaced with friendSync.cleanup.
+type friendExpiryFile struct {
 	Enabled     bool   `yaml:"enabled" toml:"enabled"`
 	Days        int    `yaml:"days" toml:"days"`
 	Check       int    `yaml:"check" toml:"check"`
 	HistoryPath string `yaml:"historyPath" toml:"historyPath"`
 }
+
+const (
+	defaultFriendInactiveDays    = 15
+	defaultFriendCleanupInterval = 1800
+	defaultFriendHistoryPath     = "cache/player_history.json"
+)
 
 type NotificationConfig struct {
 	Enabled    bool   `yaml:"enabled" toml:"enabled"`
@@ -158,11 +174,11 @@ func DefaultConfigFile() ConfigFile {
 			AutoFollow:     true,
 			AutoUnfollow:   true,
 			InitialInvite:  true,
-			Expiry: FriendExpiryFile{
-				Enabled:     true,
-				Days:        15,
-				Check:       1800,
-				HistoryPath: "cache/player_history.json",
+			Cleanup: FriendCleanupFile{
+				InactiveDays: defaultFriendInactiveDays,
+				MaxFriends:   950,
+				Interval:     defaultFriendCleanupInterval,
+				HistoryPath:  defaultFriendHistoryPath,
 			},
 		},
 		Notifications: NotificationConfig{},
@@ -230,8 +246,12 @@ func LoadConfigFile(path string) (ConfigFile, error) {
 		return ConfigFile{}, err
 	}
 	loadedVersion := cfg.ConfigVersion
+	migratedExpiry, err := cfg.migrateFriendExpiry(path, data, loadedVersion)
+	if err != nil {
+		return ConfigFile{}, err
+	}
 	cfg.migrate()
-	if loadedVersion != cfg.ConfigVersion {
+	if loadedVersion != cfg.ConfigVersion || migratedExpiry {
 		if err := SaveConfigFile(path, cfg); err != nil {
 			cfg.Notes = append(cfg.Notes, fmt.Sprintf("could not persist migrated config: %v", err))
 		}
@@ -262,20 +282,59 @@ func (c *ConfigFile) migrate() {
 		c.note("friendSync.updateInterval %d is below the 20 second minimum; using 20", c.FriendSync.UpdateInterval)
 		c.FriendSync.UpdateInterval = 20
 	}
-	if c.FriendSync.Expiry.Days <= 0 {
-		c.note("friendSync.expiry.days %d is invalid; using 15", c.FriendSync.Expiry.Days)
-		c.FriendSync.Expiry.Days = 15
+	cleanup := &c.FriendSync.Cleanup
+	if cleanup.Interval <= 0 {
+		c.note("friendSync.cleanup.interval %d is invalid; using %d", cleanup.Interval, defaultFriendCleanupInterval)
+		cleanup.Interval = defaultFriendCleanupInterval
 	}
-	if c.FriendSync.Expiry.Check <= 0 {
-		c.note("friendSync.expiry.check %d is invalid; using 1800", c.FriendSync.Expiry.Check)
-		c.FriendSync.Expiry.Check = 1800
+	if cleanup.HistoryPath == "" {
+		cleanup.HistoryPath = defaultFriendHistoryPath
 	}
-	if c.FriendSync.Expiry.HistoryPath == "" {
-		c.FriendSync.Expiry.HistoryPath = "cache/player_history.json"
+	if cleanup.MaxFriends == XboxFriendLimit {
+		c.note("friendSync.cleanup.maxFriends %d is the Xbox friend limit, so new friend requests can fail until cleanup runs; a lower value keeps room for them", cleanup.MaxFriends)
 	}
 	if c.Gallery.ImagePath == "" {
 		c.Gallery.ImagePath = "screenshot.jpg"
 	}
+}
+
+// migrateFriendExpiry turns friendSync.expiry, which version 4 replaced, into
+// friendSync.cleanup the way the old loader read it. maxFriends stays off so
+// existing deployments keep their behaviour until they opt in. It reports
+// whether it migrated anything.
+func (c *ConfigFile) migrateFriendExpiry(path string, data []byte, loadedVersion int) (bool, error) {
+	var present struct {
+		FriendSync struct {
+			Expiry  *friendExpiryFile  `yaml:"expiry" toml:"expiry"`
+			Cleanup *FriendCleanupFile `yaml:"cleanup" toml:"cleanup"`
+		} `yaml:"friendSync" toml:"friendSync"`
+	}
+	if err := decodeConfig(path, data, &present); err != nil {
+		return false, err
+	}
+	if present.FriendSync.Cleanup != nil || (present.FriendSync.Expiry == nil && loadedVersion >= 4) {
+		return false, nil
+	}
+	legacy := struct {
+		FriendSync struct {
+			Expiry friendExpiryFile `yaml:"expiry" toml:"expiry"`
+		} `yaml:"friendSync" toml:"friendSync"`
+	}{}
+	legacy.FriendSync.Expiry = friendExpiryFile{Enabled: true, Days: defaultFriendInactiveDays, Check: defaultFriendCleanupInterval, HistoryPath: defaultFriendHistoryPath}
+	if err := decodeConfig(path, data, &legacy); err != nil {
+		return false, err
+	}
+	expiry := legacy.FriendSync.Expiry
+	cleanup := FriendCleanupFile{Interval: expiry.Check, HistoryPath: expiry.HistoryPath}
+	if expiry.Enabled {
+		cleanup.InactiveDays = expiry.Days
+		if cleanup.InactiveDays <= 0 {
+			cleanup.InactiveDays = defaultFriendInactiveDays
+		}
+	}
+	c.FriendSync.Cleanup = cleanup
+	c.note("migrated friendSync.expiry to friendSync.cleanup (inactiveDays %d); set friendSync.cleanup.maxFriends to keep room for new friends", cleanup.InactiveDays)
+	return true, nil
 }
 
 func (c *ConfigFile) note(format string, args ...any) {
@@ -326,8 +385,10 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 		SuppressSessionUpdateMessage: c.SuppressSessionUpdateMessage,
 		FriendSync:                   c.FriendSync.runtime(),
 	}
-	if c.FriendSync.Expiry.Enabled {
-		cfg.FriendHistory = NewFileHistoryStore(resolvePath(in.BaseDir, c.FriendSync.Expiry.HistoryPath))
+	if cfg.FriendSync != nil && cfg.FriendSync.Cleanup.enabled() {
+		history := NewFileHistoryStore(resolvePath(in.BaseDir, c.FriendSync.Cleanup.HistoryPath))
+		history.Log = in.Log
+		cfg.FriendHistory = history
 	}
 	if c.Relay.Enabled {
 		cfg.Relay = &RelayConfig{}
@@ -368,7 +429,12 @@ func (r ICEPortRangeFile) listenConfig() (nethernet.ListenConfig, error) {
 }
 
 func (f FriendFileConfig) runtime() *FriendSyncConfig {
-	if !f.AutoFollow && !f.AutoUnfollow && !f.Expiry.Enabled {
+	cleanup := FriendCleanupConfig{
+		InactiveDays: f.Cleanup.InactiveDays,
+		MaxFriends:   f.Cleanup.MaxFriends,
+		Interval:     time.Duration(f.Cleanup.Interval) * time.Second,
+	}
+	if !f.AutoFollow && !f.AutoUnfollow && !cleanup.enabled() {
 		return nil
 	}
 	return &FriendSyncConfig{
@@ -376,13 +442,11 @@ func (f FriendFileConfig) runtime() *FriendSyncConfig {
 		AutoFollow:     f.AutoFollow,
 		AutoUnfollow:   f.AutoUnfollow,
 		InitialInvite:  f.InitialInvite,
-		ExpiryEnabled:  f.Expiry.Enabled,
-		ExpiryDays:     f.Expiry.Days,
-		ExpiryCheck:    time.Duration(f.Expiry.Check) * time.Second,
+		Cleanup:        cleanup,
 	}
 }
 
-func decodeConfig(path string, data []byte, out *ConfigFile) error {
+func decodeConfig(path string, data []byte, out any) error {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".toml":
 		return toml.Unmarshal(data, out)

@@ -133,6 +133,18 @@ func New(conf Config) (*Broadcaster, error) {
 	if err := conf.Relay.validate(); err != nil {
 		return nil, err
 	}
+	if conf.FriendSync != nil {
+		if err := conf.FriendSync.Cleanup.validate(); err != nil {
+			return nil, err
+		}
+	}
+	for _, account := range conf.SubAccounts {
+		if account.FriendSync != nil {
+			if err := account.FriendSync.Cleanup.validate(); err != nil {
+				return nil, fmt.Errorf("sub-account %q: %w", account.ID, err)
+			}
+		}
+	}
 	mode, err := normalizeSignalingMode(conf.SignalingMode)
 	if err != nil {
 		return nil, err
@@ -283,7 +295,8 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 			"auto_follow", b.conf.FriendSync.AutoFollow,
 			"auto_unfollow", b.conf.FriendSync.AutoUnfollow,
 			"initial_invite", b.conf.FriendSync.InitialInvite,
-			"expiry_enabled", b.conf.FriendSync.ExpiryEnabled,
+			"cleanup_inactive_days", b.conf.FriendSync.Cleanup.InactiveDays,
+			"cleanup_max_friends", b.conf.FriendSync.Cleanup.MaxFriends,
 		)
 		syncer := b.friendSyncer()
 		syncer.Trigger = b.startSocialSubscription(b.conf.XBLClient, b.conf.FriendSync, b.log)
@@ -314,19 +327,13 @@ func (b *Broadcaster) enabledSubAccounts() (accounts []*SubAccountConfig, duplic
 	return accounts, duplicates
 }
 
-// subAccountFriendSyncActive reports whether any enabled sub-account runs a
-// friend syncer sharing the primary's history store.
-func (b *Broadcaster) subAccountFriendSyncActive() bool {
-	accounts, _ := b.enabledSubAccounts()
-	for _, account := range accounts {
-		if !subAccountHasXBLCredentials(*account) {
-			continue
-		}
-		if account.FriendSync != nil || b.conf.FriendSync != nil {
-			return true
-		}
+// ownXUIDs returns the XUIDs of the primary and every configured sub-account.
+func (b *Broadcaster) ownXUIDs() []string {
+	xuids := []string{b.primaryXUID()}
+	for _, account := range b.conf.SubAccounts {
+		xuids = append(xuids, accountXUID(account))
 	}
-	return false
+	return xuids
 }
 
 // startSubAccountFriendSync runs a friend syncer per enabled sub-account so
@@ -346,13 +353,15 @@ func (b *Broadcaster) startSubAccountFriendSync() {
 			continue
 		}
 		syncLog := b.log.With("sub_account", account.ID)
-		syncer := FriendSyncer{
-			Client:   b.friendClientFor(account.XBLClient),
-			Config:   *conf,
-			History:  b.conf.FriendHistory,
-			Notifier: b.conf.Notifier,
-			Trigger:  b.startSocialSubscription(account.XBLClient, conf, syncLog),
-			Log:      syncLog,
+		syncer := &FriendSyncer{
+			Client:      b.friendClientFor(account.XBLClient),
+			Config:      *conf,
+			History:     b.conf.FriendHistory,
+			Account:     accountXUID(*account),
+			OwnAccounts: b.ownXUIDs(),
+			Notifier:    b.conf.Notifier,
+			Trigger:     b.startSocialSubscription(account.XBLClient, conf, syncLog),
+			Log:         syncLog,
 		}
 		if conf.InitialInvite {
 			syncer.Inviter = &subAccountInviter{b: b, id: account.ID}
@@ -363,8 +372,7 @@ func (b *Broadcaster) startSubAccountFriendSync() {
 }
 
 // logSocialSummary logs the authenticated account and its friend usage at
-// startup, mirroring MCXboxBroadcast's "N/2000 friends" line. The count comes
-// from the friend list like MCXboxBroadcast; the social summary's
+// startup. The count comes from the friend list; the social summary's
 // targetFollowingCount is unreliable for the caller's own profile.
 func (b *Broadcaster) logSocialSummary() {
 	if !hasSocialClient(b.conf.XBLClient) {
@@ -372,15 +380,26 @@ func (b *Broadcaster) logSocialSummary() {
 	}
 	ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
 	defer cancel()
-	friends, err := b.friendClientFor(b.conf.XBLClient).Friends(ctx)
+	people, err := b.friendClientFor(b.conf.XBLClient).Friends(ctx)
 	if err != nil {
 		b.debug("fetch friend list for summary", "err", err)
 		return
 	}
+	// Xbox caps the people an account follows; followers are unlimited.
+	friends, followers := 0, 0
+	for _, p := range people {
+		if p.IsFollowedByCaller {
+			friends++
+		}
+		if p.IsFollowingCaller {
+			followers++
+		}
+	}
 	b.info("authenticated to xbox live",
 		"gamertag", b.hostNameFallback(),
 		"xuid", b.primaryXUID(),
-		"friends", fmt.Sprintf("%d/2000", len(friends)),
+		"friends", fmt.Sprintf("%d/%d", friends, XboxFriendLimit),
+		"followers", followers,
 	)
 }
 
@@ -415,18 +434,15 @@ func (b *Broadcaster) presenceClients() []PresenceClient {
 }
 
 // friendSyncer creates a FriendSyncer from the broadcaster's current config.
-func (b *Broadcaster) friendSyncer() FriendSyncer {
-	syncer := FriendSyncer{
-		Client:   b.friendClientFor(b.conf.XBLClient),
-		Config:   *b.conf.FriendSync,
-		History:  b.conf.FriendHistory,
-		Notifier: b.conf.Notifier,
-		// Pruning compares the store against the primary's friend list only,
-		// so it must stay off while sub-account syncers share the store:
-		// people who only friended a sub-account would be pruned and re-seeded
-		// with a fresh expiry clock every pass.
-		PruneHistory: !b.subAccountFriendSyncActive(),
-		Log:          b.log,
+func (b *Broadcaster) friendSyncer() *FriendSyncer {
+	syncer := &FriendSyncer{
+		Client:      b.friendClientFor(b.conf.XBLClient),
+		Config:      *b.conf.FriendSync,
+		History:     b.conf.FriendHistory,
+		Account:     b.primaryXUID(),
+		OwnAccounts: b.ownXUIDs(),
+		Notifier:    b.conf.Notifier,
+		Log:         b.log,
 	}
 	if b.conf.FriendSync.InitialInvite {
 		syncer.Inviter = &broadcasterInviter{b: b}
@@ -1434,8 +1450,8 @@ func (b *Broadcaster) transfer(conn transferConn) {
 		b.log.Error("flush transfer", "xuid", id.XUID, "name", id.DisplayName, "err", err)
 		return
 	}
-	if recorder, ok := b.conf.FriendHistory.(HistoryRecorder); ok && id.XUID != "" {
-		if err := recorder.Seen(b.ctx, id.XUID, time.Now()); err != nil {
+	if b.conf.FriendHistory != nil && id.XUID != "" {
+		if err := b.conf.FriendHistory.Seen(b.ctx, id.XUID, time.Now()); err != nil {
 			b.log.Error("record player history", "xuid", id.XUID, "err", err)
 		}
 	}

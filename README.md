@@ -54,10 +54,7 @@ The config exposes the same operator-facing areas as MCXboxBroadcast:
   world type, and displayed MOTD data (joinability is always
   `joinable_by_friends`, matching MCXboxBroadcast)
 - gallery showcase image upload through `gallery.imagePath`
-- friend sync automation and expiry settings, including last-seen history path
-  (stored as JSON at `friendSync.expiry.historyPath`, not Java's SQLite
-  database — operators migrating from MCXboxBroadcast start with a fresh
-  expiry history)
+- friend sync automation and friend list cleanup (see below)
 - Slack/Discord-compatible webhook notifications
 - primary and sub-account token cache paths
 - optional HTTP proxy URL through `http.proxy`
@@ -65,6 +62,35 @@ The config exposes the same operator-facing areas as MCXboxBroadcast:
   (default) or `jsonrpc` (only when no sub-accounts are enabled).
 - relay mode through `relay.enabled`, which keeps players inside the NetherNet
   session instead of transferring them (see below).
+
+### Friend list cleanup
+
+Xbox allows an account at most 1000 friends. Once the list is full, new players
+can't add the bot. `friendSync.cleanup` keeps room for them:
+
+```yaml
+friendSync:
+  cleanup:
+    inactiveDays: 15   # remove friends not seen for this many days; 0 = off
+    maxFriends: 950    # keep friends plus pending requests at or below this; 0 = off
+    interval: 1800     # seconds between inactive-friend checks
+    historyPath: cache/player_history.json
+```
+
+`maxFriends` is checked on every friend sync. When friends plus waiting friend
+requests would go over it, or Xbox reports the list as full, the bot removes the
+friends it has seen least recently to make exactly that much room. A lower value
+leaves space for requests that arrive between syncs. Removal ends the friendship
+in both directions, so a removed player is not followed back. The bot's own
+primary and sub-accounts are never removed.
+
+"Seen" means the player's last join, or when the bot first tracked them as a
+friend. Each account keeps its own history in the JSON file at `historyPath`.
+This is not Java's SQLite database, so operators migrating from MCXboxBroadcast
+start with a fresh history.
+
+Configs from before `configVersion: 4` are migrated from `friendSync.expiry`.
+They keep their inactivity setting, and `maxFriends` stays `0` until you set it.
 
 ### Session recovery
 

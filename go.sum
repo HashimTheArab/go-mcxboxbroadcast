@@ -16,8 +16,6 @@ github.com/df-mc/go-nethernet v1.0.20-0.20260915174748-4ead02dfc551 h1:BtV2OMkIr
 github.com/df-mc/go-nethernet v1.0.20-0.20260915174748-4ead02dfc551/go.mod h1:11MfQo5F7PDKfHg1H0zM5mMkrCv29jRE0lK5B4egW9w=
 github.com/df-mc/go-playfab/v2 v2.0.3 h1:7L46Zp1Ca17Mmw7Zd5m4kGDDr8XhzGbaEv9SN2GIYdk=
 github.com/df-mc/go-playfab/v2 v2.0.3/go.mod h1:CS3FV3tJlohvGQiX0IJiaYKOVNfy0p778B84oEVyxlw=
-github.com/df-mc/go-xsapi/v2 v2.0.4-0.20260916091843-af826516381a h1:QuPWF+bTv/uapsOa/xdru4P4upADnivV65B1tbUfcO8=
-github.com/df-mc/go-xsapi/v2 v2.0.4-0.20260916091843-af826516381a/go.mod h1:vuSdUfdc95nLo4xvY/mlxIKj5hjB86LhVMF2Q90H4Bs=
 github.com/df-mc/jsonc v1.0.5 h1:O7oh07kbS5AYY+l2Fji6l4h0iHcdjKbxCtK5VlZlLMU=
 github.com/df-mc/jsonc v1.0.5/go.mod h1:+Q++JuCE9IKiP8v7sWImdf/RjQX0nfXyfX6PdfTTmc4=
 github.com/go-gl/mathgl v1.2.0 h1:v2eOj/y1B2afDxF6URV1qCYmo1KW08lAMtTbOn3KXCY=
@@ -30,6 +28,8 @@ github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
 github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
 github.com/hashimthearab/go-raknet v1.15.1-0.20260908193618-2049463566ca h1:C1HGBjObux+PjxQlbfGZ+hj67WSFwnfh+5ath5UH9vo=
 github.com/hashimthearab/go-raknet v1.15.1-0.20260908193618-2049463566ca/go.mod h1:/yysjwfCXm2+2OY8mBazLzcxJ3irnylKCyG3FLgUPVU=
+github.com/hashimthearab/go-xsapi/v2 v2.0.0-20260925112013-7fbf96e47afe h1:58Vcu8o+lptjC8Beb2L0JIhZVnTFxIhQbRwI7a1+kM4=
+github.com/hashimthearab/go-xsapi/v2 v2.0.0-20260925112013-7fbf96e47afe/go.mod h1:vuSdUfdc95nLo4xvY/mlxIKj5hjB86LhVMF2Q90H4Bs=
 github.com/hashimthearab/gophertunnel v1.25.3-0.20260916092601-d5c8a49dde77 h1:GVlBHYVU7x1Wp0AcxuprWjz2K9A5CGo20gMhRtCn3RE=
 github.com/hashimthearab/gophertunnel v1.25.3-0.20260916092601-d5c8a49dde77/go.mod h1:M+013cMvX3f3V8DfbR5q9wsr+y58bk2raBS22TMZ0tU=
 github.com/klauspost/compress v1.18.7 h1:aUyZsS4kH3QTKurYhAOwAHxllVPnOthb3vPfnF1Ehjw=

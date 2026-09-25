@@ -1,6 +1,7 @@
 package broadcaster
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -139,21 +140,24 @@ func (g GalleryClient) Images(ctx context.Context, xuid string) ([]GalleryImage,
 }
 
 func (g GalleryClient) Upload(ctx context.Context, imagePath string, featured bool) (GalleryImage, error) {
-	f, err := os.Open(imagePath)
+	stat, err := os.Stat(imagePath)
 	if err != nil {
 		return GalleryImage{}, err
 	}
-	defer f.Close()
-	req, err := g.request(ctx, http.MethodPost, galleryURL, f)
+	// Read the whole image so the request carries a Content-Length instead of
+	// being sent chunked.
+	data, err := os.ReadFile(imagePath)
+	if err != nil {
+		return GalleryImage{}, err
+	}
+	req, err := g.request(ctx, http.MethodPost, galleryURL, bytes.NewReader(data))
 	if err != nil {
 		return GalleryImage{}, err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("X-Ms-Showcased-Featured", fmt.Sprint(featured))
-	if stat, err := f.Stat(); err == nil {
-		// UTC with milliseconds, matching Java's Instant.toString().
-		req.Header.Set("X-Ms-Showcased-Timetaken", stat.ModTime().UTC().Format("2006-01-02T15:04:05.000Z"))
-	}
+	// UTC with milliseconds, matching Java's Instant.toString().
+	req.Header.Set("X-Ms-Showcased-Timetaken", stat.ModTime().UTC().Format("2006-01-02T15:04:05.000Z"))
 	resp, err := g.client().Do(req)
 	if err != nil {
 		return GalleryImage{}, err
@@ -162,11 +166,11 @@ func (g GalleryClient) Upload(ctx context.Context, imagePath string, featured bo
 	if resp.StatusCode != http.StatusAccepted {
 		return GalleryImage{}, fmt.Errorf("%s %s: %s", req.Method, req.URL, resp.Status)
 	}
-	var data galleryUploadResponse
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+	var uploaded galleryUploadResponse
+	if err := json.NewDecoder(resp.Body).Decode(&uploaded); err != nil {
 		return GalleryImage{}, err
 	}
-	return data.Result, nil
+	return uploaded.Result, nil
 }
 
 func (g GalleryClient) Delete(ctx context.Context, imageID string) error {
