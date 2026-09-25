@@ -1178,3 +1178,20 @@ func TestFriendSyncBacksOffAccountWideAcceptRefusal(t *testing.T) {
 		t.Fatalf("bulk posts=%d backoff=%v, want one post then backoff", x.bulkPosts, s.state.followRetryUntil)
 	}
 }
+
+// A later cleanup that makes room lifts the full-list backoff, so waiting requests aren't blocked for the hour.
+func TestFriendSyncCleanupLiftsListFullBackoff(t *testing.T) {
+	x := newFakeXbox()
+	x.befriend("1", "2", "3")
+	history := newMemoryHistory()
+	history.set("100", "1", time.Now().Add(-20*24*time.Hour))
+	s := &FriendSyncer{Client: x.client(), History: history, Account: "100",
+		Config: FriendSyncConfig{AutoFollow: true, AutoUnfollow: true, Cleanup: FriendCleanupConfig{InactiveDays: 15}}}
+	s.state.autoFollowUntil = time.Now().Add(friendListFullBackoff)
+	if _, again := s.runSync(context.Background(), true); !again {
+		t.Fatal("expected another pass to accept waiting requests")
+	}
+	if x.following["1"] || !s.state.autoFollowUntil.IsZero() {
+		t.Fatalf("1 kept=%v backoff=%v, want 1 removed and the backoff lifted", x.following["1"], s.state.autoFollowUntil)
+	}
+}

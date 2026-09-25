@@ -128,7 +128,10 @@ func (s *friendSyncRunState) record(now time.Time, result friendSyncResult) {
 	if result.unfollowRetryAfter > 0 {
 		s.unfollowRetryUntil = now.Add(result.unfollowRetryAfter)
 	}
-	if result.friendListFull && !result.madeRoom {
+	switch {
+	case result.madeRoom:
+		s.autoFollowUntil = time.Time{} // room was made, so accept again
+	case result.friendListFull:
 		s.autoFollowUntil = now.Add(friendListFullBackoff)
 	}
 }
@@ -166,7 +169,7 @@ type friendSyncResult struct {
 	requests           FriendRequestResult // this pass's accept outcome
 	waiting            int                 // incoming friend requests left pending
 	joined             int                 // friends added this pass but not in its people snapshot
-	madeRoom           bool                // cleanup removed friends after the list was full
+	madeRoom           bool                // cleanup removed at least one friend
 }
 
 // Sync runs one full pass, ignoring backoff from earlier passes.
@@ -331,6 +334,7 @@ func (s *FriendSyncer) acceptPending(ctx context.Context, opts friendSyncOptions
 // and just that request is retried later.
 func (s *FriendSyncer) settleRequests(ctx context.Context, people []Person, opts friendSyncOptions, result *friendSyncResult) {
 	requests := result.requests
+	// Only requests this pass tried to accept count; with auto-follow off none are.
 	result.waiting = requests.Waiting
 	following := make(map[string]struct{}, len(people))
 	for _, p := range people {
@@ -641,9 +645,7 @@ func (s *FriendSyncer) cleanup(ctx context.Context, people []Person, own, unfoll
 			removed++
 		}
 	}
-	if result.friendListFull && removed > 0 {
-		result.madeRoom = true
-	}
+	result.madeRoom = removed > 0
 	return removed
 }
 
@@ -871,14 +873,18 @@ func (s *FriendSyncer) Run(ctx context.Context) {
 // runSync updates backoff and returns any delay needed before reading again,
 // and whether another pass should follow as soon as spacing allows.
 func (s *FriendSyncer) runSync(ctx context.Context, cleanup bool) (time.Duration, bool) {
-	opts := s.state.options(time.Now(), cleanup)
+	now := time.Now()
+	opts := s.state.options(now, cleanup)
+	listFullBackoff := now.Before(s.state.autoFollowUntil)
 	s.debug(ctx, "friend sync tick", "cleanup", cleanup, "auto_follow", opts.autoFollow, "auto_unfollow", opts.autoUnfollow)
 	result, err := s.syncWithOptions(ctx, opts)
 	s.state.record(time.Now(), result)
 	if err != nil && s.Log != nil && !errors.Is(err, context.Canceled) {
 		s.Log.Error("sync friends", "err", err)
 	}
-	return result.readRetryAfter, result.madeRoom
+	// Room made for a full list: accept the waiting requests soon.
+	again := result.madeRoom && (result.friendListFull || listFullBackoff)
+	return result.readRetryAfter, again
 }
 
 func isGuestXUID(xuid string) bool {
