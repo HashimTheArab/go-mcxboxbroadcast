@@ -30,6 +30,7 @@ type fakeRelayConn struct {
 	batches  chan []packet.Packet
 	written  []packet.Packet
 	flushes  int
+	writeErr error // returned by WritePacket, as by a peer that is gone
 	closed   chan struct{}
 	identity login.IdentityData
 	client   login.ClientData
@@ -68,6 +69,9 @@ func (c *fakeRelayConn) SendStartGame(minecraft.GameData) error {
 func (c *fakeRelayConn) WritePacket(pk packet.Packet) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.writeErr != nil {
+		return c.writeErr
+	}
 	c.written = append(c.written, pk)
 	return nil
 }
@@ -177,7 +181,7 @@ func TestBroadcasterRelayDialsWithClientIdentityAndForwardsBothWays(t *testing.T
 	server.Close()
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(relayDrainTimeout + time.Second):
 		t.Fatal("relay did not stop after the server closed")
 	}
 	client.waitClosed(t, "client")
@@ -599,7 +603,7 @@ func TestRelayTeardownAbortsStalledLeg(t *testing.T) {
 	server.fakeRelayConn.Close() // the backend's read side ends
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(relayDrainTimeout + time.Second):
 		t.Fatal("relay teardown hung on the leg blocked writing to a stalled backend")
 	}
 	if b.relays.count() != 0 {
@@ -708,4 +712,38 @@ type recordingMemberSession struct {
 func (s *recordingMemberSession) Sync(ctx context.Context) error {
 	s.onSync()
 	return s.fakeMemberSession.Sync(ctx)
+}
+
+// slowRelayConn delivers writes after a delay and fails them once aborted, like a client on a slow link.
+type slowRelayConn struct {
+	*fakeRelayConn
+}
+
+func (c slowRelayConn) WritePacket(pk packet.Packet) error {
+	time.Sleep(100 * time.Millisecond)
+	if c.isClosed() {
+		return net.ErrClosed
+	}
+	return c.fakeRelayConn.WritePacket(pk)
+}
+
+// A backend's last packet must reach the client even when the other leg notices the backend closing first.
+func TestRelayDeliversBackendTransferBeforeTeardown(t *testing.T) {
+	client := slowRelayConn{newFakeRelayConn([]packet.Packet{&packet.Text{Message: "to a closed backend"}})}
+	client.identity = login.IdentityData{XUID: "visitor"}
+	server := newFakeRelayConn([]packet.Packet{&packet.Transfer{Address: "play.example.net", Port: 19132}})
+	server.writeErr = net.ErrClosed
+	server.Close()
+	b := relayTestBroadcaster(&RelayConfig{}, func(context.Context, minecraft.Dialer, string, string) (relayServerConn, error) {
+		return server, nil
+	})
+
+	b.relay(client)
+	written, _ := client.snapshot()
+	if len(written) != 1 {
+		t.Fatalf("client received %d packets, want the backend's Transfer", len(written))
+	}
+	if _, ok := written[0].(*packet.Transfer); !ok {
+		t.Fatalf("client received %T, want Transfer", written[0])
+	}
 }

@@ -17,7 +17,11 @@ import (
 	"github.com/sandertv/gophertunnel/minecraft/text"
 )
 
-const defaultRelayDialTimeout = 15 * time.Second
+const (
+	defaultRelayDialTimeout = 15 * time.Second
+	// relayDrainTimeout bounds how long one leg may keep forwarding after the other ended.
+	relayDrainTimeout = time.Second
+)
 
 // RelayConfig keeps joined clients inside the NetherNet session and relays
 // their traffic to the backend server instead of transferring them. A relayed
@@ -228,6 +232,16 @@ func (b *Broadcaster) relay(conn relayClientConn) {
 			b.debug("relay ended", "xuid", id.XUID, "name", id.DisplayName, "err", err)
 		}
 	case <-ctx.Done():
+	}
+	if pending == 1 && ctx.Err() == nil {
+		// The other leg may still be delivering what it read before the end, such as a backend's final
+		// Disconnect or Transfer, so it gets a short window to finish.
+		select {
+		case <-errs:
+			pending--
+		case <-time.After(relayDrainTimeout):
+		case <-ctx.Done():
+		}
 	}
 	// Aborting both legs unblocks a pump stuck writing to a peer that stopped reading.
 	_ = conn.Abort()
