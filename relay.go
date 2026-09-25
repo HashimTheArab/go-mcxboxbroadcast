@@ -131,31 +131,37 @@ func (s *relaySet) xuids() map[string]struct{} {
 	return xuids
 }
 
-// sessionOccupancy counts a session's members and those that could be reclaimed by recreating it: members
-// that are neither being relayed nor the session's owner. In transfer mode every joiner is reclaimable.
-func (b *Broadcaster) sessionOccupancy(members iter.Seq2[string, mpsd.MemberDescription], ownerXUID string) (total, reclaimable int) {
+// sessionOccupancy counts a session's members, those being relayed right now, and those recreating the
+// session would reclaim: members that are neither relayed nor its owner. In transfer mode no member is live.
+func (b *Broadcaster) sessionOccupancy(members iter.Seq2[string, mpsd.MemberDescription], ownerXUID string) (total, live, reclaimable int) {
 	relayed := b.relays.xuids()
 	for _, member := range members {
 		total++
 		if member.Constants != nil && member.Constants.System != nil {
 			xuid := member.Constants.System.XUID
-			if _, ok := relayed[xuid]; ok || (xuid != "" && xuid == ownerXUID) {
+			if _, ok := relayed[xuid]; ok {
+				live++
+				continue
+			}
+			if xuid != "" && xuid == ownerXUID {
 				continue
 			}
 		}
 		reclaimable++
 	}
-	return total, reclaimable
+	return total, live, reclaimable
 }
 
-// sessionFullIssue reports why a session needs recreating to admit joiners, or "" when it does not. A
-// session full of live relayed players is left alone, since recreating it reclaims nothing.
+// sessionFullIssue reports why a full session should be recreated, or "" when it should not. Recreating
+// drops every member, and MPSD offers the host no way to remove one, so live relayed players would leave
+// the session and their friends would lose sight of the world. A full session is therefore only recreated
+// when stale members outnumber live ones; otherwise it stays full until players leave.
 func (b *Broadcaster) sessionFullIssue(what string, members iter.Seq2[string, mpsd.MemberDescription], ownerXUID string) string {
-	total, reclaimable := b.sessionOccupancy(members, ownerXUID)
-	if total < sessionMemberRestartThreshold || reclaimable == 0 {
+	total, live, reclaimable := b.sessionOccupancy(members, ownerXUID)
+	if total < sessionMemberRestartThreshold || reclaimable <= live {
 		return ""
 	}
-	return fmt.Sprintf("%s has %d/30 members, %d reclaimable", what, total, reclaimable)
+	return fmt.Sprintf("%s has %d/30 members, %d stale and %d relayed", what, total, reclaimable, live)
 }
 
 // handleClient relays conn when relay mode is configured and transfers it otherwise.

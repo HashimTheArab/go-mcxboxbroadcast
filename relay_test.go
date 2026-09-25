@@ -320,49 +320,52 @@ func TestSessionOccupancyCountsRelayedPlayersAsLive(t *testing.T) {
 	b.relays.add(live, "relayed")
 
 	members := sessionMembers("relayed", "stale", "host")
-	if total, reclaimable := b.sessionOccupancy(members, "host"); total != 4 || reclaimable != 2 {
-		t.Fatalf("occupancy = %d total, %d reclaimable; want 4 and 2 (stale and anonymous)", total, reclaimable)
+	if total, relayed, reclaimable := b.sessionOccupancy(members, "host"); total != 4 || relayed != 1 || reclaimable != 2 {
+		t.Fatalf("occupancy = %d total, %d relayed, %d reclaimable; want 4, 1 and 2 (stale and anonymous)", total, relayed, reclaimable)
 	}
 	b.relays.remove(live)
-	if total, reclaimable := b.sessionOccupancy(members, "host"); total != 4 || reclaimable != 3 {
-		t.Fatalf("occupancy = %d total, %d reclaimable after the relay ended; want 4 and 3", total, reclaimable)
+	if total, relayed, reclaimable := b.sessionOccupancy(members, "host"); total != 4 || relayed != 0 || reclaimable != 3 {
+		t.Fatalf("occupancy = %d total, %d relayed, %d reclaimable after the relay ended; want 4, 0 and 3", total, relayed, reclaimable)
 	}
 }
 
-// A full session is recovered even when live relayed players are among its members.
-func TestSessionFullIssueCountsLiveRelayedMembers(t *testing.T) {
-	b := relayTestBroadcaster(&RelayConfig{}, nil)
-	xuids := make([]string, 29)
-	for i := range xuids {
-		xuids[i] = fmt.Sprint(i)
+// fullSession yields an owner "0" plus stale and relayed members, relaying the latter through b.
+func fullSession(b *Broadcaster, stale, relayed int) iter.Seq2[string, mpsd.MemberDescription] {
+	xuids := []string{"0"}
+	for i := range stale {
+		xuids = append(xuids, fmt.Sprint("stale-", i))
 	}
-	for _, xuid := range xuids[:3] {
+	for i := range relayed {
+		xuid := fmt.Sprint("relayed-", i)
 		b.relays.add(newFakeRelayConn(), xuid)
+		xuids = append(xuids, xuid)
 	}
-	if reason := b.sessionFullIssue("session", sessionMembers(xuids...), "0"); reason == "" {
-		t.Fatal("30-member session with 3 live relayed players was not reported full")
-	}
-}
-
-// A session whose only members are live relayed players and its owner has nothing to reclaim.
-func TestSessionFullIssueIgnoresSessionOfLivePlayers(t *testing.T) {
-	b := relayTestBroadcaster(&RelayConfig{}, nil)
-	xuids := make([]string, 30)
-	for i := range xuids {
-		xuids[i] = fmt.Sprint(i)
-		if i > 0 {
-			b.relays.add(newFakeRelayConn(), xuids[i])
-		}
-	}
-	members := func(yield func(string, mpsd.MemberDescription) bool) {
+	return func(yield func(string, mpsd.MemberDescription) bool) {
 		for _, xuid := range xuids {
 			if !yield(xuid, mpsd.MemberDescription{Constants: &mpsd.MemberConstants{System: &mpsd.MemberConstantsSystem{XUID: xuid}}}) {
 				return
 			}
 		}
 	}
-	if reason := b.sessionFullIssue("session", members, "0"); reason != "" {
-		t.Fatalf("session of live players reported as %q; recreating it reclaims nothing", reason)
+}
+
+// A full session is judged by total membership, and recreated when stale members outnumber live ones.
+func TestSessionFullIssueRecreatesMostlyStaleSession(t *testing.T) {
+	for _, tt := range []struct{ stale, relayed int }{{29, 0}, {26, 3}, {14, 13}} {
+		b := relayTestBroadcaster(&RelayConfig{}, nil)
+		if reason := b.sessionFullIssue("session", fullSession(b, tt.stale, tt.relayed), "0"); reason == "" {
+			t.Fatalf("full session with %d stale and %d relayed members was not recreated", tt.stale, tt.relayed)
+		}
+	}
+}
+
+// Recreating drops live relayed players from the session, so a full session they mostly hold is kept.
+func TestSessionFullIssueKeepsMostlyLiveSession(t *testing.T) {
+	for _, tt := range []struct{ stale, relayed int }{{0, 29}, {1, 26}, {13, 14}} {
+		b := relayTestBroadcaster(&RelayConfig{}, nil)
+		if reason := b.sessionFullIssue("session", fullSession(b, tt.stale, tt.relayed), "0"); reason != "" {
+			t.Fatalf("full session with %d stale and %d relayed members was recreated: %s", tt.stale, tt.relayed, reason)
+		}
 	}
 }
 
