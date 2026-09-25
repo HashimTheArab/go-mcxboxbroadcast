@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -392,5 +393,49 @@ func TestCloseCancelsUpdateWithUnboundedContext(t *testing.T) {
 	}
 	if err := <-updated; !errors.Is(err, context.Canceled) {
 		t.Fatalf("Update = %v, want %v", err, context.Canceled)
+	}
+}
+
+// A session Xbox deleted without notifying RTA is found by the update's
+// check and replaced in the same pass, without reporting an update failure.
+func TestSessionLoopReplacesSessionDeletedWithoutNotification(t *testing.T) {
+	f := newFakeXbox(t)
+	b, nonce := newFakeXboxBroadcaster(t, f)
+	// Settle the joined member's nonce so the next Update writes nothing.
+	if err := b.Update(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	sig := &fakeSignaling{}
+	b.conf.Signaling, b.signaling = sig, sig
+	b.conf.UpdateInterval = 20 * time.Millisecond
+	var notices atomic.Int32
+	b.conf.Notifier = fakeNotifier{notify: func(context.Context, string) { notices.Add(1) }}
+	old := nonce.session()
+
+	f.mu.Lock()
+	f.deleted = true
+	f.mu.Unlock()
+	b.loopWg.Add(1)
+	go func() {
+		defer b.loopWg.Done()
+		b.sessionLoop()
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if session := nonce.session(); session != nil && session != old && session.Context().Err() == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("session deleted by Xbox was not replaced")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	b.cancel()
+	b.loopWg.Wait()
+	if old.Context().Err() == nil {
+		t.Fatal("deleted session handle was not retired")
+	}
+	if n := notices.Load(); n != 0 {
+		t.Fatalf("replacing a deleted session sent %d failure notifications", n)
 	}
 }

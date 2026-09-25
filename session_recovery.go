@@ -63,6 +63,11 @@ func (b *Broadcaster) sessionLoop() {
 			b.warn("session is unhealthy but signaling is statically configured; cannot re-create", "reason", issue.reason)
 		}
 		err := b.refreshSession(issue)
+		if lost := b.sessionHealthIssue(); err != nil && lost.reason == "mpsd session lost" && b.republishPrimarySession(lost) {
+			// Xbox reported the session missing during the update and it was
+			// retired; publish its replacement now instead of counting a failure.
+			err = b.refreshSession(sessionHealthIssue{})
+		}
 		if err == nil {
 			consecutiveFailures = 0
 			continue

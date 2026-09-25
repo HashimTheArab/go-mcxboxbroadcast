@@ -14,8 +14,8 @@ github.com/df-mc/go-nethernet v1.0.24-0.20260925120802-90bfcd1be9a4 h1:LDhOW+PjL
 github.com/df-mc/go-nethernet v1.0.24-0.20260925120802-90bfcd1be9a4/go.mod h1:SFH4cfiLRWUUNGMvQeaOjFfFX4eexTkIfBtp55vJNqY=
 github.com/df-mc/go-playfab/v2 v2.0.3 h1:7L46Zp1Ca17Mmw7Zd5m4kGDDr8XhzGbaEv9SN2GIYdk=
 github.com/df-mc/go-playfab/v2 v2.0.3/go.mod h1:CS3FV3tJlohvGQiX0IJiaYKOVNfy0p778B84oEVyxlw=
-github.com/df-mc/go-xsapi/v2 v2.0.4-0.20260925124756-850defd78d00 h1:C28V1VfNWm7zqjGw3xzrF2+8NL7A2Z6x493/S5W2RX0=
-github.com/df-mc/go-xsapi/v2 v2.0.4-0.20260925124756-850defd78d00/go.mod h1:vuSdUfdc95nLo4xvY/mlxIKj5hjB86LhVMF2Q90H4Bs=
+github.com/df-mc/go-xsapi/v2 v2.0.4-0.20260925130556-58a99d3044b7 h1:S9l2PIK7G6SJyQMUuyRNy6fTOi8R4DTmhQRmeBENe0Q=
+github.com/df-mc/go-xsapi/v2 v2.0.4-0.20260925130556-58a99d3044b7/go.mod h1:vuSdUfdc95nLo4xvY/mlxIKj5hjB86LhVMF2Q90H4Bs=
 github.com/df-mc/jsonc v1.0.5 h1:O7oh07kbS5AYY+l2Fji6l4h0iHcdjKbxCtK5VlZlLMU=
 github.com/df-mc/jsonc v1.0.5/go.mod h1:+Q++JuCE9IKiP8v7sWImdf/RjQX0nfXyfX6PdfTTmc4=
 github.com/go-gl/mathgl v1.2.0 h1:v2eOj/y1B2afDxF6URV1qCYmo1KW08lAMtTbOn3KXCY=
