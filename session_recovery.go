@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 )
 
@@ -47,12 +48,11 @@ func (b *Broadcaster) sessionLoop() {
 			}
 		case <-ticker.C:
 			issue = b.sessionHealthIssue()
-		}
-		if issue.reason != "" && issue.subAccountID == "" {
-			if issue.activity != nil && !b.canRecreateSignaling() {
-				b.reportStaticActivityRecoveryFailure(issue)
-				continue
+			if err := b.retryStaleSessionCloses(); err != nil {
+				b.warn("retry closing replaced xbox live sessions", "err", err)
 			}
+		}
+		if issue.reason != "" && issue.subAccountID == "" && !b.republishPrimarySession(issue) {
 			if b.canRecreateSignaling() {
 				if !b.recoverSession(issue) {
 					return
@@ -89,6 +89,41 @@ func (b *Broadcaster) sessionLoop() {
 	}
 }
 
+// republishPrimarySession discards the primary MPSD session named by issue so
+// the following Update publishes a new one over the existing signaling and
+// listener. It reports false when the announcer cannot republish.
+func (b *Broadcaster) republishPrimarySession(issue sessionHealthIssue) bool {
+	b.mu.Lock()
+	announcer, ok := nonceAnnouncer(b.announcer)
+	b.mu.Unlock()
+	if !ok {
+		return false
+	}
+	session := announcer.session()
+	if issue.activity != nil {
+		if issue.activity.announcer != announcer.XBLAnnouncer {
+			return true
+		}
+		session = issue.activity.session
+	}
+	ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
+	defer cancel()
+	discarded, err := announcer.discardSession(ctx, session)
+	if err != nil {
+		b.log.Error("discard unhealthy xbox live session", "reason", issue.reason, "err", err)
+		return true
+	}
+	if !discarded {
+		return true
+	}
+	b.warn("republishing xbox live session", "reason", issue.reason)
+	if err := session.Close(); err != nil {
+		b.warn("close unhealthy xbox live session", "err", err)
+		b.retainStaleSessions([]io.Closer{session})
+	}
+	return true
+}
+
 // refreshSession repairs an unhealthy sub-account, then updates metadata with
 // its own request budget so an optional account cannot consume the primary's time.
 func (b *Broadcaster) refreshSession(issue sessionHealthIssue) error {
@@ -113,17 +148,6 @@ func (b *Broadcaster) canRecreateSignaling() bool {
 	return b.conf.Signaling == nil
 }
 
-// reportStaticActivityRecoveryFailure reports an unrecoverable primary activity
-// only if the probed publication is still current.
-func (b *Broadcaster) reportStaticActivityRecoveryFailure(issue sessionHealthIssue) {
-	if !b.primaryActivityCurrent(issue.activity) {
-		return
-	}
-	err := errors.New("cannot recover the primary Xbox activity with Config.Signaling; provide SignalingFactory to enable session recovery")
-	b.log.Error("activity recovery failed", "reason", issue.reason, "err", err)
-	b.notify(b.ctx, err.Error())
-}
-
 // recoverSession retries one recovery episode, then stops the broadcaster if
 // rebuilding cannot restore service. The command can then exit for its supervisor
 // to restart it with fresh authentication and client state.
@@ -140,7 +164,7 @@ func (b *Broadcaster) recoverSession(issue sessionHealthIssue) bool {
 		b.mu.Unlock()
 		return true
 	}
-	b.recovering = true
+	b.recovering.Store(true)
 	b.mu.Unlock()
 	b.warn("re-creating xbox live session", "reason", issue.reason)
 	failures := 0
@@ -152,7 +176,7 @@ func (b *Broadcaster) recoverSession(issue sessionHealthIssue) bool {
 		}
 	})
 	b.mu.Lock()
-	b.recovering = false
+	b.recovering.Store(false)
 	if err != nil && b.ctx.Err() == nil {
 		b.failure = fmt.Errorf("Xbox session recovery exhausted after %d attempts (%s): %w", sessionRecoveryAttempts, issue.reason, err)
 		b.cancel()

@@ -133,7 +133,7 @@ func TestBroadcasterStartSubAccountsMutuallyFollowsBeforePublish(t *testing.T) {
 		return &fakeAnnouncer{}, nil
 	}
 
-	if err := b.startSubAccounts(context.Background(), room.Status{}); err != nil {
+	if _, err := b.startSubAccounts(context.Background(), room.Status{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -180,7 +180,7 @@ func TestBroadcasterStartSubAccountsSkipsExistingMutualFollow(t *testing.T) {
 		return &fakeAnnouncer{}, nil
 	}
 
-	if err := b.startSubAccounts(context.Background(), room.Status{}); err != nil {
+	if _, err := b.startSubAccounts(context.Background(), room.Status{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, call := range calls {
@@ -214,7 +214,7 @@ func TestBroadcasterStartSubAccountsStopsQuietlyOnContextCancel(t *testing.T) {
 		return nil, ctx.Err()
 	}
 
-	err := b.startSubAccounts(ctx, room.Status{})
+	_, err := b.startSubAccounts(ctx, room.Status{}, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("startSubAccounts() error = %v, want context.Canceled", err)
 	}
@@ -263,7 +263,7 @@ func TestBroadcasterStartSubAccountsContinuesPastFailingAccount(t *testing.T) {
 		return &fakeAnnouncer{}, nil
 	}
 
-	if err := b.startSubAccounts(context.Background(), room.Status{}); err != nil {
+	if _, err := b.startSubAccounts(context.Background(), room.Status{}, nil); err != nil {
 		t.Fatalf("startSubAccounts() error = %v, want nil (bad account skipped)", err)
 	}
 	if fmt.Sprint(published) != "[good]" {
@@ -291,7 +291,7 @@ func TestBroadcasterStartSubAccountsSkipsMutualFollowWithoutXUIDs(t *testing.T) 
 		return &fakeAnnouncer{}, nil
 	}
 
-	if err := b.startSubAccounts(context.Background(), room.Status{}); err != nil {
+	if _, err := b.startSubAccounts(context.Background(), room.Status{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if httpCalls != 0 {
@@ -321,7 +321,7 @@ func TestBroadcasterStartSubAccountsSkipsEnabledAccountWithoutCredentials(t *tes
 		return &fakeAnnouncer{}, nil
 	}
 
-	if err := b.startSubAccounts(context.Background(), room.Status{}); err != nil {
+	if _, err := b.startSubAccounts(context.Background(), room.Status{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if httpCalls != 0 {
@@ -336,14 +336,11 @@ func TestBroadcasterClearCreatedXBLClientReferences(t *testing.T) {
 	primary := &xsapi.Client{}
 	createdSub := &xsapi.Client{}
 	externalSub := &xsapi.Client{}
-	tokens := staticMinecraftTokenSource{}
 	b := &Broadcaster{
 		xblClient:         primary,
-		minecraftTokens:   tokens,
 		createdXBLClients: []*xsapi.Client{primary, createdSub},
 		conf: Config{
-			XBLClient:            primary,
-			MinecraftTokenSource: tokens,
+			XBLClient: primary,
 			SubAccounts: []SubAccountConfig{
 				{ID: "created", XBLClient: createdSub},
 				{ID: "external", XBLClient: externalSub},
@@ -358,9 +355,6 @@ func TestBroadcasterClearCreatedXBLClientReferences(t *testing.T) {
 	}
 	if b.conf.XBLClient != nil {
 		t.Fatal("created primary config client was not cleared")
-	}
-	if b.minecraftTokens != nil || b.conf.MinecraftTokenSource != nil {
-		t.Fatal("minecraft token source derived from created primary client was not cleared")
 	}
 	if b.conf.SubAccounts[0].XBLClient != nil {
 		t.Fatal("created sub-account client was not cleared")
@@ -1067,7 +1061,8 @@ func TestStartSubAccountsTimeoutDoesNotBlockStartup(t *testing.T) {
 		// re-locking inside the sub-account path deadlocks the test too.
 		b.mu.Lock()
 		defer b.mu.Unlock()
-		done <- b.startSubAccounts(b.ctx, room.Status{})
+		_, err := b.startSubAccounts(b.ctx, room.Status{}, nil)
+		done <- err
 	}()
 	select {
 	case err := <-done:

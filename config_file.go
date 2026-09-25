@@ -33,10 +33,17 @@ type ConfigFile struct {
 	Gallery                      GalleryFileConfig  `yaml:"gallery" toml:"gallery"`
 	Relay                        RelayFileConfig    `yaml:"relay" toml:"relay"`
 	Accounts                     AccountsConfig     `yaml:"accounts" toml:"accounts"`
+	Health                       HealthFileConfig   `yaml:"health,omitempty" toml:"health,omitempty"`
 
 	// Notes lists adjustments applied while loading, such as out-of-range
 	// values that were clamped. Callers should surface them as warnings.
 	Notes []string `yaml:"-" toml:"-"`
+}
+
+// HealthFileConfig configures the optional probe endpoint.
+type HealthFileConfig struct {
+	// Listen is the address serving /healthz and /readyz; empty disables it.
+	Listen string `yaml:"listen,omitempty" toml:"listen,omitempty"`
 }
 
 type HTTPFileConfig struct {

@@ -228,3 +228,25 @@ func TestStatusResetsToConfigWhenQueryFailsWithConfigFallback(t *testing.T) {
 		t.Fatalf("expected config fallback values, got %q/%q", status.WorldName, status.HostName)
 	}
 }
+
+// The room listener's periodic announcement must republish the status Update
+// last resolved, never the startup snapshot.
+func TestRoomListenerAnnouncesStatusResolvedByUpdate(t *testing.T) {
+	announcer := &fakeAnnouncer{}
+	b := &Broadcaster{log: testBroadcasterLogger(), announcer: announcer, started: true,
+		conf: Config{XUID: "100", Relay: &RelayConfig{}, Status: Status{Players: 1, MaxPlayers: 20}}}
+	if err := b.Update(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	listener := b.roomListenConfig(b.announcer).Wrap(fakeNetworkListener{})
+	for range 3 {
+		b.relays.add(newFakeRelayConn(), "visitor")
+	}
+	if err := b.Update(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	listener.ServerStatus(minecraft.ServerStatus{})
+	if got := announcer.Status().MemberCount; got != 3 {
+		t.Fatalf("listener announced member count %d, want the updated 3", got)
+	}
+}

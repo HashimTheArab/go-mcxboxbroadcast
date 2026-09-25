@@ -24,6 +24,9 @@ func (a signalingConnectionAnnouncer) Announce(ctx context.Context, status room.
 	return a.Announcer.Announce(ctx, status)
 }
 
+// Unwrap returns the wrapped announcer.
+func (a signalingConnectionAnnouncer) Unwrap() room.Announcer { return a.Announcer }
+
 // normalizeSignalingMode validates mode and applies the WebSocket default.
 func normalizeSignalingMode(mode SignalingMode) (SignalingMode, error) {
 	switch strings.ToLower(strings.TrimSpace(string(mode))) {

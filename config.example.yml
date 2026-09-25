@@ -57,3 +57,8 @@ relay:
 accounts:
   primaryCachePath: cache/live_token.json
   subAccounts: []
+
+# Serve /healthz and /readyz on this address, for example ":8080". Empty
+# disables the endpoint.
+health:
+  listen: ""

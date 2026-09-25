@@ -4,13 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"iter"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/df-mc/go-nethernet"
@@ -42,31 +46,46 @@ type Broadcaster struct {
 	conf Config
 	log  *slog.Logger
 
-	announcer                  room.Announcer
-	listener                   *minecraft.Listener
-	signaling                  nethernet.Signaling
-	sessionRef                 mpsd.SessionReference
-	sessionConnection          *p2p.Connection
-	subAnnouncers              []publishedSubAccount
-	subAnnouncersByID          map[string]room.Announcer
-	staleSubAnnouncers         []room.Announcer
+	announcer         room.Announcer
+	listener          *minecraft.Listener
+	signaling         nethernet.Signaling
+	sessionRef        mpsd.SessionReference
+	sessionConnection *p2p.Connection
+	subAnnouncers     []publishedSubAccount
+	subAnnouncersByID map[string]room.Announcer
+	// staleSessions holds replaced sessions whose close failed. The session
+	// loop retries them so Xbox does not keep them registered.
+	staleSessions              []io.Closer
 	announcerFactory           func(*Broadcaster) room.Announcer
 	subAccountAnnouncerFactory func(context.Context, SubAccountConfig, mpsd.SessionReference) (room.Announcer, error)
 	xblClient                  *xsapi.Client
-	minecraftTokens            service.TokenSource
-	subMinecraftTokens         map[*xsapi.Client]service.TokenSource
+	minecraftTokens            MinecraftTokenSource // created by the broadcaster, which closes it
+	subMinecraftTokens         map[*xsapi.Client]MinecraftTokenSource
 	createdXBLClients          []*xsapi.Client
 
 	ctx    context.Context
 	cancel context.CancelFunc
-	done   chan struct{}
+	// cancelMu lets Close cancel in-flight session work before waiting for mu.
+	cancelMu sync.Mutex
 
-	mu         sync.Mutex
-	galleryMu  sync.Mutex
-	started    bool
-	failure    error
-	recovering bool
-	acceptWg   sync.WaitGroup
+	mu        sync.Mutex
+	galleryMu sync.Mutex
+	started   bool
+	failure   error
+	// recovering is written under mu and read without it by health checks.
+	recovering atomic.Bool
+	// acceptWg tracks accept loops. Add and Wait both run under mu.
+	acceptWg sync.WaitGroup
+	// loopWg tracks the session loop, which rebuilds the stack without mu.
+	loopWg sync.WaitGroup
+	// staleMu guards staleSessions, which recovery appends to without mu.
+	staleMu sync.Mutex
+	// lastPublished is the unix time in nanoseconds of the last successful
+	// primary session publication; zero until the first one.
+	lastPublished atomic.Int64
+	// resolvedStatus is the status last resolved for the primary session. The
+	// room listener re-announces it so it never reverts a newer Update.
+	resolvedStatus atomic.Pointer[room.Status]
 	// socialWg tracks social subscription cleanup before clients are closed.
 	socialWg sync.WaitGroup
 
@@ -107,10 +126,11 @@ type transferConn interface {
 	IdentityData() login.IdentityData
 }
 
-// defaultSignalingResult holds the result of a default signaling dial.
+// defaultSignalingResult holds the result of a default signaling dial. The
+// created fields are owned by whoever receives the result.
 type defaultSignalingResult struct {
 	signaling     nethernet.Signaling
-	minecraft     service.TokenSource
+	createdTokens MinecraftTokenSource
 	createdClient *xsapi.Client
 	err           error
 }
@@ -175,13 +195,14 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	b.cancelMu.Lock()
 	b.ctx, b.cancel = context.WithCancel(ctx)
-	b.done = make(chan struct{})
+	b.cancelMu.Unlock()
 	b.failure = nil
 	mode, err := b.signalingMode()
 	if err != nil {
 		b.cancel()
-		return errors.Join(err, b.cleanupStartupFailure(false))
+		return errors.Join(err, b.closeOwnedClients())
 	}
 	b.debug("starting broadcaster",
 		"signaling_mode", mode,
@@ -190,88 +211,20 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 		"friend_sync", b.conf.FriendSync != nil,
 		"gallery", b.conf.Gallery != nil && b.conf.Gallery.Enabled,
 	)
-	sig, err := b.signalingFor(b.ctx)
+	stack, err := b.buildSessionStack()
 	if err != nil {
 		b.cancel()
-		return errors.Join(err, b.cleanupStartupFailure(false))
+		return errors.Join(err, b.closeOwnedClients())
 	}
-	b.signaling = sig
-	b.debug("nethernet signaling ready", "signaling_mode", mode, "signaling_type", fmt.Sprintf("%T", sig), "network_id", signalingNetworkID(sig))
-
-	status, err := b.status(b.ctx)
-	if err != nil {
-		b.cancel()
-		return errors.Join(err, b.cleanupStartupFailure(false))
-	}
-	b.debugRoomStatus("resolved room status", status)
-	b.announcer, err = b.newAnnouncer(b.ctx)
-	if err != nil {
-		b.cancel()
-		return errors.Join(err, b.cleanupStartupFailure(false))
-	}
-	b.announcer = loggingAnnouncer{Announcer: b.announcer, log: b.log}
-	connection, err := b.signalingConnection(sig)
-	if err != nil {
-		b.cancel()
-		return errors.Join(err, b.cleanupStartupFailure(true))
-	}
-	if connection != nil {
-		b.sessionConnection = connection
-		b.announcer = signalingConnectionAnnouncer{Announcer: b.announcer, connection: *b.sessionConnection}
-		b.debug("using session signaling connection", "connection_type", connection.Type, "nethernet_id", connection.NetherNetID, "pmsg_id", connection.PlayerMessagingID)
-	} else if len(status.SupportedConnections) == 0 {
-		// Without a signaling connection or caller-provided connections the
-		// session would publish SupportedConnections: null and be unjoinable.
-		b.cancel()
-		err := errors.New("session would publish no supported connections and be unjoinable; configure signaling or provide SupportedConnections via a status provider")
-		return errors.Join(err, b.cleanupStartupFailure(true))
-	}
-	b.info("creating xbox live session")
-	if err := b.announcer.Announce(b.ctx, status); err != nil {
-		b.cancel()
-		err = errors.Join(fmt.Errorf("announce session: %w", err), b.cleanupStartupFailure(true))
-		return err
-	}
-	b.info("created xbox live session")
-	b.debug("starting sub-account sessions", "count", len(b.conf.SubAccounts))
-	if err := b.startSubAccounts(b.ctx, status); err != nil {
-		b.cancel()
-		err = errors.Join(err, b.cleanupStartupFailure(true))
-		return err
-	}
-
-	b.registerNetherNetNetwork(sig, status)
-
-	listenConf := b.minecraftListenConfig(status)
-	b.debug("starting nethernet listener",
-		"listen_network", "nethernet",
-		"auth_disabled", listenConf.AuthenticationDisabled,
-		"server_status_override", !b.roomListenConfig(status).DisableServerStatusOverride,
-		"default_transport_timeout", b.usesDefaultNetherNetConnContext(),
-		"transport_timeout", b.netherNetTransportTimeoutLogValue(),
-	)
-	l, err := listenConf.Listen("nethernet", "")
-	if err != nil {
-		b.cancel()
-		err = errors.Join(fmt.Errorf("listen nethernet: %w", err), b.cleanupStartupFailure(true))
-		return err
-	}
-	b.listener = l
+	b.installSessionStack(stack)
 	b.started = true
-	b.info("nethernet broadcaster started", "network_id", signalingNetworkID(sig), "signaling_mode", mode, "target", b.conf.Server.Address())
+	b.info("nethernet broadcaster started", "network_id", signalingNetworkID(stack.signaling), "signaling_mode", mode, "target", b.conf.Server.Address())
 
-	startListener := b.listener
-	b.acceptWg.Add(1)
+	b.loopWg.Add(1)
 	go func() {
-		defer b.acceptWg.Done()
-		b.acceptListener(startListener)
+		defer b.loopWg.Done()
+		b.sessionLoop()
 	}()
-	go func() {
-		<-b.ctx.Done()
-		b.acceptWg.Wait()
-		close(b.done)
-	}()
-	go b.sessionLoop()
 	presenceClients := b.presenceClients()
 	b.debug("starting presence updates", "count", len(presenceClients), "xuids", presenceClientXUIDs(presenceClients))
 	for _, client := range presenceClients {
@@ -292,6 +245,185 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	b.startSubAccountFriendSync()
 	go b.logSocialSummary()
 	return nil
+}
+
+// sessionStack is the signaling connection, published sessions and listener
+// that recovery replaces together.
+type sessionStack struct {
+	signaling     nethernet.Signaling
+	connection    *p2p.Connection
+	announcer     room.Announcer
+	subAnnouncers []publishedSubAccount
+	listener      *minecraft.Listener
+}
+
+// buildSessionStack dials signaling, publishes the primary and sub-account
+// sessions and starts the listener, closing what it built if a step fails.
+// It does not touch the installed stack, so recovery can run it without b.mu.
+func (b *Broadcaster) buildSessionStack() (stack sessionStack, err error) {
+	defer func() {
+		if err != nil {
+			failed, closeErr := closeSessionStack(stack)
+			b.retainStaleSessions(failed)
+			err = errors.Join(err, closeErr)
+			stack = sessionStack{}
+		}
+	}()
+	mode, err := b.signalingMode()
+	if err != nil {
+		return stack, err
+	}
+	sig, err := b.signalingFor(b.ctx)
+	if err != nil {
+		return stack, fmt.Errorf("create signaling: %w", err)
+	}
+	stack.signaling = sig
+	if sig.Context().Err() != nil {
+		return stack, errors.New("create signaling: signaling context is already done")
+	}
+	b.debug("nethernet signaling ready", "signaling_mode", mode, "signaling_type", fmt.Sprintf("%T", sig), "network_id", signalingNetworkID(sig))
+
+	ctx, cancel := context.WithTimeout(b.ctx, 30*time.Second)
+	defer cancel()
+	status, err := b.status(ctx)
+	if err != nil {
+		return stack, fmt.Errorf("resolve session status: %w", err)
+	}
+	b.debugRoomStatus("resolved room status", status)
+	announcer, err := b.newAnnouncer(ctx)
+	if err != nil {
+		return stack, fmt.Errorf("create announcer: %w", err)
+	}
+	stack.announcer = loggingAnnouncer{Announcer: announcer, log: b.log}
+	connection, err := b.signalingConnection(sig)
+	if err != nil {
+		return stack, err
+	}
+	if connection != nil {
+		stack.connection = connection
+		stack.announcer = signalingConnectionAnnouncer{Announcer: stack.announcer, connection: *connection}
+		b.debug("using session signaling connection", "connection_type", connection.Type, "nethernet_id", connection.NetherNetID, "pmsg_id", connection.PlayerMessagingID)
+	} else if len(status.SupportedConnections) == 0 {
+		// Without a signaling connection or caller-provided connections the
+		// session would publish SupportedConnections: null and be unjoinable.
+		return stack, errors.New("session would publish no supported connections and be unjoinable; configure signaling or provide SupportedConnections via a status provider")
+	}
+	b.resolvedStatus.Store(&status)
+	b.info("creating xbox live session")
+	if err := stack.announcer.Announce(ctx, status); err != nil {
+		return stack, fmt.Errorf("announce session: %w", err)
+	}
+	b.info("created xbox live session")
+	b.debug("starting sub-account sessions", "count", len(b.conf.SubAccounts))
+	stack.subAnnouncers, err = b.startSubAccounts(b.ctx, status, stack.connection)
+	if err != nil {
+		return stack, err
+	}
+
+	listenConf := b.minecraftListenConfig(status)
+	b.debug("starting nethernet listener",
+		"auth_disabled", listenConf.AuthenticationDisabled,
+		"default_transport_timeout", b.usesDefaultNetherNetConnContext(),
+		"transport_timeout", b.netherNetTransportTimeoutLogValue(),
+	)
+	stack.listener, err = listenConf.ListenNetwork(b.netherNetNetwork(sig, stack.announcer), "")
+	if err != nil {
+		return stack, fmt.Errorf("listen nethernet: %w", err)
+	}
+	return stack, nil
+}
+
+// installSessionStack makes stack current and starts accepting on its
+// listener. The caller must hold b.mu.
+func (b *Broadcaster) installSessionStack(stack sessionStack) {
+	b.signaling = stack.signaling
+	b.sessionConnection = stack.connection
+	b.announcer = stack.announcer
+	b.subAnnouncers = stack.subAnnouncers
+	b.subAnnouncersByID = make(map[string]room.Announcer, len(stack.subAnnouncers))
+	for _, sub := range stack.subAnnouncers {
+		b.subAnnouncersByID[sub.id] = sub.announcer
+	}
+	b.listener = stack.listener
+	b.markPublished()
+	b.acceptWg.Add(1)
+	go func() {
+		defer b.acceptWg.Done()
+		b.acceptListener(stack.listener)
+	}()
+}
+
+// detachSessionStack removes and returns the current stack. The caller must
+// hold b.mu and close the result.
+func (b *Broadcaster) detachSessionStack() sessionStack {
+	stack := sessionStack{
+		signaling:     b.signaling,
+		connection:    b.sessionConnection,
+		announcer:     b.announcer,
+		subAnnouncers: b.subAnnouncers,
+		listener:      b.listener,
+	}
+	b.signaling, b.sessionConnection, b.announcer, b.listener = nil, nil, nil, nil
+	b.subAnnouncers, b.subAnnouncersByID = nil, nil
+	return stack
+}
+
+// closeSessionStack closes every part of stack and returns the published
+// sessions whose close failed so they can be retried.
+func closeSessionStack(stack sessionStack) (failed []io.Closer, err error) {
+	if stack.listener != nil {
+		err = stack.listener.Close()
+	}
+	closeSession := func(announcer room.Announcer) {
+		if announcer == nil {
+			return
+		}
+		if closeErr := announcer.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+			failed = append(failed, announcer)
+		}
+	}
+	for _, sub := range stack.subAnnouncers {
+		closeSession(sub.announcer)
+	}
+	closeSession(stack.announcer)
+	if c, ok := stack.signaling.(io.Closer); ok {
+		err = errors.Join(err, c.Close())
+	}
+	return failed, err
+}
+
+// retainStaleSessions queues sessions whose close failed for another attempt.
+func (b *Broadcaster) retainStaleSessions(failed []io.Closer) {
+	if len(failed) == 0 {
+		return
+	}
+	b.staleMu.Lock()
+	b.staleSessions = append(b.staleSessions, failed...)
+	b.staleMu.Unlock()
+}
+
+// retryStaleSessionCloses closes queued sessions again, keeping those that still fail.
+func (b *Broadcaster) retryStaleSessionCloses() error {
+	b.staleMu.Lock()
+	stale := b.staleSessions
+	b.staleSessions = nil
+	b.staleMu.Unlock()
+	var err error
+	var failed []io.Closer
+	for _, session := range stale {
+		if closeErr := session.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+			failed = append(failed, session)
+		}
+	}
+	b.retainStaleSessions(failed)
+	return err
+}
+
+// markPublished records a successful primary session publication for health checks.
+func (b *Broadcaster) markPublished() {
+	b.lastPublished.Store(time.Now().UnixNano())
 }
 
 // enabledSubAccounts returns the first enabled configuration for each ID and
@@ -434,23 +566,36 @@ func (b *Broadcaster) friendSyncer() FriendSyncer {
 	return syncer
 }
 
-// roomStatusProvider returns the room status provider, falling back to config defaults.
-func (b *Broadcaster) roomStatusProvider(status room.Status) room.StatusProvider {
+// roomStatusProvider returns the status the room listener re-announces: the
+// caller's provider, or the status last resolved for the primary session.
+func (b *Broadcaster) roomStatusProvider() room.StatusProvider {
 	if b.conf.StatusProvider != nil {
 		return normalizedStatusProvider{Provider: b.conf.StatusProvider, OwnerID: b.primaryXUID()}
 	}
-	return room.NewStatusProvider(status)
+	return resolvedStatusProvider{b: b}
 }
 
-// roomListenConfig builds the room.ListenConfig for the nethernet listener.
-func (b *Broadcaster) roomListenConfig(status room.Status) room.ListenConfig {
+// roomListenConfig builds the room.ListenConfig for a listener announcing
+// through announcer. The broadcaster, not the listener, closes the session.
+func (b *Broadcaster) roomListenConfig(announcer room.Announcer) room.ListenConfig {
 	return room.ListenConfig{
-		Announcer:                   b.announcer,
-		StatusProvider:              b.roomStatusProvider(status),
+		Announcer:                   listenerAnnouncer{Announcer: announcer},
+		StatusProvider:              b.roomStatusProvider(),
 		DisableServerStatusOverride: true,
 		Log:                         b.log,
 	}
 }
+
+// listenerAnnouncer leaves closing the session to the broadcaster, which
+// retries failed closes instead of losing them with the listener.
+type listenerAnnouncer struct {
+	room.Announcer
+}
+
+func (listenerAnnouncer) Close() error { return nil }
+
+// Unwrap returns the wrapped announcer.
+func (a listenerAnnouncer) Unwrap() room.Announcer { return a.Announcer }
 
 // minecraftListenConfig applies broadcaster defaults to a Minecraft listener.
 // Client authentication follows ListenConfig.AuthenticationDisabled: chains
@@ -490,14 +635,13 @@ func (b *Broadcaster) netherNetListenConfig() nethernet.ListenConfig {
 	return conf
 }
 
-// registerNetherNetNetwork registers the "nethernet" network for the minecraft listener.
-func (b *Broadcaster) registerNetherNetNetwork(sig nethernet.Signaling, status room.Status) {
-	minecraft.RegisterNetwork("nethernet", func(l *slog.Logger) minecraft.Network {
-		return room.Network{
-			Network:      minecraft.NetherNet{Signaling: sig, ListenConfig: b.netherNetListenConfig(), Log: b.log},
-			ListenConfig: b.roomListenConfig(status),
-		}
-	})
+// netherNetNetwork returns this broadcaster's NetherNet network over sig,
+// announcing through announcer.
+func (b *Broadcaster) netherNetNetwork(sig nethernet.Signaling, announcer room.Announcer) minecraft.Network {
+	return room.Network{
+		Network:      minecraft.NetherNet{Signaling: sig, ListenConfig: b.netherNetListenConfig(), Log: b.log},
+		ListenConfig: b.roomListenConfig(announcer),
+	}
 }
 
 // usesDefaultNetherNetConnContext reports whether the default conn timeout is in use.
@@ -698,20 +842,48 @@ func (a loggingAnnouncer) Announce(ctx context.Context, status room.Status) erro
 	return a.Announcer.Announce(ctx, status)
 }
 
+// Unwrap returns the wrapped announcer.
+func (a loggingAnnouncer) Unwrap() room.Announcer { return a.Announcer }
+
+// wrappedAnnouncer is implemented by announcers that decorate another one.
+type wrappedAnnouncer interface {
+	Unwrap() room.Announcer
+}
+
+// innerAnnouncers yields announcer and every announcer it wraps, outermost first.
+func innerAnnouncers(announcer room.Announcer) iter.Seq[room.Announcer] {
+	return func(yield func(room.Announcer) bool) {
+		for announcer != nil && yield(announcer) {
+			wrapped, ok := announcer.(wrappedAnnouncer)
+			if !ok {
+				return
+			}
+			announcer = wrapped.Unwrap()
+		}
+	}
+}
+
 // xblAnnouncer unwraps announcer wrappers to find the underlying XBLAnnouncer.
 func xblAnnouncer(announcer room.Announcer) (*room.XBLAnnouncer, bool) {
-	switch a := announcer.(type) {
-	case *room.XBLAnnouncer:
-		return a, true
-	case *sessionNonceAnnouncer:
-		return a.XBLAnnouncer, true
-	case loggingAnnouncer:
-		return xblAnnouncer(a.Announcer)
-	case signalingConnectionAnnouncer:
-		return xblAnnouncer(a.Announcer)
-	default:
-		return nil, false
+	for a := range innerAnnouncers(announcer) {
+		switch a := a.(type) {
+		case *room.XBLAnnouncer:
+			return a, true
+		case *sessionNonceAnnouncer:
+			return a.XBLAnnouncer, true
+		}
 	}
+	return nil, false
+}
+
+// nonceAnnouncer unwraps announcer wrappers to find the sessionNonceAnnouncer.
+func nonceAnnouncer(announcer room.Announcer) (*sessionNonceAnnouncer, bool) {
+	for a := range innerAnnouncers(announcer) {
+		if nonce, ok := a.(*sessionNonceAnnouncer); ok {
+			return nonce, true
+		}
+	}
+	return nil, false
 }
 
 // signalingFor returns or creates the nethernet signaling connection.
@@ -754,9 +926,7 @@ func (b *Broadcaster) signalingFor(ctx context.Context) (nethernet.Signaling, er
 			return nil, fmt.Errorf("dial nethernet signaling: %w", dialCtx.Err())
 		}
 		if result.err != nil {
-			if result.createdClient != nil {
-				_ = result.createdClient.Close()
-			}
+			closeDefaultSignalingResult(result)
 			return nil, result.err
 		}
 		b.cacheDefaultSignalingResult(result)
@@ -787,39 +957,35 @@ func (b *Broadcaster) defaultSignalingConfig(mode SignalingMode) defaultSignalin
 }
 
 // dialDefaultSignaling dials a nethernet signaling connection using the given config.
-func dialDefaultSignaling(ctx context.Context, conf defaultSignalingConfig) defaultSignalingResult {
-	debugLog(conf.log, "creating minecraft token source for signaling")
-	src, createdClient, err := conf.minecraftTokenSource(ctx)
-	if err != nil {
-		return defaultSignalingResult{createdClient: createdClient, err: err}
+func dialDefaultSignaling(ctx context.Context, conf defaultSignalingConfig) (result defaultSignalingResult) {
+	src := conf.minecraftTokens
+	if src == nil {
+		debugLog(conf.log, "creating minecraft token source for signaling")
+		result.createdTokens, result.createdClient, result.err = conf.newMinecraftTokenSource(ctx)
+		if result.err != nil {
+			return result
+		}
+		src = result.createdTokens
+		debugLog(conf.log, "created minecraft token source for signaling")
 	}
-	debugLog(conf.log, "created minecraft token source for signaling")
 	if conf.mode == SignalingModeJSONRPC {
 		debugLog(conf.log, "dialing jsonrpc messaging signaling websocket")
 		d := messaging.Dialer{Log: conf.log, HTTPClient: conf.httpClient}
-		sig, err := d.DialContext(ctx, src)
-		if err != nil {
-			return defaultSignalingResult{createdClient: createdClient, err: err}
-		}
-		return defaultSignalingResult{signaling: sig, minecraft: src, createdClient: createdClient}
+		result.signaling, result.err = d.DialContext(ctx, src)
+		return result
 	}
 	debugLog(conf.log, "dialing websocket signaling websocket")
 	d := websocketsignaling.Dialer{
 		Log:        conf.log,
 		HTTPClient: conf.httpClient,
 	}
-	sig, err := d.DialContext(ctx, src)
-	if err != nil {
-		return defaultSignalingResult{createdClient: createdClient, err: err}
-	}
-	return defaultSignalingResult{signaling: sig, minecraft: src, createdClient: createdClient}
+	result.signaling, result.err = d.DialContext(ctx, src)
+	return result
 }
 
-// minecraftTokenSource returns or creates a Minecraft token source for signaling.
-func (conf defaultSignalingConfig) minecraftTokenSource(ctx context.Context) (service.TokenSource, *xsapi.Client, error) {
-	if conf.minecraftTokens != nil {
-		return conf.minecraftTokens, nil, nil
-	}
+// newMinecraftTokenSource creates a Minecraft token source for signaling,
+// returning the Xbox Live client it created, if any, even on failure.
+func (conf defaultSignalingConfig) newMinecraftTokenSource(ctx context.Context) (MinecraftTokenSource, *xsapi.Client, error) {
 	client := conf.xblClient
 	var createdClient *xsapi.Client
 	if client == nil {
@@ -840,25 +1006,33 @@ func (conf defaultSignalingConfig) minecraftTokenSource(ctx context.Context) (se
 	return tokens, createdClient, nil
 }
 
-// cacheDefaultSignalingResult stores lazily-created clients and tokens from signaling dial.
+// cacheDefaultSignalingResult takes ownership of lazily created clients and tokens from a signaling dial.
 func (b *Broadcaster) cacheDefaultSignalingResult(result defaultSignalingResult) {
 	if result.createdClient != nil {
 		b.xblClient = result.createdClient
 		b.conf.XBLClient = result.createdClient
 		b.createdXBLClients = append(b.createdXBLClients, result.createdClient)
 	}
-	if b.conf.MinecraftTokenSource == nil && b.minecraftTokens == nil && result.minecraft != nil {
-		b.minecraftTokens = result.minecraft
-		b.conf.MinecraftTokenSource = result.minecraft
+	if result.createdTokens == nil {
+		return
+	}
+	b.galleryMu.Lock()
+	defer b.galleryMu.Unlock()
+	if b.conf.MinecraftTokenSource == nil && b.minecraftTokens == nil {
+		b.minecraftTokens = result.createdTokens
+		b.conf.MinecraftTokenSource = result.createdTokens
+	} else {
+		_ = result.createdTokens.Close()
 	}
 }
 
 // closeDefaultSignalingResult closes resources from a signaling dial result.
 func closeDefaultSignalingResult(result defaultSignalingResult) {
-	if result.signaling != nil {
-		if c, ok := result.signaling.(interface{ Close() error }); ok {
-			_ = c.Close()
-		}
+	if c, ok := result.signaling.(io.Closer); ok {
+		_ = c.Close()
+	}
+	if result.createdTokens != nil {
+		_ = result.createdTokens.Close()
 	}
 	if result.createdClient != nil {
 		_ = result.createdClient.Close()
@@ -932,13 +1106,14 @@ func (b *Broadcaster) newAnnouncer(ctx context.Context) (room.Announcer, error) 
 // sub-account. All sessions advertise the same NetherNet signaling connection,
 // so each account is directly joinable while routing players to one listener.
 // A failing sub-account is logged and skipped so it cannot take down the
-// broadcaster, matching MCXboxBroadcast.
-func (b *Broadcaster) startSubAccounts(ctx context.Context, status room.Status) error {
+// broadcaster, matching MCXboxBroadcast. The caller installs the result.
+func (b *Broadcaster) startSubAccounts(ctx context.Context, status room.Status, connection *p2p.Connection) ([]publishedSubAccount, error) {
 	accounts, duplicates := b.enabledSubAccounts()
 	for _, id := range duplicates {
 		b.log.Error("duplicate sub-account id; only the first configuration is used", "sub_account", id)
 		b.notify(ctx, "Duplicate sub-account id "+id+": only the first configuration is used.")
 	}
+	var published []publishedSubAccount
 	for _, account := range accounts {
 		b.debug("checking sub-account",
 			"sub_account", account.ID,
@@ -950,45 +1125,51 @@ func (b *Broadcaster) startSubAccounts(ctx context.Context, status room.Status) 
 			b.log.Warn("sub-account skipped because xbox live credentials are missing", "sub_account", account.ID)
 			continue
 		}
-		if err := b.startSubAccountBounded(ctx, account, status); err != nil {
+		sub, err := b.startSubAccountBounded(ctx, account, status, connection)
+		if err != nil {
 			// A canceled context means the broadcaster is shutting down, not
 			// that this or the remaining sub-accounts genuinely failed.
 			if ctx.Err() != nil {
-				return ctx.Err()
+				failed, _ := closeSessionStack(sessionStack{subAnnouncers: published})
+				b.retainStaleSessions(failed)
+				return nil, ctx.Err()
 			}
 			b.log.Error("start sub-account; continuing without it", "sub_account", account.ID, "err", err)
 			b.notify(ctx, "Sub-account "+account.ID+" failed to start: "+err.Error())
+			continue
 		}
+		published = append(published, sub)
 	}
-	return nil
+	return published, nil
 }
 
 // startSubAccountBounded runs startSubAccount under the per-account timeout.
 // The context only scopes the publish requests; the sub-account's RTA
 // connection and session outlive it.
-func (b *Broadcaster) startSubAccountBounded(ctx context.Context, account *SubAccountConfig, status room.Status) error {
+func (b *Broadcaster) startSubAccountBounded(ctx context.Context, account *SubAccountConfig, status room.Status, connection *p2p.Connection) (publishedSubAccount, error) {
 	timeout := b.subAccountStartTimeout
 	if timeout <= 0 {
 		timeout = 90 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return b.startSubAccount(ctx, account, status)
+	return b.startSubAccount(ctx, account, status, connection)
 }
 
-// startSubAccount prepares one sub-account and publishes its own session.
-func (b *Broadcaster) startSubAccount(ctx context.Context, account *SubAccountConfig, status room.Status) error {
+// startSubAccount prepares one sub-account and publishes its own session
+// advertising connection, when set.
+func (b *Broadcaster) startSubAccount(ctx context.Context, account *SubAccountConfig, status room.Status, connection *p2p.Connection) (publishedSubAccount, error) {
 	if _, err := b.subAccountXBLClient(ctx, account); err != nil {
-		return fmt.Errorf("prepare xbox live client: %w", err)
+		return publishedSubAccount{}, fmt.Errorf("prepare xbox live client: %w", err)
 	}
 	if account.XUID == "" {
 		account.XUID = accountXUID(*account)
 	}
 	if account.XUID == "" {
-		return errors.New("sub-account xuid unavailable")
+		return publishedSubAccount{}, errors.New("sub-account xuid unavailable")
 	}
 	if err := b.ensureSubAccountMutualFollow(ctx, *account); err != nil {
-		return fmt.Errorf("prepare mutual follow: %w", err)
+		return publishedSubAccount{}, fmt.Errorf("prepare mutual follow: %w", err)
 	}
 	ref := mpsd.SessionReference{
 		ServiceConfigID: serviceConfigUUID,
@@ -1002,29 +1183,20 @@ func (b *Broadcaster) startSubAccount(ctx context.Context, account *SubAccountCo
 	)
 	announcer, err := b.newSubAccountAnnouncer(ctx, *account, ref)
 	if err != nil {
-		return fmt.Errorf("create announcer: %w", err)
+		return publishedSubAccount{}, fmt.Errorf("create announcer: %w", err)
 	}
 	announcer = loggingAnnouncer{Announcer: announcer, log: b.log.With("sub_account", account.ID)}
-	if b.sessionConnection != nil {
-		announcer = signalingConnectionAnnouncer{Announcer: announcer, connection: *b.sessionConnection}
+	if connection != nil {
+		announcer = signalingConnectionAnnouncer{Announcer: announcer, connection: *connection}
 	}
 	if err := announcer.Announce(ctx, subAccountStatus(status, account.XUID)); err != nil {
-		_ = announcer.Close()
-		return fmt.Errorf("announce session: %w", err)
+		if closeErr := announcer.Close(); closeErr != nil {
+			b.retainStaleSessions([]io.Closer{announcer})
+		}
+		return publishedSubAccount{}, fmt.Errorf("announce session: %w", err)
 	}
-	// b.mu is held by Start for the whole startup sequence, so the session
-	// bookkeeping mutates directly; locking here would self-deadlock.
-	if b.subAnnouncersByID == nil {
-		b.subAnnouncersByID = make(map[string]room.Announcer)
-	}
-	b.subAnnouncers = append(b.subAnnouncers, publishedSubAccount{
-		id:        account.ID,
-		xuid:      account.XUID,
-		announcer: announcer,
-	})
-	b.subAnnouncersByID[account.ID] = announcer
 	b.debug("published independent sub-account session", "sub_account", account.ID, "xuid", account.XUID)
-	return nil
+	return publishedSubAccount{id: account.ID, xuid: account.XUID, announcer: announcer}, nil
 }
 
 // newSubAccountAnnouncer creates an MPSD announcer owned by account. Its
@@ -1213,7 +1385,7 @@ func (b *Broadcaster) subAccountMinecraftTokenSource(ctx context.Context, accoun
 		return nil, err
 	}
 	if b.subMinecraftTokens == nil {
-		b.subMinecraftTokens = make(map[*xsapi.Client]service.TokenSource)
+		b.subMinecraftTokens = make(map[*xsapi.Client]MinecraftTokenSource)
 	}
 	b.subMinecraftTokens[client] = tokens
 	return tokens, nil
@@ -1646,107 +1818,28 @@ func (b *Broadcaster) sessionHealthIssue() sessionHealthIssue {
 	return sessionHealthIssue{}
 }
 
-// recreateSession tears down and rebuilds signaling, session, and listener after a drop.
+// recreateSession replaces the whole session stack. It holds b.mu only to
+// swap stacks: b.recovering keeps Update and activity checks off the stack
+// meanwhile, and Close waits for the session loop before tearing down.
 func (b *Broadcaster) recreateSession() error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-
 	if b.ctx.Err() != nil || !b.started {
+		b.mu.Unlock()
 		return errors.New("broadcaster is shut down")
 	}
-	b.acceptWg.Add(1)
-	reconnectDone := false
-	defer func() {
-		if !reconnectDone {
-			b.acceptWg.Done()
-		}
-	}()
+	old := b.detachSessionStack()
+	b.mu.Unlock()
+	failed, _ := closeSessionStack(old)
+	b.retainStaleSessions(failed)
 
-	if b.listener != nil {
-		_ = b.listener.Close()
-		b.listener = nil
-	}
-	_ = b.cleanupPublishedSessions(true)
-	if b.signaling != nil {
-		if c, ok := b.signaling.(interface{ Close() error }); ok {
-			_ = c.Close()
-		}
-	}
-	b.signaling = nil
-
-	sig, err := b.signalingFor(b.ctx)
+	stack, err := b.buildSessionStack()
 	if err != nil {
-		return fmt.Errorf("re-create signaling: %w", err)
+		return fmt.Errorf("re-create session: %w", err)
 	}
-	if sig.Context().Err() != nil {
-		if c, ok := sig.(interface{ Close() error }); ok {
-			_ = c.Close()
-		}
-		return errors.New("re-create signaling: factory returned signaling with dead context")
-	}
-	b.signaling = sig
-	mode, err := b.signalingMode()
-	if err != nil {
-		return err
-	}
-	b.debug("nethernet signaling re-created", "signaling_mode", mode, "network_id", signalingNetworkID(sig))
-
-	closeSignaling := func() {
-		if c, ok := sig.(interface{ Close() error }); ok {
-			_ = c.Close()
-		}
-		b.signaling = nil
-	}
-
-	ctx, cancel := context.WithTimeout(b.ctx, 30*time.Second)
-	defer cancel()
-	status, err := b.status(ctx)
-	if err != nil {
-		closeSignaling()
-		return fmt.Errorf("re-create session status: %w", err)
-	}
-	announcer, err := b.newAnnouncer(ctx)
-	if err != nil {
-		closeSignaling()
-		return fmt.Errorf("re-create announcer: %w", err)
-	}
-	b.announcer = loggingAnnouncer{Announcer: announcer, log: b.log}
-	connection, err := b.signalingConnection(sig)
-	if err != nil {
-		closeSignaling()
-		return fmt.Errorf("re-create signaling connection: %w", err)
-	}
-	if connection != nil {
-		b.sessionConnection = connection
-		b.announcer = signalingConnectionAnnouncer{Announcer: b.announcer, connection: *b.sessionConnection}
-	}
-	if err := b.announcer.Announce(ctx, status); err != nil {
-		closeSignaling()
-		return fmt.Errorf("re-announce session: %w", err)
-	}
-	if err := b.startSubAccounts(b.ctx, status); err != nil {
-		_ = b.cleanupPublishedSessions(true)
-		closeSignaling()
-		return fmt.Errorf("re-create sub-accounts: %w", err)
-	}
-
-	b.registerNetherNetNetwork(sig, status)
-
-	listenConf := b.minecraftListenConfig(status)
-	l, err := listenConf.Listen("nethernet", "")
-	if err != nil {
-		_ = b.cleanupPublishedSessions(true)
-		closeSignaling()
-		return fmt.Errorf("re-listen nethernet: %w", err)
-	}
-	b.listener = l
-	b.debug("nethernet listener restarted", "network_id", signalingNetworkID(sig), "signaling_mode", mode, "target", b.conf.Server.Address())
-
-	reconnectDone = true
-	go func() {
-		defer b.acceptWg.Done()
-		b.acceptListener(l)
-	}()
+	b.mu.Lock()
+	b.installSessionStack(stack)
+	b.mu.Unlock()
+	b.debug("nethernet listener restarted", "network_id", signalingNetworkID(stack.signaling), "target", b.conf.Server.Address())
 	// Re-showcase the gallery image so a swapped file does not require a
 	// process restart; the upload no-ops when the image is already set.
 	go b.uploadGalleryWithTimeout()
@@ -1760,7 +1853,7 @@ func (b *Broadcaster) Update(ctx context.Context) error {
 	if !b.started {
 		return errors.New("broadcaster not started")
 	}
-	if b.recovering {
+	if b.recovering.Load() {
 		return errors.New("session recovery is in progress")
 	}
 	status, err := b.status(ctx)
@@ -1768,9 +1861,11 @@ func (b *Broadcaster) Update(ctx context.Context) error {
 		return err
 	}
 	b.debugRoomStatus("resolved room status update", status)
+	b.resolvedStatus.Store(&status)
 	if err := b.announcer.Announce(ctx, status); err != nil {
 		return err
 	}
+	b.markPublished()
 	type failedSubAccountUpdate struct {
 		id  string
 		err error
@@ -1789,7 +1884,6 @@ func (b *Broadcaster) Update(ctx context.Context) error {
 		}
 		b.warn("replaced sub-account session after update failure", "sub_account", failure.id, "cause", failure.err)
 	}
-	b.cleanupStaleSubAccountSessions()
 	if recoveryErr != nil {
 		return &subAccountUpdateError{err: recoveryErr}
 	}
@@ -1803,18 +1897,10 @@ func (b *Broadcaster) Update(ctx context.Context) error {
 	return nil
 }
 
-// replaceSubAccountSession publishes a fresh session for id, then removes and
-// closes the stale session. The caller must hold b.mu.
+// replaceSubAccountSession publishes a fresh session for id, then closes the
+// stale one, queueing it for retry if the close fails. The caller must hold b.mu.
 func (b *Broadcaster) replaceSubAccountSession(ctx context.Context, id string, status room.Status) error {
-	oldIndex := -1
-	var old room.Announcer
-	for i, sub := range b.subAnnouncers {
-		if sub.id == id {
-			oldIndex = i
-			old = sub.announcer
-			break
-		}
-	}
+	oldIndex := slices.IndexFunc(b.subAnnouncers, func(sub publishedSubAccount) bool { return sub.id == id })
 	if oldIndex == -1 {
 		return errors.New("stale sub-account session not found")
 	}
@@ -1829,69 +1915,41 @@ func (b *Broadcaster) replaceSubAccountSession(ctx context.Context, id string, s
 	if account == nil {
 		return errors.New("enabled sub-account configuration not found")
 	}
-	if err := b.startSubAccountBounded(ctx, account, status); err != nil {
+	sub, err := b.startSubAccountBounded(ctx, account, status, b.sessionConnection)
+	if err != nil {
 		return err
 	}
-	b.subAnnouncers = append(b.subAnnouncers[:oldIndex], b.subAnnouncers[oldIndex+1:]...)
+	old := b.subAnnouncers[oldIndex].announcer
+	b.subAnnouncers[oldIndex] = sub
+	b.subAnnouncersByID[id] = sub.announcer
 	if err := old.Close(); err != nil {
 		b.warn("close stale sub-account session", "sub_account", id, "err", err)
-		b.staleSubAnnouncers = append(b.staleSubAnnouncers, old)
+		b.retainStaleSessions([]io.Closer{old})
 	}
 	return nil
 }
 
-// cleanupStaleSubAccountSessions retries closing replaced sessions whose first
-// close attempt failed. The caller must hold b.mu.
-func (b *Broadcaster) cleanupStaleSubAccountSessions() {
-	if len(b.staleSubAnnouncers) == 0 {
-		return
-	}
-	remaining := b.staleSubAnnouncers[:0]
-	for _, announcer := range b.staleSubAnnouncers {
-		if err := announcer.Close(); err != nil {
-			b.warn("retry close stale sub-account session", "err", err)
-			remaining = append(remaining, announcer)
-		}
-	}
-	b.staleSubAnnouncers = remaining
+// closeOwnedClients closes the Xbox Live clients and Minecraft token sources
+// the broadcaster created.
+func (b *Broadcaster) closeOwnedClients() error {
+	return errors.Join(b.closeOwnedMinecraftTokens(), b.closeCreatedXBLClients())
 }
 
-// cleanupPublishedSessions closes independent sub-account sessions and
-// optionally the primary announcer.
-func (b *Broadcaster) cleanupPublishedSessions(closeAnnouncer bool) error {
+// closeOwnedMinecraftTokens stops the PlayFab clients behind token sources the
+// broadcaster created, so their refresh workers do not outlive it.
+func (b *Broadcaster) closeOwnedMinecraftTokens() error {
+	b.galleryMu.Lock()
+	defer b.galleryMu.Unlock()
 	var err error
-	var failed []room.Announcer
-	for _, sub := range b.subAnnouncers {
-		if closeErr := sub.announcer.Close(); closeErr != nil {
-			err = errors.Join(err, closeErr)
-			failed = append(failed, sub.announcer)
-		}
+	if b.minecraftTokens != nil {
+		err = b.minecraftTokens.Close()
+		b.minecraftTokens = nil
+		b.conf.MinecraftTokenSource = nil
 	}
-	for _, stale := range b.staleSubAnnouncers {
-		if closeErr := stale.Close(); closeErr != nil {
-			err = errors.Join(err, closeErr)
-			failed = append(failed, stale)
-		}
+	for _, tokens := range b.subMinecraftTokens {
+		err = errors.Join(err, tokens.Close())
 	}
-	b.subAnnouncers = nil
-	b.subAnnouncersByID = nil
-	b.staleSubAnnouncers = failed
-	if closeAnnouncer && b.announcer != nil {
-		err = errors.Join(err, b.announcer.Close())
-	}
-	b.sessionConnection = nil
-	return err
-}
-
-// cleanupStartupFailure cleans up all resources after a failed Start.
-func (b *Broadcaster) cleanupStartupFailure(closeAnnouncer bool) error {
-	err := b.cleanupPublishedSessions(closeAnnouncer)
-	if b.signaling != nil {
-		if c, ok := b.signaling.(interface{ Close() error }); ok {
-			err = errors.Join(err, c.Close())
-		}
-	}
-	err = errors.Join(err, b.closeCreatedXBLClients())
+	b.subMinecraftTokens = nil
 	return err
 }
 
@@ -1928,21 +1986,15 @@ func (b *Broadcaster) clearCreatedXBLClientReferences(created map[*xsapi.Client]
 	b.galleryMu.Lock()
 	defer b.galleryMu.Unlock()
 
-	primaryCreated := xblClientCreated(b.conf.XBLClient, created) || xblClientCreated(b.xblClient, created)
-	if primaryCreated {
+	if xblClientCreated(b.conf.XBLClient, created) || xblClientCreated(b.xblClient, created) {
 		b.conf.XBLClient = nil
 		b.xblClient = nil
-		if b.minecraftTokens != nil {
-			b.minecraftTokens = nil
-			b.conf.MinecraftTokenSource = nil
-		}
 	}
 	for i := range b.conf.SubAccounts {
 		if xblClientCreated(b.conf.SubAccounts[i].XBLClient, created) {
 			b.conf.SubAccounts[i].XBLClient = nil
 		}
 	}
-	b.subMinecraftTokens = nil
 }
 
 // xblClientCreated reports whether a client was created by the broadcaster.
@@ -1954,28 +2006,36 @@ func xblClientCreated(client *xsapi.Client, created map[*xsapi.Client]struct{}) 
 	return ok
 }
 
-// Close stops the listener and removes the Xbox session.
+// Close stops the listener and removes the Xbox sessions. It cancels
+// in-flight session work first, so it returns within the Xbox request timeouts.
 func (b *Broadcaster) Close() error {
+	b.cancelMu.Lock()
+	if b.cancel != nil {
+		b.cancel()
+	}
+	b.cancelMu.Unlock()
+	b.mu.Lock()
+	started := b.started
+	if started {
+		// Start may have set cancel after the call above.
+		b.cancel()
+	}
+	b.mu.Unlock()
+	if !started {
+		return nil
+	}
+	b.loopWg.Wait()
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !b.started {
 		return nil
 	}
-	b.cancel()
 	// Release only our social handlers before closing any owned clients.
 	b.socialWg.Wait()
-	var err error
-	if b.listener != nil {
-		err = b.listener.Close()
-	}
-	err = errors.Join(err, b.cleanupPublishedSessions(true))
-	if b.signaling != nil {
-		if c, ok := b.signaling.(interface{ Close() error }); ok {
-			err = errors.Join(err, c.Close())
-		}
-	}
-	err = errors.Join(err, b.closeCreatedXBLClients())
-	<-b.done
+	_, err := closeSessionStack(b.detachSessionStack())
+	err = errors.Join(err, b.retryStaleSessionCloses(), b.closeOwnedClients())
+	b.acceptWg.Wait()
 	b.started = false
 	return err
 }

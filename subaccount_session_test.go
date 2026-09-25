@@ -54,9 +54,8 @@ func TestBroadcasterStartSubAccountPublishesIndependentSession(t *testing.T) {
 		return broadcasterResponse(http.StatusOK, `{"people":[{"xuid":"primary","isFollowingCaller":true,"isFollowedByCaller":true}]}`), nil
 	})}
 	b := &Broadcaster{
-		log:               testBroadcasterLogger(),
-		sessionRef:        mpsd.SessionReference{ServiceConfigID: serviceConfigUUID, TemplateName: TemplateName, Name: "PRIMARY"},
-		sessionConnection: &connection,
+		log:        testBroadcasterLogger(),
+		sessionRef: mpsd.SessionReference{ServiceConfigID: serviceConfigUUID, TemplateName: TemplateName, Name: "PRIMARY"},
 		conf: Config{
 			XBLClient:  &xsapi.Client{},
 			XUID:       "primary",
@@ -70,7 +69,7 @@ func TestBroadcasterStartSubAccountPublishesIndependentSession(t *testing.T) {
 	account := &SubAccountConfig{ID: "sub1", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "sub"}
 	status := room.Status{OwnerID: "primary", LevelID: accountLevelID("primary")}
 
-	if err := b.startSubAccount(context.Background(), account, status); err != nil {
+	if _, err := b.startSubAccount(context.Background(), account, status, &connection); err != nil {
 		t.Fatal(err)
 	}
 
@@ -176,13 +175,15 @@ func TestBroadcasterUpdateReplacesFailedSubAccountSession(t *testing.T) {
 	if got := replacement.Status(); got.OwnerID != "sub" || got.LevelID != accountLevelID("sub") {
 		t.Fatalf("replacement published wrong ownership: %#v", got)
 	}
-	if len(b.staleSubAnnouncers) != 1 {
-		t.Fatalf("stale cleanup queue = %#v, want failed-to-close announcer", b.staleSubAnnouncers)
+	if len(b.staleSessions) != 1 {
+		t.Fatalf("stale cleanup queue = %#v, want failed-to-close announcer", b.staleSessions)
 	}
 	stale.closeErr = nil
-	b.cleanupStaleSubAccountSessions()
-	if len(b.staleSubAnnouncers) != 0 {
-		t.Fatalf("stale cleanup queue = %#v, want empty after retry", b.staleSubAnnouncers)
+	if err := b.retryStaleSessionCloses(); err != nil {
+		t.Fatal(err)
+	}
+	if len(b.staleSessions) != 0 {
+		t.Fatalf("stale cleanup queue = %#v, want empty after retry", b.staleSessions)
 	}
 }
 
@@ -289,7 +290,7 @@ func TestBroadcasterCleanupClosesIndependentSubAccountSessions(t *testing.T) {
 		subAnnouncersByID: map[string]room.Announcer{"sub1": sub},
 	}
 
-	if err := b.cleanupPublishedSessions(false); err != nil {
+	if _, err := closeSessionStack(b.detachSessionStack()); err != nil {
 		t.Fatal(err)
 	}
 	if !sub.Closed() {
@@ -323,10 +324,11 @@ func TestBroadcasterSkipsDuplicateIDsBeforePublishing(t *testing.T) {
 		},
 	}
 
-	if err := b.startSubAccounts(context.Background(), room.Status{}); err != nil {
+	published, err := b.startSubAccounts(context.Background(), room.Status{}, nil)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.cleanupPublishedSessions(false); err != nil {
+	if _, err := closeSessionStack(sessionStack{subAnnouncers: published}); err != nil {
 		t.Fatal(err)
 	}
 	if factoryCalls != 1 {
@@ -358,7 +360,7 @@ func TestBroadcasterRejectsDuplicateIDBeforeCredentialFiltering(t *testing.T) {
 		},
 	}
 
-	if err := b.startSubAccounts(context.Background(), room.Status{}); err != nil {
+	if _, err := b.startSubAccounts(context.Background(), room.Status{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if factoryCalls != 0 {

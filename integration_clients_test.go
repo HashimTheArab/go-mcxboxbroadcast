@@ -317,7 +317,7 @@ func TestRoomStatusProviderNormalizesConfiguredProvider(t *testing.T) {
 		XUID:           "123",
 		StatusProvider: staticStatusProvider{host: "Provider Host", world: "Provider World", titleID: TitleID},
 	}}
-	status := b.roomStatusProvider(room.Status{}).RoomStatus()
+	status := b.roomStatusProvider().RoomStatus()
 	if status.Protocol == 0 || status.Version == "" {
 		t.Fatalf("provider status was not normalized: %#v", status)
 	}
@@ -352,7 +352,7 @@ func TestMinecraftStatusProviderMirrorsConfiguredProvider(t *testing.T) {
 	if status.PlayerCount != 1 || status.MaxPlayers != 2 {
 		t.Fatalf("minecraft status provider did not mirror counts: %#v", status)
 	}
-	if !b.roomListenConfig(room.Status{}).DisableServerStatusOverride {
+	if !b.roomListenConfig(&fakeAnnouncer{}).DisableServerStatusOverride {
 		t.Fatal("room server status override must stay disabled so listener pong status does not rewrite MPSD")
 	}
 }
@@ -368,14 +368,15 @@ func TestRoomListenerDoesNotOverridePublishedStatusWithMinecraftPong(t *testing.
 			},
 		},
 	}
-	listener := b.roomListenConfig(room.Status{
+	b.resolvedStatus.Store(&room.Status{
 		HostName:       "CoveredJLA",
 		WorldName:      "Minecraft World",
 		WorldType:      WorldTypeSurvival,
 		MemberCount:    1,
 		MaxMemberCount: 20,
 		TransportLayer: p2p.TransportLayerNetherNet,
-	}).Wrap(fakeNetworkListener{
+	})
+	listener := b.roomListenConfig(b.announcer).Wrap(fakeNetworkListener{
 		addr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 19132},
 	})
 
@@ -591,8 +592,7 @@ func TestSignalingStartupHTTPClientBoundsTimeout(t *testing.T) {
 
 func TestStartupFailureCleanupClosesSignaling(t *testing.T) {
 	sig := &fakeSignaling{}
-	b := &Broadcaster{signaling: sig}
-	if err := b.cleanupStartupFailure(false); err != nil {
+	if _, err := closeSessionStack(sessionStack{signaling: sig}); err != nil {
 		t.Fatal(err)
 	}
 	if !sig.closed {

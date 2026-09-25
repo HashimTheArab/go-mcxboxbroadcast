@@ -192,6 +192,19 @@ func normalizeStatus(status room.Status) room.Status {
 	return status
 }
 
+// resolvedStatusProvider serves the status last resolved for the primary
+// session, so the listener's periodic announcement agrees with Update.
+type resolvedStatusProvider struct {
+	b *Broadcaster
+}
+
+func (p resolvedStatusProvider) RoomStatus() room.Status {
+	if status := p.b.resolvedStatus.Load(); status != nil {
+		return *status
+	}
+	return defaultRoomStatus
+}
+
 type normalizedStatusProvider struct {
 	Provider room.StatusProvider
 	OwnerID  string

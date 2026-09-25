@@ -1,18 +1,23 @@
 package broadcaster
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"runtime/pprof"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/df-mc/go-playfab/v2"
+	"github.com/df-mc/go-xsapi/v2"
 	"github.com/df-mc/go-xsapi/v2/xal/xasd"
 	"github.com/df-mc/go-xsapi/v2/xal/xasu"
 	"github.com/df-mc/go-xsapi/v2/xal/xsts"
@@ -385,4 +390,74 @@ func tokenTestJSONResponse(code int, body string) *http.Response {
 	resp := tokenTestResponse(code, body)
 	resp.Header.Set("Content-Type", "application/json")
 	return resp
+}
+
+// playFabWorkers counts go-playfab background token refresh goroutines.
+func playFabWorkers() int {
+	var buf bytes.Buffer
+	_ = pprof.Lookup("goroutine").WriteTo(&buf, 2)
+	return strings.Count(buf.String(), "go-playfab/v2.(*Client).background(")
+}
+
+// Discarding a signaling dial result must stop the PlayFab client it minted.
+func TestClosingSignalingResultStopsPlayFabWorkers(t *testing.T) {
+	before := playFabWorkers()
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.URL.Host == "title.mgt.xboxlive.com":
+			return response(200, `{"EndPoints":[{"Protocol":"https","Host":"*.playfabapi.com","HostType":"wildcard","RelyingParty":"http://xboxlive.com","TokenType":"JWT"}]}`), nil
+		case strings.HasSuffix(req.URL.Path, "/LoginWithXbox"):
+			return response(200, fmt.Sprintf(`{"code":200,"status":"OK","data":{"SessionTicket":"ticket","PlayFabId":"player","EntityToken":{"EntityToken":"entity","TokenExpiration":%q,"Entity":{"Id":"player","Type":"title_player_account"}}}}`, time.Now().Add(time.Hour).UTC().Format(time.RFC3339))), nil
+		default:
+			return nil, fmt.Errorf("unexpected request: %s", req.URL)
+		}
+	})}
+	xbl, err := NewXSAPIClient(t.Context(), staticTokenSource{}, client, testBroadcasterLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	login, err := playfab.LoginWithXbox(t.Context(), "20CA2", xbl, playfab.ClientConfig{HTTPClient: client, CreateAccount: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(time.Second); playFabWorkers() < before+2 && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+	}
+	closeDefaultSignalingResult(defaultSignalingResult{createdTokens: playFabTokenSource{client: login}, createdClient: xbl})
+	for deadline := time.Now().Add(time.Second); playFabWorkers() > before && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+	}
+	if leaked := playFabWorkers() - before; leaked > 0 {
+		t.Fatalf("%d PlayFab workers outlived the discarded dial result", leaked)
+	}
+}
+
+type closingMinecraftTokenSource struct {
+	staticMinecraftTokenSource
+	closed *bool
+}
+
+func (s closingMinecraftTokenSource) Close() error {
+	*s.closed = true
+	return nil
+}
+
+// The broadcaster must close the Minecraft token sources it created on shutdown.
+func TestCloseOwnedClientsClosesMinecraftTokens(t *testing.T) {
+	var primaryClosed, subClosed bool
+	primary := closingMinecraftTokenSource{closed: &primaryClosed}
+	b := &Broadcaster{
+		minecraftTokens:    primary,
+		subMinecraftTokens: map[*xsapi.Client]MinecraftTokenSource{{}: closingMinecraftTokenSource{closed: &subClosed}},
+		conf:               Config{MinecraftTokenSource: primary},
+	}
+	if err := b.closeOwnedClients(); err != nil {
+		t.Fatal(err)
+	}
+	if !primaryClosed || !subClosed {
+		t.Fatalf("closed primary=%v sub=%v, want both", primaryClosed, subClosed)
+	}
+	if b.minecraftTokens != nil || b.conf.MinecraftTokenSource != nil || b.subMinecraftTokens != nil {
+		t.Fatal("closed token sources are still referenced for reuse")
+	}
 }

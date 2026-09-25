@@ -118,10 +118,9 @@ func TestBroadcasterClosePreservesSharedSocialSubscriber(t *testing.T) {
 		_ = peer.CloseNow()
 	}()
 	social := xblsocial.New(client, conn, xsts.UserInfo{XUID: "100"}, log)
-	b := &Broadcaster{log: log, started: true, done: make(chan struct{})}
+	b := &Broadcaster{log: log, started: true}
 	b.ctx, b.cancel = context.WithCancel(ctx)
 	defer b.cancel()
-	close(b.done)
 	trigger := b.subscribeSocial(social, log)
 	select {
 	case <-subscribed:

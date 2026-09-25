@@ -54,6 +54,8 @@ require (
 )
 
 replace (
+	// Temporary until the MPSD deleted-session fix is merged upstream.
+	github.com/df-mc/go-xsapi/v2 => github.com/hashimthearab/go-xsapi/v2 v2.0.0-20260925110953-6a309d6ae705
 	github.com/sandertv/go-raknet => github.com/hashimthearab/go-raknet v1.15.1-0.20260908193618-2049463566ca
-	github.com/sandertv/gophertunnel => github.com/hashimthearab/gophertunnel v1.25.3-0.20260916092601-d5c8a49dde77
+	github.com/sandertv/gophertunnel => github.com/hashimthearab/gophertunnel v1.25.3-0.20260925110759-04fe256acb1f
 )

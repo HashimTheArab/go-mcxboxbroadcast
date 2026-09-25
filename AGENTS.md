@@ -8,13 +8,15 @@ broadcaster. Put maintenance guidance and implementation constraints here.
 Treat `go.mod` as the source of truth for versions and replacements.
 
 - `go-xsapi/v2` owns Xbox Live MPSD/RTA sessions, social APIs, and presence.
-  It currently uses the upstream module directly.
+  It temporarily uses the `HashimTheArab/go-xsapi` fork for a deleted-session
+  fix pending upstream; return to the upstream module once it is merged.
 - `go-nethernet` owns NetherNet/WebRTC transport. It uses the upstream module,
   which contains the networking changes previously maintained in Lunar's fork.
-- `gophertunnel` owns Bedrock protocol handling, signaling, room announcements,
-  and session metadata. It currently uses the `HashimTheArab/gophertunnel` fork.
-  Before removing the replacement, verify that upstream supports the Xbox
-  friend-list NetherNet behavior used here.
+- `gophertunnel` owns Bedrock protocol handling, signaling, room announcements
+  (including the room listener's announce timeout), and session metadata. It
+  currently uses the `HashimTheArab/gophertunnel` fork. Before removing the
+  replacement, verify that upstream supports the Xbox friend-list NetherNet
+  behavior used here.
 - `go-raknet` uses the `HashimTheArab/go-raknet` fork for RakNet ping compatibility.
 
 ## Session lifecycle
@@ -42,8 +44,22 @@ without contacting Xbox. Preserve these checks when changing recovery:
 - Querying the publishing account does not verify another player's permissions
   or ability to join. Keep that limitation clear in operator documentation.
 - Do not close and reuse an injected `Config.Signaling` connection during
-  recovery. `SignalingFactory` allows recreation. When static signaling prevents
-  primary activity recovery, report the failure and preserve the cooldown.
+  recovery. `SignalingFactory` allows recreation.
+
+Repair at the narrowest layer:
+
+- A lost, full, or unadvertised primary MPSD session is republished under a new
+  name over the existing signaling and listener, including static signaling.
+  Only lost signaling or repeated update failures rebuild the whole stack.
+- A rebuild holds `b.mu` only to swap stacks; `b.recovering` keeps `Update`
+  away. `Close` cancels first and waits for the session loop.
+- Failed session closes go to `staleSessions` and are retried each update tick,
+  or Xbox keeps them registered and RTA reconnects revive them.
+- The room listener re-announces the status `Update` last resolved and never
+  closes the session itself.
+- `sessionNonceAnnouncer` serializes MPSD writes with `busy`, acquired with the
+  caller's context; the `XBLAnnouncer` mutex guards fields only. Nonces are
+  committed after the write succeeds and reconciled on every announcement.
 
 ## Session metadata and signaling
 

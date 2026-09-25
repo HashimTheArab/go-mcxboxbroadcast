@@ -3,10 +3,12 @@ package broadcaster
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/df-mc/go-xsapi/v2/mpsd"
 	"github.com/google/uuid"
@@ -207,7 +209,7 @@ func TestSessionNonceAnnouncerRepublishClearsNonceState(t *testing.T) {
 	announcer.joinRestriction = mpsd.SessionRestrictionFollowed
 	announcer.nonces["200"] = "stale"
 
-	announcer.resetForRepublishLocked()
+	announcer.resetForRepublish(false)
 
 	if announcer.Session != nil {
 		t.Fatal("session should be cleared before republish")
@@ -254,4 +256,80 @@ func TestSessionNonceAnnouncerDoesNotNoOpWithoutSession(t *testing.T) {
 	if !strings.Contains(err.Error(), "XBLAnnouncer.Client is nil") {
 		t.Fatalf("Announce error = %v, want missing client publish attempt", err)
 	}
+}
+
+// A nonce write that fails must stay pending so the next change notice retries it.
+func TestSessionNonceAnnouncerRetriesFailedNonceWrite(t *testing.T) {
+	f := newFakeXbox(t)
+	_, nonce := newFakeXboxBroadcaster(t, f)
+	session := nonce.session()
+	set := func(ctx context.Context, custom json.RawMessage) error {
+		return session.SetCustomProperties(ctx, custom)
+	}
+
+	f.mu.Lock()
+	f.failCustom = 1
+	f.mu.Unlock()
+	if err := nonce.updateNonces(t.Context(), session, []string{"100", "300"}, set); err == nil {
+		t.Fatal("failed nonce write reported success")
+	}
+	if _, ok := statusNonces(t, f.published())["300"]; ok {
+		t.Fatal("failed write published a nonce")
+	}
+	if err := nonce.updateNonces(t.Context(), session, []string{"100", "300"}, set); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := statusNonces(t, f.published())["300"]; !ok {
+		t.Fatalf("next change notice did not retry the nonce write: %s", f.published())
+	}
+}
+
+// Announce reconciles nonces with the session members, so the periodic
+// announcement repairs a nonce write that failed after a change notice.
+func TestSessionNonceAnnouncerAnnounceRepairsMissingNonces(t *testing.T) {
+	f := newFakeXbox(t)
+	b, nonce := newFakeXboxBroadcaster(t, f)
+	f.mu.Lock()
+	f.failCustom = 1
+	f.mu.Unlock()
+	if err := nonce.updateNoncesFromSession(t.Context(), nonce.session()); err == nil {
+		t.Fatal("failed nonce write reported success")
+	}
+	if err := b.Update(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := statusNonces(t, f.published())["200"]; !ok {
+		t.Fatalf("announcement did not publish the joined member's nonce: %s", f.published())
+	}
+}
+
+// A caller waiting behind a hung session write must give up at its own
+// deadline, and session readers must not wait on the network at all.
+func TestSessionNonceAnnouncerWaitHonorsDeadline(t *testing.T) {
+	f := newFakeXbox(t)
+	b, nonce := newFakeXboxBroadcaster(t, f)
+	f.mu.Lock()
+	f.hangCustom = make(chan struct{})
+	f.mu.Unlock()
+	status, err := b.status(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	hung := status
+	hung.MemberCount = 5
+	go func() { _ = nonce.Announce(context.Background(), hung) }()
+	for len(nonce.busy) == 0 {
+		time.Sleep(time.Millisecond)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	status.MemberCount = 6
+	if err := nonce.Announce(ctx, status); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Announce behind a hung write = %v, want %v", err, context.DeadlineExceeded)
+	}
+	if !nonce.TryLock() {
+		t.Fatal("hung write holds the XBLAnnouncer mutex that session readers use")
+	}
+	nonce.Unlock()
 }

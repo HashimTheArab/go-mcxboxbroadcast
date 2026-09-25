@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -31,7 +32,13 @@ type commandBroadcaster interface {
 	Start(context.Context) error
 	Wait() error
 	Close() error
+	HealthHandler() http.Handler
 }
+
+// defaultHTTPTimeout bounds each Xbox Live, PlayFab and webhook request so a
+// hung call fails instead of stalling the broadcaster. WebSocket dials use it
+// only as a handshake timeout.
+const defaultHTTPTimeout = 30 * time.Second
 
 type commandDeps struct {
 	Stdout             io.Writer
@@ -178,6 +185,11 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 	if err != nil {
 		return fmt.Errorf("configure broadcaster: %w", err)
 	}
+	stopHealth, err := serveHealth(cfg.Health.Listen, b.HealthHandler(), log)
+	if err != nil {
+		return err
+	}
+	defer stopHealth()
 	if err := b.Start(ctx); err != nil {
 		return fmt.Errorf("start: %w", err)
 	}
@@ -201,7 +213,7 @@ func (d commandDeps) withDefaults() commandDeps {
 		d.Stdout = os.Stdout
 	}
 	if d.HTTPClient == nil {
-		d.HTTPClient = http.DefaultClient
+		d.HTTPClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
 	if d.LoadConfig == nil {
 		d.LoadConfig = broadcaster.LoadConfigFile
@@ -233,6 +245,30 @@ func (d commandDeps) withDefaults() commandDeps {
 		}
 	}
 	return d
+}
+
+// serveHealth serves handler on addr until the returned stop function runs.
+// An empty addr serves nothing.
+func serveHealth(addr string, handler http.Handler, log *slog.Logger) (stop func(), err error) {
+	if strings.TrimSpace(addr) == "" {
+		return func() {}, nil
+	}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen for health checks: %w", err)
+	}
+	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("health endpoint stopped", "err", err)
+		}
+	}()
+	log.Info("serving health checks", "addr", listener.Addr().String())
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(ctx)
+	}, nil
 }
 
 func closeXSAPIClients(log *slog.Logger, clients []*xsapi.Client) {
