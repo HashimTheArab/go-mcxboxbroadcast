@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"maps"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 )
@@ -224,31 +223,11 @@ func (s *FileHistoryStore) quarantine(cause error) {
 }
 
 func (s *FileHistoryStore) save() error {
-	dir := filepath.Dir(s.Path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(historyFile{Accounts: s.accounts}, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, filepath.Base(s.Path)+".*.tmp")
-	if err != nil {
-		return err
-	}
-	defer func() { _ = os.Remove(tmp.Name()) }() // no-op after the rename
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), s.Path)
+	return writeFileAtomic(s.Path, data)
 }
 
 func ctxErr(ctx context.Context) error {

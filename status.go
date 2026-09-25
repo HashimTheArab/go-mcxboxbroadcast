@@ -60,10 +60,6 @@ func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 	if b.conf.Relay != nil && !st.QueryTarget {
 		st.Players = max(st.Players, b.relays.count())
 	}
-	advertisedProtocol := st.Protocol
-	if advertisedProtocol == 0 {
-		advertisedProtocol = protocol.CurrentProtocol
-	}
 	return normalizeStatus(room.Status{
 		HostName:         stripColour(defaultString(st.HostName, b.hostNameFallback())),
 		WorldName:        stripColour(defaultString(st.WorldName, defaultString(st.HostName, b.hostNameFallback()))),
@@ -75,8 +71,6 @@ func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 		// Always joinable_by_friends, matching MCXboxBroadcast; any other
 		// value makes clients hide the world from the friend list.
 		Joinability:             p2p.JoinabilityFriends,
-		Protocol:                advertisedProtocol,
-		Version:                 defaultString(st.Version, protocol.CurrentVersion),
 		TransportLayer:          p2p.TransportLayerNetherNet,
 		LanGame:                 false,
 		OnlineCrossPlatformGame: true,
@@ -174,12 +168,10 @@ func normalizeStatus(status room.Status) room.Status {
 	if status.Joinability == "" {
 		status.Joinability = p2p.JoinabilityFriends
 	}
-	if status.Protocol == 0 {
-		status.Protocol = protocol.CurrentProtocol
-	}
-	if status.Version == "" {
-		status.Version = protocol.CurrentVersion
-	}
+	// The listener accepts only the compiled-in protocol, so advertising any
+	// other pair shows a world whose every join fails as outdated.
+	status.Protocol = protocol.CurrentProtocol
+	status.Version = protocol.CurrentVersion
 	// Minecraft friend-list sessions use TitleId=0 in MPSD custom properties.
 	// The package TitleID constant is still used for Xbox invite handles.
 	status.TitleID = 0
@@ -321,32 +313,11 @@ func queryStatus(ctx context.Context, address string, timeout time.Duration) (mi
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-
-	ch := make(chan struct {
-		status minecraft.ServerStatus
-		err    error
-	}, 1)
-	go func() {
-		data, err := raknet.Ping(address)
-		if err != nil {
-			ch <- struct {
-				status minecraft.ServerStatus
-				err    error
-			}{err: err}
-			return
-		}
-		ch <- struct {
-			status minecraft.ServerStatus
-			err    error
-		}{status: minecraft.ParsePongData(data)}
-	}()
-
-	select {
-	case out := <-ch:
-		return out.status, out.err
-	case <-ctx.Done():
-		return minecraft.ServerStatus{}, ctx.Err()
+	data, err := raknet.PingContext(ctx, address)
+	if err != nil {
+		return minecraft.ServerStatus{}, err
 	}
+	return minecraft.ParsePongData(data), nil
 }
 
 func stripColour(s string) string {

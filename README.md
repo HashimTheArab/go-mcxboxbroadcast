@@ -34,14 +34,16 @@ configuration model that this implementation follows.
 go run ./cmd/broadcaster -config config.yml
 ```
 
-If `config.yml` does not exist, the command writes a default one and starts from
-those values. The first run starts Microsoft device-code authentication and
-stores the Live token at `accounts.primaryCachePath`.
+If `config.yml` does not exist, the command writes a default one and exits so
+you can set `session.sessionInfo.ip` and `port`; it refuses to start while the
+target is still the example host. The first run starts Microsoft device-code
+authentication and stores the Live token at `accounts.primaryCachePath`.
 
 Configuration keys use the exact camelCase names shown in
-[`config.example.yml`](config.example.yml). YAML and TOML are supported; legacy
-kebab-case keys, root-level session settings, friend-expiry aliases, and
-`slack-webhook` are not translated.
+[`config.example.yml`](config.example.yml). YAML and TOML are supported. Unknown
+keys, including legacy kebab-case keys and `slack-webhook`, stop startup with an
+error naming the key. Older `configVersion`s are migrated and rewritten on load.
+Sessions always advertise the Minecraft version this build accepts.
 
 Use `-debug` or set `debugMode: true` in the config to show detailed runtime
 events such as session creation, presence heartbeats, friend sync scans, pending
@@ -90,7 +92,7 @@ friend. Each account keeps its own history in the JSON file at `historyPath`.
 This is not Java's SQLite database, so operators migrating from MCXboxBroadcast
 start with a fresh history.
 
-Configs from before `configVersion: 4` are migrated from `friendSync.expiry`.
+Configs from before `configVersion: 5` are migrated from `friendSync.expiry`.
 They keep their inactivity setting, and `maxFriends` stays `0` until you set it.
 
 ### Session recovery
@@ -147,8 +149,20 @@ The standalone container is published at
 `ghcr.io/hashimthearab/go-mcxboxbroadcast:latest`.
 
 ```sh
-docker run --rm -it -v /path/to/config:/opt/app/config ghcr.io/hashimthearab/go-mcxboxbroadcast:latest
+docker volume create mcxboxbroadcast
+docker run --rm -it -v mcxboxbroadcast:/opt/app/config ghcr.io/hashimthearab/go-mcxboxbroadcast:latest
 ```
+
+The container runs as UID 100, GID 101. A named volume inherits that ownership;
+a bind-mounted host directory must be writable by it, or run the container as
+the directory's owner:
+
+```sh
+docker run --rm -it --user "$(id -u):$(id -g)" -v /path/to/config:/opt/app/config ghcr.io/hashimthearab/go-mcxboxbroadcast:latest
+```
+
+Images are tagged `latest` and with the commit SHA; pin the SHA tag for
+reproducible deploys.
 
 Interactive terminals use colored, human-readable logs. Redirected output and
 container log streams use plain structured text. Set `NO_COLOR=1` to disable

@@ -1,23 +1,39 @@
 package broadcaster
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 )
 
-func TestLoadConfigFileCreatesDefaults(t *testing.T) {
+// A missing config is written with defaults, but the command must not run on them.
+func TestLoadConfigFileCreatesDefaultsAndRefusesToRun(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yml")
-	cfg, err := LoadConfigFile(path)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := LoadConfigFile(path); !errors.Is(err, ErrConfigCreated) {
+		t.Fatalf("LoadConfigFile() error = %v, want ErrConfigCreated", err)
 	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("default config was not written: %v", err)
+	}
+	if perm := info.Mode().Perm(); runtime.GOOS != "windows" && perm != 0o600 {
+		t.Fatalf("default config mode = %v, want 0600", perm)
+	}
+	// Once written, the default only fails on the example target.
+	if _, err := LoadConfigFile(path); !errors.Is(err, errExampleServerHost) {
+		t.Fatalf("second LoadConfigFile() error = %v, want example host rejection", err)
+	}
+	cfg := DefaultConfigFile()
 	if cfg.ConfigVersion != CurrentConfigVersion {
 		t.Fatalf("unexpected config version %d", cfg.ConfigVersion)
 	}
@@ -33,19 +49,20 @@ func TestLoadConfigFileCreatesDefaults(t *testing.T) {
 	if want := (FriendCleanupFile{InactiveDays: 15, MaxFriends: 950, Interval: 1800, HistoryPath: "cache/player_history.json"}); cfg.FriendSync.Cleanup != want {
 		t.Fatalf("friend cleanup = %#v, want %#v", cfg.FriendSync.Cleanup, want)
 	}
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("default config was not written: %v", err)
-	}
 }
 
+// The shipped example must decode strictly at the current version; only its placeholder target is refused.
 func TestExampleConfigLoads(t *testing.T) {
-	example, err := os.ReadFile("config.example.yml")
+	if _, err := LoadConfigFile("config.example.yml"); !errors.Is(err, errExampleServerHost) {
+		t.Fatalf("LoadConfigFile(example) error = %v, want example host rejection", err)
+	}
+	data, err := os.ReadFile("config.example.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Load a copy: a migration would rewrite the file it loads.
 	path := filepath.Join(t.TempDir(), "config.yml")
-	if err := os.WriteFile(path, example, 0o600); err != nil {
+	data = bytes.Replace(data, []byte("ip: "+exampleServerHost), []byte("ip: bedrock.test"), 1)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := LoadConfigFile(path)
@@ -53,7 +70,10 @@ func TestExampleConfigLoads(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(cfg.Notes) != 0 {
-		t.Fatalf("example config needed adjustments: %q", cfg.Notes)
+		t.Fatalf("example config needed adjustments: %v", cfg.Notes)
+	}
+	if want := fmt.Sprintf("configVersion: %d\n", CurrentConfigVersion); !bytes.HasPrefix(data, []byte(want)) {
+		t.Fatalf("example config does not start with %q", want)
 	}
 	if cfg.ConfigVersion != CurrentConfigVersion {
 		t.Fatalf("unexpected config version %d", cfg.ConfigVersion)
@@ -169,54 +189,74 @@ accounts:
 	}
 }
 
-func TestLoadConfigFileDoesNotTranslateLegacyKeys(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.yml")
-	if err := os.WriteFile(path, []byte(`
-config-version: 1
-debug-log: true
-suppress-session-update-info: true
-remote-address: legacy.example.net
-remote-port: "19135"
-update-interval: 55
-
-friend-sync:
-  should-expire: false
-  expire-days: 30
-  expire-check: 3600
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg, err := LoadConfigFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if cfg.DebugMode || cfg.SuppressSessionUpdateMessage {
-		t.Fatalf("legacy top-level keys were translated: %#v", cfg)
-	}
-	if cfg.Session.UpdateInterval != 30 {
-		t.Fatalf("legacy session keys were translated: %#v", cfg.Session)
-	}
-	if cfg.FriendSync.Cleanup != DefaultConfigFile().FriendSync.Cleanup {
-		t.Fatalf("legacy friend expiry keys were translated: %#v", cfg.FriendSync.Cleanup)
+// Unknown or misspelled keys must fail loudly instead of leaving the defaults in place.
+func TestLoadConfigFileRejectsUnknownKeys(t *testing.T) {
+	for name, tc := range map[string]struct {
+		file, data, key string
+	}{
+		"yaml typo":       {"config.yml", "configVersion: 4\nsession:\n  sesionInfo:\n    ip: bedrock.test\n", "sesionInfo"},
+		"yaml legacy key": {"config.yml", "config-version: 1\nslack-webhook: https://example.net/hook\n", "config-version"},
+		"toml typo":       {"config.toml", "configVersion = 4\n[session.sesionInfo]\nip = \"bedrock.test\"\n", "session.sesionInfo"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), tc.file)
+			if err := os.WriteFile(path, []byte(tc.data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := LoadConfigFile(path)
+			if err == nil || !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("LoadConfigFile() error = %v, want it to name %q", err, tc.key)
+			}
+		})
 	}
 }
 
-func TestLoadConfigFileDoesNotTranslateLegacySlackWebhook(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.yml")
-	if err := os.WriteFile(path, []byte(`
-slack-webhook: https://example.net/hook
-`), 0o600); err != nil {
-		t.Fatal(err)
+// Configs written before the advertised-version override was removed keep loading, minus that override.
+func TestLoadConfigFileMigratesAdvertisedVersionOverride(t *testing.T) {
+	for _, tc := range []struct{ file, data string }{
+		{"config.yml", "configVersion: 3\nsession:\n  sessionInfo:\n    ip: bedrock.test\n    protocol: 2168\n    version: 1.26.44\n"},
+		{"config.toml", "configVersion = 3\n[session.sessionInfo]\nip = \"bedrock.test\"\nprotocol = 2168\nversion = \"1.26.44\"\n"},
+	} {
+		t.Run(tc.file, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), tc.file)
+			if err := os.WriteFile(path, []byte(tc.data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadConfigFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.ConfigVersion != CurrentConfigVersion || cfg.Session.SessionInfo.IP != "bedrock.test" {
+				t.Fatalf("migrated config = version %d ip %q", cfg.ConfigVersion, cfg.Session.SessionInfo.IP)
+			}
+			if !slices.ContainsFunc(cfg.Notes, func(n string) bool { return strings.Contains(n, "sessionInfo.protocol") }) {
+				t.Fatalf("notes = %v, want the removed override reported", cfg.Notes)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(data, []byte("2168")) {
+				t.Fatalf("migrated file still carries the override:\n%s", data)
+			}
+			if _, err := LoadConfigFile(path); err != nil {
+				t.Fatalf("migrated file does not reload: %v", err)
+			}
+		})
 	}
+}
 
-	cfg, err := LoadConfigFile(path)
-	if err != nil {
-		t.Fatal(err)
+// Every version after the first gets a migration step, so a version bump cannot skip one.
+func TestConfigMigrationsCoverEveryVersion(t *testing.T) {
+	for v := 4; v <= CurrentConfigVersion; v++ {
+		if configMigrations[v] == nil {
+			t.Errorf("no migration to config version %d", v)
+		}
 	}
-	if cfg.Notifications.Enabled || cfg.Notifications.WebhookURL != "" {
-		t.Fatalf("legacy slack webhook was translated: %#v", cfg.Notifications)
+	for v := range configMigrations {
+		if v > CurrentConfigVersion {
+			t.Errorf("migration to version %d is newer than CurrentConfigVersion %d", v, CurrentConfigVersion)
+		}
 	}
 }
 
@@ -227,8 +267,6 @@ func TestConfigFileToConfigMapsOperatorSettings(t *testing.T) {
 	cfg.Session.SessionInfo.Port = 19133
 	cfg.Session.SessionInfo.HostName = "Host"
 	cfg.Session.SessionInfo.WorldName = "World"
-	cfg.Session.SessionInfo.Version = "1.26.44"
-	cfg.Session.SessionInfo.Protocol = 2168
 	cfg.Session.BroadcastSetting = int32(BroadcastSettingFriendsOnly)
 	cfg.Session.WorldType = WorldTypeSurvival
 	cfg.Session.QueryServer = false
@@ -252,9 +290,6 @@ func TestConfigFileToConfigMapsOperatorSettings(t *testing.T) {
 	}
 	if runtime.Status.Broadcast != int32(BroadcastSettingFriendsOnly) {
 		t.Fatalf("unexpected broadcast setting %d", runtime.Status.Broadcast)
-	}
-	if runtime.Status.Version != "1.26.44" || runtime.Status.Protocol != 2168 {
-		t.Fatalf("advertised pair = %s/%d, want 1.26.44/2168", runtime.Status.Version, runtime.Status.Protocol)
 	}
 	if runtime.Gallery == nil || runtime.Gallery.ImagePath != "images/showcase.jpg" {
 		t.Fatalf("gallery config not mapped: %#v", runtime.Gallery)
@@ -283,6 +318,8 @@ func TestRuntimeConfigMapsICEUDPPortRange(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yml")
 	if err := os.WriteFile(path, []byte(`
 session:
+  sessionInfo:
+    ip: bedrock.test
   icePortRange:
     min: 40000
     max: 40010
@@ -313,7 +350,7 @@ func TestRuntimeConfigRejectsInvalidICEUDPPortRange(t *testing.T) {
 	for name, ports := range tests {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.yml")
-			data := "session:\n  icePortRange:\n    " + ports + "\n"
+			data := "session:\n  sessionInfo:\n    ip: bedrock.test\n  icePortRange:\n    " + ports + "\n"
 			if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -404,6 +441,9 @@ configVersion = 1
 
 [session]
 updateInterval = 10
+
+[session.sessionInfo]
+ip = "bedrock.test"
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -436,6 +476,12 @@ func TestLoadConfigFileMigratesFriendExpiry(t *testing.T) {
 			file: "config.yml",
 			data: "configVersion: 3\nfriendSync:\n  expiry:\n    enabled: true\n    days: 7\n    check: 600\n    historyPath: cache/h.json\n",
 			want: FriendCleanupFile{InactiveDays: 7, Interval: 600, HistoryPath: "cache/h.json"},
+		},
+		{
+			name: "production v3",
+			file: "config.yml",
+			data: "configVersion: 3\ndebugMode: false\nfriendSync:\n  updateInterval: 60\n  autoFollow: true\n  autoUnfollow: true\n  initialInvite: true\n  expiry:\n    enabled: true\n    days: 15\n    check: 1800\n    historyPath: cache/player_history.json\n",
+			want: FriendCleanupFile{InactiveDays: 15, Interval: 1800, HistoryPath: "cache/player_history.json"},
 		},
 		{
 			name: "disabled",
@@ -477,15 +523,15 @@ func TestLoadConfigFileMigratesFriendExpiry(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), tt.file)
-			if err := os.WriteFile(path, []byte(tt.data), 0o600); err != nil {
+			if err := os.WriteFile(path, []byte(tt.data+testTarget(tt.file)), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			cfg, err := LoadConfigFile(path)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if cfg.FriendSync.Cleanup != tt.want {
-				t.Fatalf("cleanup = %#v, want %#v", cfg.FriendSync.Cleanup, tt.want)
+			if cfg.FriendSync.Cleanup != tt.want || cfg.ConfigVersion != CurrentConfigVersion {
+				t.Fatalf("version %d cleanup = %#v, want %d and %#v", cfg.ConfigVersion, cfg.FriendSync.Cleanup, CurrentConfigVersion, tt.want)
 			}
 			// The rewritten file must load to the same settings.
 			reloaded, err := LoadConfigFile(path)
@@ -508,7 +554,7 @@ func TestLoadConfigFileMigratesFriendExpiry(t *testing.T) {
 
 func TestLoadConfigFileNotesFriendLimitWithoutHeadroom(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yml")
-	if err := os.WriteFile(path, []byte("configVersion: 4\nfriendSync:\n  cleanup:\n    maxFriends: 1000\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("configVersion: 5\nfriendSync:\n  cleanup:\n    maxFriends: 1000\n"+testTarget(path)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := LoadConfigFile(path)
@@ -518,4 +564,12 @@ func TestLoadConfigFileNotesFriendLimitWithoutHeadroom(t *testing.T) {
 	if !slices.ContainsFunc(cfg.Notes, func(note string) bool { return strings.Contains(note, "maxFriends 1000") }) {
 		t.Fatalf("notes = %q, want a maxFriends headroom note", cfg.Notes)
 	}
+}
+
+// testTarget returns a session target block for path's format, since the example host is refused.
+func testTarget(path string) string {
+	if strings.HasSuffix(path, ".toml") {
+		return "\n[session.sessionInfo]\nip = \"bedrock.test\"\n"
+	}
+	return "session:\n  sessionInfo:\n    ip: bedrock.test\n"
 }

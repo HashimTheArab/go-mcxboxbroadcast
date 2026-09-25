@@ -1,21 +1,49 @@
-name: Publish Docker image
+name: CI
 
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
-  packages: write
+
+# One run per ref at a time; publish also skips mutable tags once main has moved on.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   DOCKER_IMAGE: ghcr.io/hashimthearab/go-mcxboxbroadcast
 
 jobs:
-  build:
-    name: Build and publish image
+  test:
+    name: Test
     runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race -count=1 ./...
+
+  publish:
+    name: Build and publish image
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -30,6 +58,24 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # A re-run or queued run of an older commit publishes only its SHA tags.
+      - name: Choose tags
+        id: tags
+        shell: bash
+        run: |
+          head=$(git ls-remote origin refs/heads/main | cut -f1)
+          test -n "$head"
+          {
+            echo 'standalone<<EOF'
+            echo "$DOCKER_IMAGE:$GITHUB_SHA"
+            if [ "$head" = "$GITHUB_SHA" ]; then echo "$DOCKER_IMAGE:latest"; fi
+            echo 'EOF'
+            echo 'pterodactyl<<EOF'
+            echo "$DOCKER_IMAGE:$GITHUB_SHA-pterodactyl"
+            if [ "$head" = "$GITHUB_SHA" ]; then echo "$DOCKER_IMAGE:pterodactyl"; fi
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         uses: docker/build-push-action@v7
         with:
@@ -37,9 +83,7 @@ jobs:
           file: Dockerfile
           target: standalone
           push: true
-          tags: |
-            ${{ env.DOCKER_IMAGE }}:${{ github.sha }}
-            ${{ env.DOCKER_IMAGE }}:latest
+          tags: ${{ steps.tags.outputs.standalone }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -50,8 +94,6 @@ jobs:
           file: Dockerfile
           target: pterodactyl
           push: true
-          tags: |
-            ${{ env.DOCKER_IMAGE }}:${{ github.sha }}-pterodactyl
-            ${{ env.DOCKER_IMAGE }}:pterodactyl
+          tags: ${{ steps.tags.outputs.pterodactyl }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
