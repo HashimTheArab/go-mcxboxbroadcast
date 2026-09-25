@@ -6,7 +6,7 @@ require (
 	github.com/coder/websocket v1.8.14
 	github.com/df-mc/go-nethernet v1.0.20-0.20260915174748-4ead02dfc551
 	github.com/df-mc/go-playfab/v2 v2.0.3
-	github.com/df-mc/go-xsapi/v2 v2.0.4-0.20260925124756-850defd78d00
+	github.com/df-mc/go-xsapi/v2 v2.0.4-0.20260925130556-58a99d3044b7
 	github.com/go-gl/mathgl v1.2.0
 	github.com/google/uuid v1.6.0
 	github.com/lmittmann/tint v1.2.0
