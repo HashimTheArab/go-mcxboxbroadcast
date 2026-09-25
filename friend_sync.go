@@ -45,7 +45,12 @@ type HistoryStore interface {
 	Track(ctx context.Context, account string, when time.Time, xuids ...string) error
 	// Seen records activity by xuid for every account tracking it.
 	Seen(ctx context.Context, xuid string, when time.Time) error
-	// Forget stops tracking xuids for account.
+	// MarkRemoving records at when that account ended its friendship with
+	// xuids while their follow of it remains, replacing their LastSeen entries.
+	MarkRemoving(ctx context.Context, account string, when time.Time, xuids ...string) error
+	// Removing returns the XUIDs account marked with MarkRemoving and when.
+	Removing(ctx context.Context, account string) (map[string]time.Time, error)
+	// Forget stops tracking xuids for account, including removal marks.
 	Forget(ctx context.Context, account string, xuids ...string) error
 }
 
@@ -82,9 +87,6 @@ const (
 	friendAcceptConfirmWindow = time.Hour
 	// friendInviteMemory stops repeat initial invites to the same person.
 	friendInviteMemory = time.Hour
-	// friendRemovalMemory stops removed friends who still follow the account
-	// from being followed back.
-	friendRemovalMemory = 24 * time.Hour
 )
 
 type friendSyncOptions struct {
@@ -104,17 +106,11 @@ type friendSyncRunState struct {
 	invited  map[string]time.Time             // XUID -> initial invite sent
 	accepted map[string]acceptedFriendRequest // accepted, not yet on the friend list
 	rejected map[string]time.Time             // XUID -> request retry allowed
-	removed  map[string]removedFriend         // XUID -> removed by cleanup
 }
 
 type acceptedFriendRequest struct {
 	person Person
 	at     time.Time
-}
-
-type removedFriend struct {
-	at           time.Time
-	stillFollows bool // the follower side could not be removed yet
 }
 
 func (s *friendSyncRunState) options(now time.Time, cleanup bool) friendSyncOptions {
@@ -143,7 +139,6 @@ func (s *friendSyncRunState) forget(now time.Time) {
 		s.invited = map[string]time.Time{}
 		s.accepted = map[string]acceptedFriendRequest{}
 		s.rejected = map[string]time.Time{}
-		s.removed = map[string]removedFriend{}
 	}
 	for xuid, at := range s.invited {
 		if now.Sub(at) >= friendInviteMemory {
@@ -158,11 +153,6 @@ func (s *friendSyncRunState) forget(now time.Time) {
 	for xuid, until := range s.rejected {
 		if !now.Before(until) {
 			delete(s.rejected, xuid)
-		}
-	}
-	for xuid, removal := range s.removed {
-		if now.Sub(removal.at) >= friendRemovalMemory {
-			delete(s.removed, xuid)
 		}
 	}
 }
@@ -212,6 +202,7 @@ func (s *FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOptio
 	}
 	s.confirmAccepted(ctx, people)
 	own := s.ownAccounts()
+	removing := s.removing(ctx)
 	stats := s.friendSyncStats(people, opts)
 	s.debug(ctx, "friend sync scan",
 		"people", stats.people,
@@ -241,14 +232,14 @@ func (s *FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOptio
 		if isGuestXUID(p.XUID) {
 			continue
 		}
-		if s.Config.AutoFollow && opts.autoFollow && !result.followBlocked() && p.IsFollowingCaller && !p.IsFollowedByCaller {
-			if removal, ok := s.state.removed[p.XUID]; ok {
-				// A removed friend who still follows must not be followed back.
-				if removal.stillFollows && opts.autoUnfollow && !result.unfollowBlocked() {
-					s.finishRemoval(ctx, p, &result)
-				}
-				continue
+		if _, ok := removing[p.XUID]; ok && p.IsFollowingCaller && !p.IsFollowedByCaller {
+			// A removed friend who still follows must not be followed back.
+			if opts.autoUnfollow && !result.unfollowBlocked() {
+				s.finishRemoval(ctx, p, &result)
 			}
+			continue
+		}
+		if s.Config.AutoFollow && opts.autoFollow && !result.followBlocked() && p.IsFollowingCaller && !p.IsFollowedByCaller {
 			if s.follow(ctx, p, opts, &result) {
 				added++
 			}
@@ -263,7 +254,7 @@ func (s *FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOptio
 			}
 		}
 	}
-	removed += s.cleanup(ctx, people, own, unfollowed, opts, &result)
+	removed += s.cleanup(ctx, people, own, unfollowed, removing, opts, &result)
 	if stats.autoFollowCandidates > 0 {
 		s.debug(ctx, "added friends", "count", added)
 	}
@@ -310,7 +301,6 @@ func (s *FriendSyncer) acceptPending(ctx context.Context, opts friendSyncOptions
 	cancel()
 	for _, p := range requests.Accepted {
 		s.state.accepted[p.XUID] = acceptedFriendRequest{person: p, at: now}
-		delete(s.state.removed, p.XUID) // a new request is a fresh start
 		s.debug(ctx, "accepted friend request", "xuid", p.XUID, "gamertag", p.Gamertag)
 	}
 	result.waiting = requests.Waiting
@@ -371,6 +361,7 @@ func (s *FriendSyncer) confirmAccepted(ctx context.Context, people []Person) {
 			continue
 		}
 		delete(s.state.accepted, p.XUID)
+		s.forget(ctx, p.XUID) // a new friendship starts a fresh clock
 		s.info(ctx, "added friend", "xuid", p.XUID, "gamertag", req.person.Gamertag, "source", "pending_requests")
 		s.sendInitialInvite(ctx, req.person, "pending_requests")
 	}
@@ -437,8 +428,9 @@ func (s *FriendSyncer) unfollow(ctx context.Context, p Person, result *friendSyn
 	return true
 }
 
-// removeFriend ends the friendship with p in both directions, so p is not
-// followed back, and reports whether the friendship ended.
+// removeFriend ends the friendship with p and reports whether it ended. When
+// p's follow of the account could not be dropped too, p is marked in History
+// so a later pass finishes the removal instead of following p back.
 func (s *FriendSyncer) removeFriend(ctx context.Context, p Person, reason string, lastSeen time.Time, result *friendSyncResult) bool {
 	operationCtx, cancel := xboxOperationContext(ctx)
 	err := s.Client.RemoveFriend(operationCtx, p.XUID)
@@ -448,25 +440,40 @@ func (s *FriendSyncer) removeFriend(ctx context.Context, p Person, reason string
 		result.unfollowRetryAfter = max(result.unfollowRetryAfter, retryDelay(err))
 		return false
 	}
-	s.state.removed[p.XUID] = removedFriend{at: time.Now(), stillFollows: true}
 	s.info(ctx, "removed friend", "xuid", p.XUID, "gamertag", p.Gamertag, "reason", reason, "last_seen", lastSeen)
-	if !result.unfollowBlocked() {
-		s.finishRemoval(ctx, p, result)
+	if result.unfollowBlocked() || !s.finishRemoval(ctx, p, result) {
+		if err := s.History.MarkRemoving(ctx, s.Account, time.Now(), p.XUID); err != nil && s.Log != nil {
+			s.Log.Error("record pending friend removal", "xuid", p.XUID, "err", err)
+		}
 	}
 	return true
 }
 
-// finishRemoval drops a removed friend's follow of the account.
-func (s *FriendSyncer) finishRemoval(ctx context.Context, p Person, result *friendSyncResult) {
+// finishRemoval drops a removed friend's follow of the account and reports
+// whether it succeeded.
+func (s *FriendSyncer) finishRemoval(ctx context.Context, p Person, result *friendSyncResult) bool {
 	operationCtx, cancel := xboxOperationContext(ctx)
 	err := s.Client.RemoveFollower(operationCtx, p.XUID)
 	cancel()
 	if err != nil {
 		s.debug(ctx, "failed to remove follower", "xuid", p.XUID, "gamertag", p.Gamertag, "err", err)
 		result.unfollowRetryAfter = max(result.unfollowRetryAfter, retryDelay(err))
-		return
+		return false
 	}
-	s.state.removed[p.XUID] = removedFriend{at: s.state.removed[p.XUID].at}
+	s.forget(ctx, p.XUID)
+	return true
+}
+
+// removing returns the people this account is still finishing removing.
+func (s *FriendSyncer) removing(ctx context.Context) map[string]time.Time {
+	if s.History == nil || !s.Config.Cleanup.enabled() {
+		return nil
+	}
+	removing, err := s.History.Removing(ctx, s.Account)
+	if err != nil && s.Log != nil {
+		s.Log.Error("read pending friend removals", "err", err)
+	}
+	return removing
 }
 
 // friendCleanupCandidate is a friend cleanup has chosen to remove.
@@ -479,7 +486,7 @@ type friendCleanupCandidate struct {
 // cleanup removes inactive friends on cleanup passes and, on every pass, the
 // least recently seen friends needed to keep the list within MaxFriends. It
 // returns how many friends it removed.
-func (s *FriendSyncer) cleanup(ctx context.Context, people []Person, own, unfollowed map[string]struct{}, opts friendSyncOptions, result *friendSyncResult) int {
+func (s *FriendSyncer) cleanup(ctx context.Context, people []Person, own, unfollowed map[string]struct{}, removing map[string]time.Time, opts friendSyncOptions, result *friendSyncResult) int {
 	conf := s.Config.Cleanup
 	if s.History == nil || !conf.enabled() || (!opts.cleanup && conf.MaxFriends == 0) {
 		return 0
@@ -519,7 +526,7 @@ func (s *FriendSyncer) cleanup(ctx context.Context, people []Person, own, unfoll
 		}
 	}
 	if opts.cleanup {
-		s.pruneHistory(ctx, lastSeen, friends)
+		s.pruneHistory(ctx, lastSeen, removing, people, friends)
 	}
 
 	slices.SortFunc(friends, func(a, b Person) int {
@@ -559,33 +566,44 @@ func (s *FriendSyncer) cleanup(ctx context.Context, people []Person, own, unfoll
 		s.debug(ctx, "friend cleanup deferred by rate limit", "candidates", len(candidates))
 		return 0
 	}
-	var removed []string
+	removed := 0
 	for _, c := range candidates {
 		if ctx.Err() != nil || result.unfollowBlocked() {
 			break
 		}
 		if s.removeFriend(ctx, c.person, c.reason, c.lastSeen, result) {
-			removed = append(removed, c.person.XUID)
+			removed++
 		}
 	}
-	s.forget(ctx, removed...)
-	if result.friendListFull && len(removed) > 0 {
+	if result.friendListFull && removed > 0 {
 		result.madeRoom = true
 	}
-	return len(removed)
+	return removed
 }
 
-// pruneHistory drops this account's history for people no longer its friends.
-func (s *FriendSyncer) pruneHistory(ctx context.Context, lastSeen map[string]time.Time, friends []Person) {
+// pruneHistory drops this account's history for people no longer its friends,
+// and removal marks for people who no longer follow it.
+func (s *FriendSyncer) pruneHistory(ctx context.Context, lastSeen, removing map[string]time.Time, people, friends []Person) {
 	current := make(map[string]struct{}, len(friends))
 	for _, p := range friends {
 		current[p.XUID] = struct{}{}
+	}
+	followers := make(map[string]struct{}, len(people))
+	for _, p := range people {
+		if p.IsFollowingCaller {
+			followers[p.XUID] = struct{}{}
+		}
 	}
 	var gone []string
 	for xuid := range lastSeen {
 		if _, ok := current[xuid]; !ok {
 			gone = append(gone, xuid)
 			delete(lastSeen, xuid)
+		}
+	}
+	for xuid := range removing {
+		if _, ok := followers[xuid]; !ok {
+			gone = append(gone, xuid)
 		}
 	}
 	if len(gone) > 0 {

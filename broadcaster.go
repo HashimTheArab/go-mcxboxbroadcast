@@ -290,6 +290,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 		go client.Run(b.ctx, b.log)
 	}
 	go b.uploadGalleryWithTimeout()
+	b.primeFriendHistory()
 	if b.conf.FriendSync != nil && hasSocialClient(b.conf.XBLClient) {
 		b.debug("starting friend sync",
 			"auto_follow", b.conf.FriendSync.AutoFollow,
@@ -325,6 +326,23 @@ func (b *Broadcaster) enabledSubAccounts() (accounts []*SubAccountConfig, duplic
 		accounts = append(accounts, account)
 	}
 	return accounts, duplicates
+}
+
+// primeFriendHistory reads every own account's history once before any syncer
+// writes, so a history file from before per-account entries migrates to all
+// of them rather than only to the first account that writes.
+func (b *Broadcaster) primeFriendHistory() {
+	if b.conf.FriendHistory == nil {
+		return
+	}
+	for _, xuid := range b.ownXUIDs() {
+		if xuid == "" {
+			continue
+		}
+		if _, err := b.conf.FriendHistory.LastSeen(b.ctx, xuid); err != nil {
+			b.log.Error("read player history", "xuid", xuid, "err", err)
+		}
+	}
 }
 
 // ownXUIDs returns the XUIDs of the primary and every configured sub-account.

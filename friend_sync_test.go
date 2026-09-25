@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -592,10 +593,30 @@ func (f notifierFunc) Notify(ctx context.Context, message string) error {
 type memoryHistory struct {
 	mu       sync.Mutex
 	accounts map[string]map[string]time.Time
+	removing map[string]map[string]time.Time
 }
 
 func newMemoryHistory() *memoryHistory {
-	return &memoryHistory{accounts: map[string]map[string]time.Time{}}
+	return &memoryHistory{accounts: map[string]map[string]time.Time{}, removing: map[string]map[string]time.Time{}}
+}
+
+func (h *memoryHistory) MarkRemoving(_ context.Context, account string, when time.Time, xuids ...string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.removing[account] == nil {
+		h.removing[account] = map[string]time.Time{}
+	}
+	for _, xuid := range xuids {
+		delete(h.accounts[account], xuid)
+		h.removing[account][xuid] = when
+	}
+	return nil
+}
+
+func (h *memoryHistory) Removing(_ context.Context, account string) (map[string]time.Time, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return maps.Clone(h.removing[account]), nil
 }
 
 func (h *memoryHistory) set(account, xuid string, when time.Time) {
@@ -645,6 +666,7 @@ func (h *memoryHistory) Forget(_ context.Context, account string, xuids ...strin
 	defer h.mu.Unlock()
 	for _, xuid := range xuids {
 		delete(h.accounts[account], xuid)
+		delete(h.removing[account], xuid)
 	}
 	return nil
 }
@@ -977,5 +999,55 @@ func TestFriendSyncListFullUnderMaxFriendsDoesNotEvict(t *testing.T) {
 	}
 	if !x.following["1"] || !x.following["2"] || s.state.autoFollowUntil.IsZero() {
 		t.Fatalf("following=%v backoff=%v, want no removals and an accept backoff", x.following, s.state.autoFollowUntil)
+	}
+}
+
+// A removal whose follower side failed must survive a restart, or the next process follows the player back.
+func TestFriendSyncFinishesRemovalAfterRestart(t *testing.T) {
+	x := newFakeXbox()
+	x.befriend("42")
+	x.removeFollower = func(string) *http.Response {
+		resp := response(http.StatusTooManyRequests, "")
+		resp.Header.Set("Retry-After", "30")
+		return resp
+	}
+	path := filepath.Join(t.TempDir(), "player_history.json")
+	history := NewFileHistoryStore(path)
+	if err := history.Track(context.Background(), "100", time.Now().Add(-16*24*time.Hour), "42"); err != nil {
+		t.Fatal(err)
+	}
+	conf := FriendSyncConfig{AutoFollow: true, AutoUnfollow: true, Cleanup: FriendCleanupConfig{InactiveDays: 15}}
+	(&FriendSyncer{Client: x.client(), History: history, Account: "100", Config: conf}).runSync(context.Background(), true)
+	if x.following["42"] || !x.followers["42"] {
+		t.Fatalf("following=%v followers=%v, want friendship ended with the follower left", x.following, x.followers)
+	}
+
+	x.removeFollower = nil
+	restarted := &FriendSyncer{Client: x.client(), History: NewFileHistoryStore(path), Account: "100", Config: conf}
+	restarted.runSync(context.Background(), false)
+	if len(x.follows) != 0 || x.followers["42"] {
+		t.Fatalf("after restart follows=%v follower=%v, want the removal finished and no follow-back", x.follows, x.followers["42"])
+	}
+	if removing, _ := NewFileHistoryStore(path).Removing(context.Background(), "100"); len(removing) != 0 {
+		t.Fatalf("removal marks = %v, want cleared once the follower is gone", removing)
+	}
+}
+
+// A removed player who sends a new request is a new friend with a fresh clock, not an inactive one.
+func TestFriendSyncAcceptedRequestClearsRemoval(t *testing.T) {
+	x := newFakeXbox()
+	x.followers["42"] = true
+	x.pending["42"] = true
+	history := newMemoryHistory()
+	_ = history.MarkRemoving(context.Background(), "100", time.Now().Add(-20*24*time.Hour), "42")
+	s := &FriendSyncer{Client: x.client(), History: history, Account: "100",
+		Config: FriendSyncConfig{AutoFollow: true, AutoUnfollow: true, Cleanup: FriendCleanupConfig{InactiveDays: 15}}}
+	s.runSync(context.Background(), true)
+	s.runSync(context.Background(), true)
+	if !x.following["42"] || !x.followers["42"] {
+		t.Fatalf("following=%v followers=%v, want 42 kept as a friend", x.following, x.followers)
+	}
+	if removing, _ := history.Removing(context.Background(), "100"); len(removing) != 0 {
+		t.Fatalf("removal marks = %v, want cleared by the new friendship", removing)
 	}
 }

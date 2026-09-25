@@ -220,3 +220,9 @@ func (h *friendRateHistory) LastSeen(context.Context, string) (map[string]time.T
 func (h *friendRateHistory) Track(context.Context, string, time.Time, ...string) error { return nil }
 func (h *friendRateHistory) Seen(context.Context, string, time.Time) error             { return nil }
 func (h *friendRateHistory) Forget(context.Context, string, ...string) error           { return nil }
+func (h *friendRateHistory) MarkRemoving(context.Context, string, time.Time, ...string) error {
+	return nil
+}
+func (h *friendRateHistory) Removing(context.Context, string) (map[string]time.Time, error) {
+	return nil, nil
+}

@@ -122,3 +122,28 @@ func TestFileHistoryStoreQuarantinesCorruptFile(t *testing.T) {
 		t.Fatalf("temporary files left behind: %v", temps)
 	}
 }
+
+// Every account read before the first write keeps the flat history after a restart.
+func TestFileHistoryStoreMigratesFlatHistoryForEveryReadAccount(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "player_history.json")
+	if err := os.WriteFile(path, []byte(`{"1": 1700000000}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b := &Broadcaster{log: testBroadcasterLogger(), ctx: ctx, conf: Config{
+		XUID:          "primary",
+		FriendHistory: NewFileHistoryStore(path),
+		SubAccounts:   []SubAccountConfig{{ID: "sub", Enabled: true, XUID: "sub"}},
+	}}
+	b.primeFriendHistory()
+	if err := b.conf.FriendHistory.Track(ctx, "primary", time.Now(), "2"); err != nil {
+		t.Fatal(err)
+	}
+	sub, err := NewFileHistoryStore(path).LastSeen(ctx, "sub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sub["1"].Unix() != 1700000000 {
+		t.Fatalf("sub-account history after restart = %v, want the migrated clock", sub)
+	}
+}
