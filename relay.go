@@ -266,15 +266,28 @@ func (b *Broadcaster) verifyRelayIdentity(ctx context.Context, conn relayClientC
 	if sessionsHaveMember(sessions, xuid) {
 		return nil
 	}
-	// The join can reach the listener before the session change reaches us over RTA.
+	// The join can reach the listener before the session change reaches us over RTA. Sessions are re-read in
+	// parallel, so a slow one cannot starve the one that lists the player.
 	ctx, cancel := context.WithTimeout(ctx, relayVerifyTimeout)
 	defer cancel()
-	var syncErr error
-	for _, s := range sessions {
-		syncErr = errors.Join(syncErr, s.session.Sync(ctx))
+	type refresh struct {
+		member bool
+		err    error
 	}
-	if sessionsHaveMember(sessions, xuid) {
-		return nil
+	refreshed := make(chan refresh, len(sessions))
+	for _, s := range sessions {
+		go func() {
+			err := s.session.Sync(ctx)
+			refreshed <- refresh{member: err == nil && sessionsHaveMember([]ownedSession{s}, xuid), err: err}
+		}()
+	}
+	var syncErr error
+	for range sessions {
+		r := <-refreshed
+		if r.member {
+			return nil
+		}
+		syncErr = errors.Join(syncErr, r.err)
 	}
 	if syncErr != nil {
 		return fmt.Errorf("not a member of any published session; refresh failed: %w", syncErr)

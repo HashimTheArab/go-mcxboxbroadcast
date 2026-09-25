@@ -443,3 +443,29 @@ func TestRefreshSessionUpdatesPrimaryAfterSubAccountRecovery(t *testing.T) {
 		t.Fatalf("primary updates = %d after a successful sub-account recovery, want 1", primary.updates)
 	}
 }
+
+// A stalled retry of an unpublished sub-account must not delay the primary's scheduled update.
+func TestRefreshSessionUpdatesPrimaryBeforeRetryingSubAccounts(t *testing.T) {
+	primary := &contextCheckingAnnouncer{}
+	var updatedFirst bool
+	b := &Broadcaster{
+		log:       testBroadcasterLogger(),
+		ctx:       context.Background(),
+		started:   true,
+		announcer: primary,
+		conf: Config{
+			XUID:        "100",
+			SubAccounts: []SubAccountConfig{{ID: "sub", Enabled: true, XUID: "200", XBLClient: &xsapi.Client{}}},
+		},
+		subAccountAnnouncerFactory: func(context.Context, SubAccountConfig, mpsd.SessionReference) (room.Announcer, error) {
+			updatedFirst = primary.updates == 1
+			return nil, errors.New("sub-account unavailable")
+		},
+	}
+	if err := b.refreshSession(sessionHealthIssue{}); err != nil {
+		t.Fatal(err)
+	}
+	if !updatedFirst {
+		t.Fatal("sub-account retry ran before the primary's metadata update")
+	}
+}

@@ -76,9 +76,9 @@ func (b *Broadcaster) sessionLoop() {
 	}
 }
 
-// refreshSession repairs an unhealthy sub-account and retries unpublished ones,
-// then updates metadata, each with its own request budget so optional accounts
-// cannot consume the primary's time.
+// refreshSession repairs an unhealthy sub-account, updates metadata, then
+// retries unpublished sub-accounts, each with its own request budget so
+// optional accounts cannot consume the primary's time.
 func (b *Broadcaster) refreshSession(issue sessionHealthIssue) error {
 	if issue.subAccountID != "" {
 		ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
@@ -90,12 +90,14 @@ func (b *Broadcaster) refreshSession(issue sessionHealthIssue) error {
 			b.info("sub-account session recovered", "sub_account", issue.subAccountID, "reason", issue.reason)
 		}
 	}
+	ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
+	err := b.Update(ctx)
+	cancel()
+	// Retries run after the primary's update so a stalled sub-account cannot delay it.
 	retryCtx, cancel := context.WithTimeout(b.ctx, subAccountRetryTimeout)
 	b.retryUnpublishedSubAccounts(retryCtx)
 	cancel()
-	ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
-	defer cancel()
-	return b.Update(ctx)
+	return err
 }
 
 // canRecreateSignaling reports whether signaling can be rebuilt by the broadcaster.

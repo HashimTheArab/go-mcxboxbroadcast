@@ -475,6 +475,8 @@ type fakeMemberSession struct {
 	members map[string]bool
 	joined  string
 	syncs   int
+	// stalled makes Sync wait for its context, like a refresh that never answers.
+	stalled bool
 }
 
 func (s *fakeMemberSession) MemberByXUID(xuid string) (mpsd.MemberDescription, bool) {
@@ -483,7 +485,11 @@ func (s *fakeMemberSession) MemberByXUID(xuid string) (mpsd.MemberDescription, b
 	return mpsd.MemberDescription{}, s.members[xuid]
 }
 
-func (s *fakeMemberSession) Sync(context.Context) error {
+func (s *fakeMemberSession) Sync(ctx context.Context) error {
+	if s.stalled {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.syncs++
@@ -638,5 +644,19 @@ func TestCloseWaitsForStalledRelay(t *testing.T) {
 	case <-relayDone:
 	default:
 		t.Fatal("Close returned before the relay handler did")
+	}
+}
+
+// A session whose refresh stalls must not delay accepting a player that another refreshed session lists.
+func TestRelayAcceptsMemberDespiteStalledRefresh(t *testing.T) {
+	primary := &fakeMemberSession{members: map[string]bool{"host": true}, stalled: true}
+	sub := &fakeMemberSession{members: map[string]bool{"sub": true}, joined: "visitor"}
+	start := time.Now()
+	dialed, _ := relayWithSessions(t, "visitor", ownedSession{owner: "host", session: primary}, ownedSession{owner: "sub", session: sub})
+	if !dialed {
+		t.Fatal("member of the sub-account session was rejected")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("accepting the member took %v; a stalled refresh of another session held it up", elapsed)
 	}
 }
