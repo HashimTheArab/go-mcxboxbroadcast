@@ -68,8 +68,8 @@ type Config struct {
 	// WebSocket signaling.
 	SignalingMode SignalingMode
 
-	// ListenConfig customizes the gophertunnel listener. Zero LoginTimeout and
-	// MaximumPendingLogins use broadcaster defaults; negative values disable them.
+	// ListenConfig customizes the gophertunnel listener. A zero LoginTimeout uses
+	// the broadcaster default; a negative one disables it.
 	ListenConfig minecraft.ListenConfig
 	// NetherNetListenConfig customizes WebRTC/NetherNet listener negotiation.
 	// Clients that send no NetherNet identity are refused unless AllowAnonymous is set.

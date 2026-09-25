@@ -717,17 +717,14 @@ func TestBroadcasterUsesLongerDefaultNetherNetTransportTimeout(t *testing.T) {
 	}
 }
 
-func TestMinecraftListenConfigBoundsPendingLogins(t *testing.T) {
+func TestMinecraftListenConfigBoundsLoginTime(t *testing.T) {
 	b := &Broadcaster{}
-	conf := b.minecraftListenConfig(room.Status{})
-	if conf.LoginTimeout != defaultLoginTimeout || conf.MaximumPendingLogins != defaultMaximumPendingLogins {
-		t.Fatalf("login timeout %v, pending cap %d; want broadcaster defaults", conf.LoginTimeout, conf.MaximumPendingLogins)
+	if got := b.minecraftListenConfig(room.Status{}).LoginTimeout; got != defaultLoginTimeout {
+		t.Fatalf("login timeout %v, want the broadcaster default", got)
 	}
 	b.conf.ListenConfig.LoginTimeout = -1
-	b.conf.ListenConfig.MaximumPendingLogins = -1
-	conf = b.minecraftListenConfig(room.Status{})
-	if conf.LoginTimeout != -1 || conf.MaximumPendingLogins != -1 {
-		t.Fatal("caller's disabled login limits were replaced by defaults")
+	if got := b.minecraftListenConfig(room.Status{}).LoginTimeout; got != -1 {
+		t.Fatal("caller's disabled login timeout was replaced by the default")
 	}
 }
 

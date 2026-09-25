@@ -37,9 +37,6 @@ const (
 	defaultSignalingDialTimeout = 15 * time.Second
 	// defaultLoginTimeout bounds a joiner from transport setup until its login is authenticated.
 	defaultLoginTimeout = 10 * time.Second
-	// defaultMaximumPendingLogins caps joiners that have not authenticated yet, evicting the oldest beyond
-	// it; one session admits 30 members.
-	defaultMaximumPendingLogins = 32
 )
 
 // Broadcaster owns the Xbox Live session, NetherNet listener, and redirect
@@ -494,9 +491,6 @@ func (b *Broadcaster) minecraftListenConfig(status room.Status) minecraft.Listen
 	}
 	if conf.LoginTimeout == 0 {
 		conf.LoginTimeout = defaultLoginTimeout
-	}
-	if conf.MaximumPendingLogins == 0 {
-		conf.MaximumPendingLogins = defaultMaximumPendingLogins
 	}
 	conf.ForceDisableVibrantVisuals = true
 	conf.ResourcePackWorldTemplateUUID = uuid.Nil
