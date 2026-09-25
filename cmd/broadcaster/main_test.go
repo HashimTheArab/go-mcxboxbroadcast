@@ -109,7 +109,7 @@ func TestRunBroadcasterCommandStartsAndClosesBroadcaster(t *testing.T) {
 		SaveLiveToken: func(string, *oauth2.Token) error {
 			return nil
 		},
-		LoadAccountToken: func(context.Context, string, io.Writer, func(*oauth2.Token), time.Duration) (oauth2.TokenSource, error) {
+		LoadAccountToken: func(context.Context, context.Context, string, io.Writer, func(*oauth2.Token)) (oauth2.TokenSource, error) {
 			return staticOAuthTokenSource{}, nil
 		},
 		NewXBLTokenSource: func(context.Context, oauth2.TokenSource) xsapi.TokenSource {
@@ -181,7 +181,7 @@ func TestRunBroadcasterCommandClosesXSAPIClientsWhenStartFails(t *testing.T) {
 		SaveLiveToken: func(string, *oauth2.Token) error {
 			return nil
 		},
-		LoadAccountToken: func(context.Context, string, io.Writer, func(*oauth2.Token), time.Duration) (oauth2.TokenSource, error) {
+		LoadAccountToken: func(context.Context, context.Context, string, io.Writer, func(*oauth2.Token)) (oauth2.TokenSource, error) {
 			return staticOAuthTokenSource{}, nil
 		},
 		NewXBLTokenSource: func(context.Context, oauth2.TokenSource) xsapi.TokenSource {
@@ -244,7 +244,7 @@ func TestRunBroadcasterCommandClosesAfterInternalFailure(t *testing.T) {
 					SaveLiveToken: func(string, *oauth2.Token) error {
 						return nil
 					},
-					LoadAccountToken: func(context.Context, string, io.Writer, func(*oauth2.Token), time.Duration) (oauth2.TokenSource, error) {
+					LoadAccountToken: func(context.Context, context.Context, string, io.Writer, func(*oauth2.Token)) (oauth2.TokenSource, error) {
 						return staticOAuthTokenSource{}, nil
 					},
 					NewXBLTokenSource: func(context.Context, oauth2.TokenSource) xsapi.TokenSource {
@@ -437,7 +437,7 @@ func TestRunBroadcasterCommandAppliesConfiguredHTTPProxyToSubAccountTokenLoad(t 
 		SaveLiveToken: func(string, *oauth2.Token) error {
 			return nil
 		},
-		LoadAccountToken: func(ctx context.Context, _ string, _ io.Writer, _ func(*oauth2.Token), _ time.Duration) (oauth2.TokenSource, error) {
+		LoadAccountToken: func(ctx context.Context, _ context.Context, _ string, _ io.Writer, _ func(*oauth2.Token)) (oauth2.TokenSource, error) {
 			gotSubAccountAuthClient, _ = ctx.Value(oauth2.HTTPClient).(*http.Client)
 			return staticOAuthTokenSource{}, nil
 		},
@@ -547,7 +547,7 @@ func TestRunBroadcasterCommandSkipsSubAccountWhoseLoginFails(t *testing.T) {
 			return staticOAuthTokenSource{}
 		},
 		SaveLiveToken: func(string, *oauth2.Token) error { return nil },
-		LoadAccountToken: func(context.Context, string, io.Writer, func(*oauth2.Token), time.Duration) (oauth2.TokenSource, error) {
+		LoadAccountToken: func(context.Context, context.Context, string, io.Writer, func(*oauth2.Token)) (oauth2.TokenSource, error) {
 			return nil, errors.New("poll device token: expired_token")
 		},
 		NewXBLTokenSource: func(context.Context, oauth2.TokenSource) xsapi.TokenSource { return nil },
@@ -586,7 +586,7 @@ func TestRunBroadcasterCommandStopsWhenShutdownInterruptsSubAccountLogin(t *test
 			return staticOAuthTokenSource{}
 		},
 		SaveLiveToken: func(string, *oauth2.Token) error { return nil },
-		LoadAccountToken: func(ctx context.Context, _ string, _ io.Writer, _ func(*oauth2.Token), _ time.Duration) (oauth2.TokenSource, error) {
+		LoadAccountToken: func(ctx context.Context, _ context.Context, _ string, _ io.Writer, _ func(*oauth2.Token)) (oauth2.TokenSource, error) {
 			cancel()
 			return nil, ctx.Err()
 		},
@@ -600,6 +600,57 @@ func TestRunBroadcasterCommandStopsWhenShutdownInterruptsSubAccountLogin(t *test
 	if !errors.Is(err, context.Canceled) || started {
 		t.Fatalf("err = %v, started = %v; want startup stopped by cancellation", err, started)
 	}
+}
+
+// A stalled Xbox Live sign-in for a sub-account must hit the sub-account deadline, not hold the primary.
+func TestRunBroadcasterCommandBoundsSubAccountXboxLiveSignIn(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var started bool
+		var xblSourceCtx context.Context
+		start := time.Now()
+		err := runBroadcasterCommand(context.Background(), commandOptions{ConfigPath: "/base/config.yml"}, commandDeps{
+			Stdout: io.Discard,
+			LoadConfig: func(string) (broadcaster.ConfigFile, error) {
+				cfg := broadcaster.DefaultConfigFile()
+				cfg.Session.SessionInfo.IP = "127.0.0.1"
+				cfg.Accounts.SubAccounts = []broadcaster.SubAccountFile{{ID: "alt", Enabled: true}}
+				return cfg, nil
+			},
+			LoadLiveToken: func(string) (*oauth2.Token, error) { return nil, errors.ErrUnsupported },
+			NewLiveTokenSource: func(context.Context, *oauth2.Token, io.Writer, func(*oauth2.Token)) oauth2.TokenSource {
+				return staticOAuthTokenSource{}
+			},
+			SaveLiveToken: func(string, *oauth2.Token) error { return nil },
+			LoadAccountToken: func(context.Context, context.Context, string, io.Writer, func(*oauth2.Token)) (oauth2.TokenSource, error) {
+				return staticOAuthTokenSource{}, nil
+			},
+			SubAccountLoginTimeout: time.Minute,
+			NewXBLTokenSource: func(ctx context.Context, _ oauth2.TokenSource) xsapi.TokenSource {
+				xblSourceCtx = ctx
+				return nil
+			},
+			NewXSAPIClient: func(ctx context.Context, _ xsapi.TokenSource, _ *http.Client, log *slog.Logger) (*xsapi.Client, error) {
+				if xblSourceCtx != nil && xblSourceCtx != ctx {
+					<-ctx.Done() // the sub-account's XSTS request never answers
+					return nil, ctx.Err()
+				}
+				return &xsapi.Client{}, nil
+			},
+			CloseXSAPIClients: func(*slog.Logger, []*xsapi.Client) {},
+			NewBroadcaster: func(broadcaster.Config) (commandBroadcaster, error) {
+				return fakeCommandBroadcaster{start: func(context.Context) error { started = true; return nil }, close: func() error { return nil }}, nil
+			},
+		})
+		if err != nil || !started {
+			t.Fatalf("err = %v, started = %v; want the primary started", err, started)
+		}
+		if elapsed := time.Since(start); elapsed != time.Minute {
+			t.Fatalf("startup took %s, want the one-minute sub-account deadline", elapsed)
+		}
+		if _, ok := xblSourceCtx.Deadline(); ok {
+			t.Fatal("sub-account token source is bound to the sign-in deadline")
+		}
+	})
 }
 
 // Relative and absolute spellings of one cache file must be caught as a duplicate.
@@ -631,7 +682,9 @@ func TestLoadAccountTokenStopsAtLoginTimeout(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx := context.WithValue(context.Background(), oauth2.HTTPClient, deviceLoginClient(t, new(atomic.Bool)))
 		start := time.Now()
-		_, err := loadAccountToken(ctx, filepath.Join(t.TempDir(), "token.json"), io.Discard, nil, time.Minute)
+		loginCtx, cancel := context.WithTimeout(ctx, time.Minute)
+		defer cancel()
+		_, err := loadAccountToken(ctx, loginCtx, filepath.Join(t.TempDir(), "token.json"), io.Discard, nil)
 		if err == nil {
 			t.Fatal("expected the unfinished sign-in to fail")
 		}
@@ -648,7 +701,9 @@ func TestLoadAccountTokenSourceOutlivesLoginTimeout(t *testing.T) {
 		approved.Store(true)
 		ctx := context.WithValue(context.Background(), oauth2.HTTPClient, deviceLoginClient(t, approved))
 		var persisted atomic.Int32
-		src, err := loadAccountToken(ctx, filepath.Join(t.TempDir(), "token.json"), io.Discard, func(*oauth2.Token) { persisted.Add(1) }, time.Minute)
+		loginCtx, cancel := context.WithTimeout(ctx, time.Minute)
+		src, err := loadAccountToken(ctx, loginCtx, filepath.Join(t.TempDir(), "token.json"), io.Discard, func(*oauth2.Token) { persisted.Add(1) })
+		cancel()
 		if err != nil {
 			t.Fatal(err)
 		}

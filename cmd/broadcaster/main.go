@@ -40,9 +40,9 @@ type commandDeps struct {
 	LoadLiveToken      func(string) (*oauth2.Token, error)
 	NewLiveTokenSource func(context.Context, *oauth2.Token, io.Writer, func(*oauth2.Token)) oauth2.TokenSource
 	SaveLiveToken      func(string, *oauth2.Token) error
-	LoadAccountToken   func(ctx context.Context, path string, out io.Writer, persist func(*oauth2.Token), loginTimeout time.Duration) (oauth2.TokenSource, error)
-	// SubAccountLoginTimeout bounds each sub-account's startup sign-in so one
-	// account cannot hold back the primary.
+	LoadAccountToken   func(ctx, loginCtx context.Context, path string, out io.Writer, persist func(*oauth2.Token)) (oauth2.TokenSource, error)
+	// SubAccountLoginTimeout bounds each sub-account's startup sign-in,
+	// including Xbox Live authentication, so one account cannot hold back the primary.
 	SubAccountLoginTimeout time.Duration
 	NewXBLTokenSource      func(context.Context, oauth2.TokenSource) xsapi.TokenSource
 	NewXSAPIClient         func(context.Context, xsapi.TokenSource, *http.Client, *slog.Logger) (*xsapi.Client, error)
@@ -177,17 +177,24 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 		if err != nil {
 			return fmt.Errorf("configure sub-account %q: %w", account.ID, err)
 		}
-		subLive, err := deps.LoadAccountToken(authCtx, subCachePath, authOut, savePersistedToken(log, deps.SaveLiveToken, subCachePath), deps.SubAccountLoginTimeout)
-		if err != nil {
-			if err := skipSubAccount(account.ID, fmt.Errorf("authenticate: %w", err)); err != nil {
-				return err
+		// One deadline covers the whole startup sign-in; the token sources
+		// stay on authCtx so later refreshes outlive it.
+		subXBLSource, subXBLClient, err := func() (xsapi.TokenSource, *xsapi.Client, error) {
+			loginCtx, cancel := context.WithTimeout(authCtx, deps.SubAccountLoginTimeout)
+			defer cancel()
+			subLive, err := deps.LoadAccountToken(authCtx, loginCtx, subCachePath, authOut, savePersistedToken(log, deps.SaveLiveToken, subCachePath))
+			if err != nil {
+				return nil, nil, fmt.Errorf("authenticate: %w", err)
 			}
-			continue
-		}
-		subXBLSource := deps.NewXBLTokenSource(authCtx, subLive)
-		subXBLClient, err := deps.NewXSAPIClient(authCtx, subXBLSource, httpClient, log.With("sub_account", account.ID))
+			src := deps.NewXBLTokenSource(authCtx, subLive)
+			client, err := deps.NewXSAPIClient(loginCtx, src, httpClient, log.With("sub_account", account.ID))
+			if err != nil {
+				return nil, nil, fmt.Errorf("authenticate xbox live: %w", err)
+			}
+			return src, client, nil
+		}()
 		if err != nil {
-			if err := skipSubAccount(account.ID, fmt.Errorf("authenticate xbox live: %w", err)); err != nil {
+			if err := skipSubAccount(account.ID, err); err != nil {
 				return err
 			}
 			continue
@@ -308,15 +315,13 @@ func defaultCachePath() string {
 	return filepath.Join(dir, "mcxboxbroadcast-go", "live_token.json")
 }
 
-// loadAccountToken signs in within loginTimeout, then returns a source bound
-// to ctx for later refreshes. Cache write failures are only logged by persist.
-func loadAccountToken(ctx context.Context, path string, out io.Writer, persist func(*oauth2.Token), loginTimeout time.Duration) (oauth2.TokenSource, error) {
+// loadAccountToken signs in under loginCtx, then returns a source bound to ctx
+// for later refreshes. Cache write failures are only logged by persist.
+func loadAccountToken(ctx, loginCtx context.Context, path string, out io.Writer, persist func(*oauth2.Token)) (oauth2.TokenSource, error) {
 	tok, err := broadcaster.LoadLiveToken(path)
 	if err != nil {
 		tok = nil
 	}
-	loginCtx, cancel := context.WithTimeout(ctx, loginTimeout)
-	defer cancel()
 	tok, err = broadcaster.NewLiveTokenSourceWithPersist(loginCtx, tok, out, nil).Token()
 	if err != nil {
 		return nil, err
