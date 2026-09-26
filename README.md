@@ -4,22 +4,6 @@
 friend-list world and transfers clients that join the published NetherNet
 session to the configured Bedrock server.
 
-The library is modelled after
-[MCXboxBroadcast](https://github.com/rtm516/MCXboxBroadcast) while using
-Go-first building blocks:
-
-- `github.com/df-mc/go-xsapi/v2` for Xbox Live MPSD/RTA session publishing,
-  replaced in `go.mod` with the `HashimTheArab/go-xsapi` fork.
-- `github.com/df-mc/go-nethernet` for NetherNet/WebRTC listener support. The
-  upstream module is used directly because it now contains the networking
-  changes that previously required Lunar's fork.
-- `hashimthearab/gophertunnel` Lunar P2P branch for NetherNet, signaling,
-  room announcements, and `minecraft/p2p`-compatible session metadata. This
-  should be updated to the official `sandertv/gophertunnel` once it supports
-  Xbox friend-list NetherNet signaling.
-- `sandertv/go-raknet`, replaced in `go.mod` with the `hashimthearab/go-raknet`
-  fork for RakNet ping compatibility.
-
 ## Acknowledgements
 
 This project is a Go port inspired by the original
@@ -27,6 +11,18 @@ This project is a Go port inspired by the original
 [GeyserMC](https://geysermc.org/) ecosystem. Credit goes to the GeyserMC
 project and contributors for the Geyser Bedrock listener behavior and
 configuration model that this implementation follows.
+
+The library is modelled after
+[MCXboxBroadcast](https://github.com/rtm516/MCXboxBroadcast) while using
+Go-first building blocks:
+
+- `github.com/df-mc/go-xsapi/v2` for Xbox Live MPSD/RTA session publishing.
+- `github.com/df-mc/go-nethernet` for NetherNet/WebRTC listener support.
+- `github.com/sandertv/gophertunnel`, using the
+  `HashimTheArab/gophertunnel` fork, for NetherNet, signaling, room
+  announcements, and `minecraft/p2p`-compatible session metadata.
+- `github.com/sandertv/go-raknet`, using the `HashimTheArab/go-raknet` fork,
+  for RakNet ping compatibility.
 
 ## CLI
 
@@ -53,8 +49,7 @@ counts for each sync pass.
 The config exposes the same operator-facing areas as MCXboxBroadcast:
 
 - session target, update interval, query options, broadcast setting,
-  world type, and displayed MOTD data (joinability is always
-  `joinable_by_friends`, matching MCXboxBroadcast)
+  world type, and displayed MOTD data
 - gallery showcase image upload through `gallery.imagePath`
 - friend sync automation and expiry settings, including last-seen history path
   (stored as JSON at `friendSync.expiry.historyPath`, not Java's SQLite
@@ -70,17 +65,20 @@ The config exposes the same operator-facing areas as MCXboxBroadcast:
 
 ### Session recovery
 
-Signaling loss and repeated primary-session update failures share one recovery
-loop. Normal updates pause while it rebuilds the session. Recovery makes up to
-six attempts, waiting 5, 10, 20, 40, and 80 seconds between failures. It reports
-the first recovery failure to the webhook and sends a recovery notice if a later
-attempt succeeds; retry details remain in the logs.
+The broadcaster automatically recovers lost signaling connections, repeated
+session-update failures, and missing or closed Xbox activity advertisements.
+Activity checks allow time for Xbox to show new sessions and use a cooldown
+to avoid repeated restarts. A missing sub-account advertisement only recreates
+that sub-account's session. Recovery failures appear in the logs and are sent
+to the configured webhook.
 
-If all six attempts fail, the command closes its resources and exits with an
+These checks use the publishing account's credentials. They detect a missing
+directory advertisement, but do not verify friendship permissions or prove that
+another player can join. Keep an independent friend-account monitor for that.
+
+If recovery keeps failing, the command closes its resources and exits with an
 error. Run it under Kubernetes or another process supervisor with automatic
 restart enabled so the next process recreates authentication and client state.
-Library callers receive the terminal error from `Broadcaster.Wait()` and must
-call `Close()` to release resources. A normal shutdown returns no recovery error.
 
 ### Relay mode
 
@@ -107,14 +105,9 @@ member limit bounds how many players one session can relay at a time.
 
 ### Signaling modes
 
-Both modes exchange the same WebRTC offers, answers, and ICE candidates.
-`websocket` connects directly to the signaling service and advertises type `3`,
-whose numeric network ID vanilla stores in `RakNetGUID`. `jsonrpc` wraps the
-same messages in Player Messaging envelopes and advertises type `7` with
-`PmsgId` and `NetherNetId`. JSON-RPC cannot be combined with enabled
-sub-accounts because each independently owned session needs its own Player
-Messaging identity; startup fails instead of publishing a misleading shared
-identity.
+`session.signalingMode` defaults to `websocket`. Use `jsonrpc` to connect through
+Player Messaging instead. JSON-RPC does not support sub-accounts; startup fails
+if both are enabled.
 
 ## Docker
 
@@ -162,6 +155,15 @@ enabled, the sign-in prompt is also sent to the configured webhook.
 
 ## Library
 
+Leave `Config.Signaling` unset to allow automatic primary-session recovery.
+Use `SignalingFactory` if you need custom signaling that can be recreated.
+Supplying a fixed `Config.Signaling` connection disables primary-session
+recreation; a missing activity advertisement then produces a logged error and
+webhook notification.
+
+`Broadcaster.Wait()` returns any terminal recovery error. Call `Close()` afterward
+to release resources. A normal shutdown returns no recovery error.
+
 ```go
 live := auth.RefreshTokenSourceWriter(cachedLiveToken, os.Stdout)
 xblSource := broadcaster.NewXBLTokenSource(ctx, live)
@@ -208,3 +210,8 @@ return errors.Join(runErr, closeErr)
 
 Contexts are accepted for start, update, signaling setup, announcement, and
 shutdown-sensitive operations.
+
+## Development
+
+See [AGENTS.md](AGENTS.md) for dependency guidance, implementation constraints,
+and validation commands.
