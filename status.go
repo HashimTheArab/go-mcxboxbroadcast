@@ -17,6 +17,7 @@ import (
 	"github.com/sandertv/gophertunnel/minecraft"
 	"github.com/sandertv/gophertunnel/minecraft/p2p"
 	"github.com/sandertv/gophertunnel/minecraft/protocol"
+	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
 	"github.com/sandertv/gophertunnel/minecraft/room"
 )
 
@@ -207,6 +208,7 @@ func (p roomMinecraftStatusProvider) ServerStatus(int, int) minecraft.ServerStat
 		ServerSubName: status.HostName,
 		PlayerCount:   status.MemberCount,
 		MaxPlayers:    status.MaxMemberCount,
+		GameType:      packet.GameTypeCreative,
 	}
 }
 

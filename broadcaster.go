@@ -523,7 +523,9 @@ func (b *Broadcaster) minecraftStatusProvider(status room.Status) minecraft.Serv
 	if b.conf.StatusProvider != nil {
 		return roomMinecraftStatusProvider{Provider: b.conf.StatusProvider}
 	}
-	return minecraft.NewStatusProvider(status.WorldName, status.HostName)
+	sp := minecraft.NewStatusProvider(status.WorldName, status.HostName)
+	sp.GameType = packet.GameTypeCreative
+	return sp
 }
 
 // primaryXBLClient returns or lazily creates the primary Xbox Live client.
