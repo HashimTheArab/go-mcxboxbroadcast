@@ -68,7 +68,7 @@ func TestBroadcasterRecoversSuccessiveSignalingDrops(t *testing.T) {
 			t.Fatalf("signaling drop %d did not recover", i+1)
 		}
 		b.mu.Lock()
-		listener, signaling, recovering := b.listener, b.signaling, b.recovering
+		listener, signaling, recovering := b.listener, b.signaling, b.recovering.Load()
 		b.mu.Unlock()
 		if listener == nil || listener == previousListener {
 			t.Fatalf("recovery %d did not replace the listener", i+1)
@@ -85,10 +85,18 @@ func TestBroadcasterRecoversSuccessiveSignalingDrops(t *testing.T) {
 		currentAnnouncer := <-announcers
 		worldName := fmt.Sprintf("Recovered world %d", i+1)
 		status.value.Store(&room.Status{HostName: "Host", WorldName: worldName})
-		if err := b.Update(t.Context()); err != nil {
-			t.Fatalf("update after recovery %d: %v", i+1, err)
+		// The new listener's first announcement runs asynchronously and may land
+		// after an Update; the next Update must still publish the new status.
+		var announced room.Status
+		for deadline := time.Now().Add(time.Second); ; {
+			if err := b.Update(t.Context()); err != nil {
+				t.Fatalf("update after recovery %d: %v", i+1, err)
+			}
+			if announced = currentAnnouncer.Status(); announced.WorldName == worldName || time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
-		announced := currentAnnouncer.Status()
 		if announced.WorldName != worldName {
 			t.Fatalf("updated world = %q, want %q", announced.WorldName, worldName)
 		}

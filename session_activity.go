@@ -37,7 +37,7 @@ type activityObservation struct {
 func (b *Broadcaster) publishedActivities() []publishedActivity {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if !b.started || b.recovering {
+	if !b.started || b.recovering.Load() {
 		return nil
 	}
 	var publications []publishedActivity
@@ -72,14 +72,6 @@ func (b *Broadcaster) primaryActivityCurrentLocked(activity *publishedActivity) 
 	xbl.Lock()
 	defer xbl.Unlock()
 	return xbl.Session == activity.session && xbl.SessionReference == activity.ref
-}
-
-// primaryActivityCurrent reports whether activity still identifies the primary
-// publication without holding the broadcaster lock during later network work.
-func (b *Broadcaster) primaryActivityCurrent(activity *publishedActivity) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.primaryActivityCurrentLocked(activity)
 }
 
 // activityHealthIssue checks each account's own directory handle. This detects lost

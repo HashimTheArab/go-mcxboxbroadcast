@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -778,4 +779,46 @@ func (f fakeCommandBroadcaster) Wait() error {
 
 func (f fakeCommandBroadcaster) Close() error {
 	return f.close()
+}
+
+func (fakeCommandBroadcaster) HealthHandler() http.Handler { return http.NotFoundHandler() }
+
+// Default outbound requests must be bounded so a hung Xbox call fails.
+func TestDefaultCommandHTTPClientHasTimeout(t *testing.T) {
+	if got := (commandDeps{}).withDefaults().HTTPClient.Timeout; got != defaultHTTPTimeout {
+		t.Fatalf("default HTTP client timeout = %s, want %s", got, defaultHTTPTimeout)
+	}
+}
+
+// The health endpoint serves the broadcaster's probes until stopped.
+func TestServeHealthServesUntilStopped(t *testing.T) {
+	stop, err := serveHealth("", http.NotFoundHandler(), slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop()
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") })
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := listener.Addr().String()
+	_ = listener.Close()
+	stop, err = serveHealth(addr, handler, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Get("http://" + addr + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("health status = %d, want 200", resp.StatusCode)
+	}
+	stop()
+	if _, err := http.Get("http://" + addr + "/healthz"); err == nil {
+		t.Fatal("health endpoint still served after stop")
+	}
 }

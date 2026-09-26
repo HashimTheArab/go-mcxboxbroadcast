@@ -86,11 +86,20 @@ func NewXSAPIClient(ctx context.Context, src xsapi.TokenSource, client *http.Cli
 	return xsapi.ClientConfig{HTTPClient: client, Logger: log, RTAMode: xsapi.RTALazy}.New(ctx, src)
 }
 
-func NewMinecraftTokenSource(ctx context.Context, xbl *xsapi.Client, client *http.Client) (service.TokenSource, error) {
+// MinecraftTokenSource is a Minecraft services token source backed by a PlayFab
+// login. Close stops the PlayFab client's background token refresh.
+type MinecraftTokenSource interface {
+	service.TokenSource
+	io.Closer
+}
+
+// NewMinecraftTokenSource returns a Minecraft services token source for xbl.
+// The caller must Close it.
+func NewMinecraftTokenSource(ctx context.Context, xbl *xsapi.Client, client *http.Client) (MinecraftTokenSource, error) {
 	return newMinecraftTokenSource(ctx, xbl, client, nil)
 }
 
-func newMinecraftTokenSource(ctx context.Context, xbl *xsapi.Client, client *http.Client, log *slog.Logger) (service.TokenSource, error) {
+func newMinecraftTokenSource(ctx context.Context, xbl *xsapi.Client, client *http.Client, log *slog.Logger) (MinecraftTokenSource, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -122,8 +131,19 @@ func newMinecraftTokenSource(ctx context.Context, xbl *xsapi.Client, client *htt
 		return nil, fmt.Errorf("login to playfab with xbox: %w", err)
 	}
 	debugLog(log, "logged in to playfab with xbox")
-	return withMinecraftTokenDiagnostics(env.TokenSource(playfabClient, service.TokenConfig{})), nil
+	return playFabTokenSource{
+		TokenSource: withMinecraftTokenDiagnostics(env.TokenSource(playfabClient, service.TokenConfig{})),
+		client:      playfabClient,
+	}, nil
 }
+
+// playFabTokenSource owns the PlayFab client behind its Minecraft tokens.
+type playFabTokenSource struct {
+	service.TokenSource
+	client *playfab.Client
+}
+
+func (s playFabTokenSource) Close() error { return s.client.Close() }
 
 func withMinecraftTokenDiagnostics(src service.TokenSource) service.TokenSource {
 	if src == nil {

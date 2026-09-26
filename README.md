@@ -62,15 +62,18 @@ The config exposes the same operator-facing areas as MCXboxBroadcast:
   (default) or `jsonrpc` (only when no sub-accounts are enabled).
 - relay mode through `relay.enabled`, which keeps players inside the NetherNet
   session instead of transferring them (see below).
+- an optional health endpoint through `health.listen` (see below).
 
 ### Session recovery
 
 The broadcaster automatically recovers lost signaling connections, repeated
-session-update failures, and missing or closed Xbox activity advertisements.
-Activity checks allow time for Xbox to show new sessions and use a cooldown
-to avoid repeated restarts. A missing sub-account advertisement only recreates
-that sub-account's session. Recovery failures appear in the logs and are sent
-to the configured webhook.
+session-update failures, Xbox sessions that are closed or deleted, and missing
+or closed Xbox activity advertisements. When only the Xbox session is affected,
+it publishes a new session and keeps the signaling connection and listener, so
+players who are joining are not dropped. Activity checks allow time for Xbox to
+show new sessions and use a cooldown to avoid repeated restarts. A missing
+sub-account advertisement only recreates that sub-account's session. Recovery
+failures appear in the logs and are sent to the configured webhook.
 
 These checks use the publishing account's credentials. They detect a missing
 directory advertisement, but do not verify friendship permissions or prove that
@@ -79,6 +82,20 @@ another player can join. Keep an independent friend-account monitor for that.
 If recovery keeps failing, the command closes its resources and exits with an
 error. Run it under Kubernetes or another process supervisor with automatic
 restart enabled so the next process recreates authentication and client state.
+
+### Health checks
+
+Set `health.listen` (for example `":8080"`) to serve probe endpoints:
+
+- `/healthz` fails when Xbox has not confirmed the session for five update
+  intervals (at least five minutes), or after the broadcaster stops. Each
+  update checks the session with Xbox, so a session Xbox deleted is found and
+  replaced. Use it as a liveness probe.
+- `/readyz` also fails while the broadcaster is starting or recovering.
+
+Before the first session is published, `/healthz` succeeds so a sign-in that
+waits for a device code is not restarted. Outbound HTTP requests time out
+after 30 seconds, so a stuck Xbox call fails instead of hanging.
 
 ### Relay mode
 
@@ -157,12 +174,15 @@ enabled, the sign-in prompt is also sent to the configured webhook.
 
 Leave `Config.Signaling` unset to allow automatic primary-session recovery.
 Use `SignalingFactory` if you need custom signaling that can be recreated.
-Supplying a fixed `Config.Signaling` connection disables primary-session
-recreation; a missing activity advertisement then produces a logged error and
-webhook notification.
+Supplying a fixed `Config.Signaling` connection disables signaling
+recreation. Lost Xbox sessions and missing activity advertisements are still
+repaired by publishing a new session over that connection.
 
 `Broadcaster.Wait()` returns any terminal recovery error. Call `Close()` afterward
 to release resources. A normal shutdown returns no recovery error.
+`Broadcaster.HealthHandler()` serves the same `/healthz` and `/readyz` probes as
+the CLI. Close the token source from `NewMinecraftTokenSource` when you are done
+with it.
 
 ```go
 live := auth.RefreshTokenSourceWriter(cachedLiveToken, os.Stdout)
@@ -205,7 +225,7 @@ if err := b.Start(ctx); err != nil {
 }
 runErr := b.Wait()
 closeErr := b.Close()
-return errors.Join(runErr, closeErr)
+return errors.Join(runErr, closeErr, minecraftTokens.Close())
 ```
 
 Contexts are accepted for start, update, signaling setup, announcement, and
