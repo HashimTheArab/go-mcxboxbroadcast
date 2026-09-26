@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,6 +35,8 @@ const (
 	defaultNetherNetConnTimeout = 30 * time.Second
 	defaultTransferCloseTimeout = 15 * time.Second
 	defaultSignalingDialTimeout = 15 * time.Second
+	// defaultLoginTimeout bounds a joiner from transport setup until its login is authenticated.
+	defaultLoginTimeout = 10 * time.Second
 )
 
 // Broadcaster owns the Xbox Live session, NetherNet listener, and redirect
@@ -67,6 +70,8 @@ type Broadcaster struct {
 	failure    error
 	recovering bool
 	acceptWg   sync.WaitGroup
+	// clientWg tracks transfer and relay handlers so Close returns after they do.
+	clientWg sync.WaitGroup
 	// socialWg tracks social subscription cleanup before clients are closed.
 	socialWg sync.WaitGroup
 
@@ -86,6 +91,12 @@ type Broadcaster struct {
 	// subAccountSettleDelay is the wait after establishing a new sub-account
 	// friendship before joining the session.
 	subAccountSettleDelay time.Duration
+	// subAccountRetries holds the backoff of enabled sub-accounts whose session
+	// could not be published, keyed by ID. Guarded by mu.
+	subAccountRetries map[string]*subAccountRetry
+	// subAccountRetryBase is the first retry delay for an unpublished
+	// sub-account. Zero uses the default.
+	subAccountRetryBase time.Duration
 	// galleryUploadTimeout bounds each account's gallery upload. Zero uses the
 	// default.
 	galleryUploadTimeout time.Duration
@@ -103,6 +114,7 @@ type transferConn interface {
 	ReadPacket() (packet.Packet, error)
 	Flush() error
 	Close() error
+	Abort() error
 	SetReadDeadline(time.Time) error
 	IdentityData() login.IdentityData
 }
@@ -130,7 +142,7 @@ func New(conf Config) (*Broadcaster, error) {
 	if err := conf.Server.validate(); err != nil {
 		return nil, err
 	}
-	if err := conf.Relay.validate(); err != nil {
+	if err := conf.Relay.validate(conf.ListenConfig); err != nil {
 		return nil, err
 	}
 	mode, err := normalizeSignalingMode(conf.SignalingMode)
@@ -471,6 +483,9 @@ func (b *Broadcaster) minecraftListenConfig(status room.Status) minecraft.Listen
 	} else {
 		conf.CompressionThreshold = -1
 	}
+	if conf.LoginTimeout == 0 {
+		conf.LoginTimeout = defaultLoginTimeout
+	}
 	conf.ForceDisableVibrantVisuals = true
 	conf.ResourcePackWorldTemplateUUID = uuid.Nil
 	conf.ResourcePackWorldTemplateVersion = ""
@@ -483,7 +498,6 @@ func (b *Broadcaster) minecraftListenConfig(status room.Status) minecraft.Listen
 // netherNetListenConfig returns the nethernet listen config with a default conn context applied.
 func (b *Broadcaster) netherNetListenConfig() nethernet.ListenConfig {
 	conf := b.conf.NetherNetListenConfig
-	conf.AllowAnonymous = true
 	if conf.ConnContext == nil {
 		conf.ConnContext = defaultNetherNetConnContext
 	}
@@ -956,11 +970,93 @@ func (b *Broadcaster) startSubAccounts(ctx context.Context, status room.Status) 
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			b.log.Error("start sub-account; continuing without it", "sub_account", account.ID, "err", err)
+			retry := b.scheduleSubAccountRetry(account.ID)
+			b.log.Error("start sub-account; continuing without it", "sub_account", account.ID, "err", err, "retry_in", retry)
 			b.notify(ctx, "Sub-account "+account.ID+" failed to start: "+err.Error())
 		}
 	}
 	return nil
+}
+
+const (
+	defaultSubAccountRetryBase = 30 * time.Second
+	subAccountRetryMax         = 10 * time.Minute
+)
+
+// subAccountRetry is the backoff of one enabled sub-account whose session is not published.
+type subAccountRetry struct {
+	delay time.Duration
+	next  time.Time
+}
+
+// scheduleSubAccountRetry backs off the next publish attempt for id and returns
+// the delay. The caller must hold b.mu.
+func (b *Broadcaster) scheduleSubAccountRetry(id string) time.Duration {
+	if b.subAccountRetries == nil {
+		b.subAccountRetries = make(map[string]*subAccountRetry)
+	}
+	retry := b.subAccountRetries[id]
+	if retry == nil {
+		base := b.subAccountRetryBase
+		if base <= 0 {
+			base = defaultSubAccountRetryBase
+		}
+		retry = &subAccountRetry{delay: base}
+		b.subAccountRetries[id] = retry
+	} else if retry.delay *= 2; retry.delay > subAccountRetryMax {
+		retry.delay = subAccountRetryMax
+	}
+	retry.next = time.Now().Add(retry.delay)
+	return retry.delay
+}
+
+// retryUnpublishedSubAccounts publishes enabled sub-accounts that have no
+// session once their own backoff has passed, independently of the primary.
+// Each attempt gets its own time budget, so one stalled account is backed off
+// without starving the others.
+func (b *Broadcaster) retryUnpublishedSubAccounts(ctx context.Context) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.started || b.recovering {
+		return
+	}
+	var due []*SubAccountConfig
+	accounts, _ := b.enabledSubAccounts()
+	for _, account := range accounts {
+		if !subAccountHasXBLCredentials(*account) || slices.ContainsFunc(b.subAnnouncers, func(sub publishedSubAccount) bool {
+			return sub.id == account.ID
+		}) {
+			continue
+		}
+		if retry := b.subAccountRetries[account.ID]; retry != nil && time.Now().Before(retry.next) {
+			continue
+		}
+		due = append(due, account)
+	}
+	if len(due) == 0 {
+		return
+	}
+	statusCtx, cancel := context.WithTimeout(ctx, subAccountRetryTimeout)
+	status, err := b.status(statusCtx)
+	cancel()
+	if err != nil {
+		b.warn("resolve status for sub-account retry", "err", err)
+		return
+	}
+	for _, account := range due {
+		attemptCtx, cancel := context.WithTimeout(ctx, subAccountRetryTimeout)
+		err := b.startSubAccountBounded(attemptCtx, account, status)
+		cancel()
+		if err != nil {
+			if ctx.Err() != nil {
+				return // the broadcaster is stopping; this was no failure of the account
+			}
+			delay := b.scheduleSubAccountRetry(account.ID)
+			b.warn("retry sub-account session", "sub_account", account.ID, "err", err, "retry_in", delay)
+			continue
+		}
+		b.info("published sub-account session after retry", "sub_account", account.ID)
+	}
 }
 
 // startSubAccountBounded runs startSubAccount under the per-account timeout.
@@ -1023,6 +1119,7 @@ func (b *Broadcaster) startSubAccount(ctx context.Context, account *SubAccountCo
 		announcer: announcer,
 	})
 	b.subAnnouncersByID[account.ID] = announcer
+	delete(b.subAccountRetries, account.ID)
 	b.debug("published independent sub-account session", "sub_account", account.ID, "xuid", account.XUID)
 	return nil
 }
@@ -1411,13 +1508,18 @@ func (b *Broadcaster) acceptListener(l *minecraft.Listener) {
 			_ = conn.Close()
 			continue
 		}
-		go b.handleClient(mcConn)
+		b.clientWg.Add(1)
+		go func() {
+			defer b.clientWg.Done()
+			b.handleClient(mcConn)
+		}()
 	}
 }
 
 // transfer sends the game startup sequence, then redirects the client to the target server.
 func (b *Broadcaster) transfer(conn transferConn) {
 	defer conn.Close()
+	defer b.abortOnStop(conn)()
 	id := conn.IdentityData()
 	if err := conn.SendStartGame(b.redirectGameData()); err != nil {
 		b.log.Error("start game before transfer", "xuid", id.XUID, "name", id.DisplayName, "err", err)
@@ -1464,8 +1566,6 @@ func (b *Broadcaster) waitForTransferredClientDisconnect(conn transferConn, id l
 		b.debug("set transfer disconnect deadline", "xuid", id.XUID, "name", id.DisplayName, "err", err)
 		return
 	}
-	cancelWait := b.closeTransferredClientOnStop(conn)
-	defer cancelWait()
 
 	b.debug("waiting for transferred client to disconnect", "xuid", id.XUID, "name", id.DisplayName, "timeout", timeout)
 	for {
@@ -1483,22 +1583,14 @@ func (b *Broadcaster) waitForTransferredClientDisconnect(conn transferConn, id l
 	}
 }
 
-// closeTransferredClientOnStop closes a transferred connection when the broadcaster stops.
-func (b *Broadcaster) closeTransferredClientOnStop(conn transferConn) func() {
+// abortOnStop aborts conn when the broadcaster stops, so a handler blocked on a
+// peer that stopped reading returns. The returned func stops watching.
+func (b *Broadcaster) abortOnStop(conn interface{ Abort() error }) func() {
 	if b.ctx == nil {
 		return func() {}
 	}
-	done := make(chan struct{})
-	go func() {
-		select {
-		case <-b.ctx.Done():
-			_ = conn.Close()
-		case <-done:
-		}
-	}()
-	return func() {
-		close(done)
-	}
+	stop := context.AfterFunc(b.ctx, func() { _ = conn.Abort() })
+	return func() { stop() }
 }
 
 // redirectGameData describes the temporary world shown before transferring the client.
@@ -1620,8 +1712,8 @@ func (b *Broadcaster) sessionHealthIssue() sessionHealthIssue {
 	if session.Context().Err() != nil {
 		return sessionHealthIssue{reason: "mpsd session lost"}
 	}
-	if count := b.staleSessionMembers(session.Members()); count >= sessionMemberRestartThreshold {
-		return sessionHealthIssue{reason: fmt.Sprintf("session has %d/30 non-relayed members", count)}
+	if reason := b.sessionFullIssue("session", session.Members(), b.primaryXUID()); reason != "" {
+		return sessionHealthIssue{reason: reason}
 	}
 	for _, sub := range b.subAnnouncers {
 		xbl, ok := xblAnnouncer(sub.announcer)
@@ -1635,11 +1727,8 @@ func (b *Broadcaster) sessionHealthIssue() sessionHealthIssue {
 			return sessionHealthIssue{reason: "sub-account session lost", subAccountID: sub.id}
 		}
 		if session != nil {
-			if count := b.staleSessionMembers(session.Members()); count >= sessionMemberRestartThreshold {
-				return sessionHealthIssue{
-					reason:       fmt.Sprintf("sub-account session has %d/30 non-relayed members", count),
-					subAccountID: sub.id,
-				}
+			if reason := b.sessionFullIssue("sub-account session", session.Members(), sub.xuid); reason != "" {
+				return sessionHealthIssue{reason: reason, subAccountID: sub.id}
 			}
 		}
 	}
@@ -1957,8 +2046,8 @@ func xblClientCreated(client *xsapi.Client, created map[*xsapi.Client]struct{}) 
 // Close stops the listener and removes the Xbox session.
 func (b *Broadcaster) Close() error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if !b.started {
+		b.mu.Unlock()
 		return nil
 	}
 	b.cancel()
@@ -1968,6 +2057,17 @@ func (b *Broadcaster) Close() error {
 	if b.listener != nil {
 		err = b.listener.Close()
 	}
+	b.mu.Unlock()
+	// Client handlers drain without mu held, and none starts once the accept
+	// loops are done.
+	<-b.done
+	b.clientWg.Wait()
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.started {
+		return nil // a concurrent Close finished the shutdown
+	}
 	err = errors.Join(err, b.cleanupPublishedSessions(true))
 	if b.signaling != nil {
 		if c, ok := b.signaling.(interface{ Close() error }); ok {
@@ -1975,7 +2075,6 @@ func (b *Broadcaster) Close() error {
 		}
 	}
 	err = errors.Join(err, b.closeCreatedXBLClients())
-	<-b.done
 	b.started = false
 	return err
 }

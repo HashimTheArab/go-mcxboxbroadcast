@@ -717,11 +717,78 @@ func TestBroadcasterUsesLongerDefaultNetherNetTransportTimeout(t *testing.T) {
 	}
 }
 
-func TestBroadcasterAllowsAnonymousNetherNetByDefault(t *testing.T) {
+func TestMinecraftListenConfigBoundsLoginTime(t *testing.T) {
 	b := &Broadcaster{}
-	conf := b.netherNetListenConfig()
-	if !conf.AllowAnonymous {
-		t.Fatal("default nethernet listener should allow anonymous offers for Lunar friend-world compatibility")
+	if got := b.minecraftListenConfig(room.Status{}).LoginTimeout; got != defaultLoginTimeout {
+		t.Fatalf("login timeout %v, want the broadcaster default", got)
+	}
+	b.conf.ListenConfig.LoginTimeout = -1
+	if got := b.minecraftListenConfig(room.Status{}).LoginTimeout; got != -1 {
+		t.Fatal("caller's disabled login timeout was replaced by the default")
+	}
+}
+
+// A transport-connected peer that never sends Login must be dropped after the login timeout.
+func TestListenerDropsSilentPreLoginConn(t *testing.T) {
+	for _, relay := range []*RelayConfig{nil, {}} {
+		b := relayTestBroadcaster(relay, nil)
+		b.conf.ListenConfig.AuthenticationDisabled = true // avoids OIDC discovery; unrelated to the deadline
+		b.conf.ListenConfig.LoginTimeout = 50 * time.Millisecond
+		network := &pipeNetwork{conns: make(chan net.Conn, 1), closed: make(chan struct{})}
+		l, err := b.minecraftListenConfig(room.Status{}).ListenNetwork(network, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		server, client := net.Pipe()
+		network.conns <- server
+		_ = client.SetReadDeadline(time.Now().Add(time.Second))
+		if _, err := io.Copy(io.Discard, client); err != nil {
+			t.Fatalf("relay=%v: silent pre-login conn still held after the login timeout: %v", relay != nil, err)
+		}
+		waitFor(t, func() bool { return l.PlayerCount() == 0 }, "listener still counts the dropped conn")
+		_ = client.Close()
+		_ = l.Close()
+	}
+}
+
+// pipeNetwork hands in-memory connections to a gophertunnel listener.
+type pipeNetwork struct {
+	conns  chan net.Conn
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (n *pipeNetwork) DialContext(context.Context, string) (net.Conn, error) {
+	return nil, errors.New("unused")
+}
+func (n *pipeNetwork) PingContext(context.Context, string) ([]byte, error) {
+	return nil, errors.New("unused")
+}
+func (n *pipeNetwork) Listen(string) (minecraft.NetworkListener, error) { return n, nil }
+func (n *pipeNetwork) Accept() (net.Conn, error) {
+	select {
+	case c := <-n.conns:
+		return c, nil
+	case <-n.closed:
+		return nil, net.ErrClosed
+	}
+}
+func (n *pipeNetwork) Close() error    { n.once.Do(func() { close(n.closed) }); return nil }
+func (n *pipeNetwork) Addr() net.Addr  { return &net.UDPAddr{} }
+func (n *pipeNetwork) ID() int64       { return 1 }
+func (n *pipeNetwork) PongData([]byte) {}
+
+// The file config admits clients without a NetherNet identity, and a library caller's choice is kept.
+func TestNetherNetAnonymousFollowsConfig(t *testing.T) {
+	runtime, err := DefaultConfigFile().RuntimeConfig(RuntimeConfigInput{XBLTokenSource: staticTokenSource{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !(&Broadcaster{conf: runtime}).netherNetListenConfig().AllowAnonymous {
+		t.Fatal("file config should admit clients that send no NetherNet identity")
+	}
+	if (&Broadcaster{}).netherNetListenConfig().AllowAnonymous {
+		t.Fatal("netherNetListenConfig overrode a caller that did not allow anonymous clients")
 	}
 }
 
@@ -999,6 +1066,8 @@ func (c *recordingTransferConn) Close() error {
 	c.closed = true
 	return nil
 }
+
+func (c *recordingTransferConn) Abort() error { return c.Close() }
 
 func (c *recordingTransferConn) SetReadDeadline(t time.Time) error {
 	if c.deadlineTriggers && c.readErrCh != nil && !t.IsZero() {

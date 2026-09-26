@@ -16,7 +16,11 @@ import (
 	"github.com/sandertv/gophertunnel/minecraft/text"
 )
 
-const defaultRelayDialTimeout = 15 * time.Second
+const (
+	defaultRelayDialTimeout = 15 * time.Second
+	// relayDrainTimeout bounds how long one leg may keep forwarding after the other ended.
+	relayDrainTimeout = time.Second
+)
 
 // RelayConfig keeps joined clients inside the NetherNet session and relays
 // their traffic to the backend server instead of transferring them. A relayed
@@ -28,7 +32,9 @@ const defaultRelayDialTimeout = 15 * time.Second
 // carries the player's verified XUID, so it must trust this relay: Geyser with
 // validate-bedrock-login off, BDS with online-mode off, or a gophertunnel
 // listener with AuthenticationDisabled. Public servers that verify chains
-// cannot be relayed to.
+// cannot be relayed to. Only clients that prove their login key are relayed:
+// vanilla clients from 1.26.40 send a NetherNet identity, and clients without
+// one can join through transfer mode instead.
 type RelayConfig struct {
 	// ResolveTarget picks the backend address for a client. Nil relays every
 	// client to Config.Server.
@@ -42,12 +48,15 @@ type RelayConfig struct {
 	DialTimeout time.Duration
 }
 
-func (c *RelayConfig) validate() error {
+func (c *RelayConfig) validate(listen minecraft.ListenConfig) error {
 	if c == nil {
 		return nil
 	}
 	if c.Dialer.TokenSource != nil || c.Dialer.XBLClient != nil || c.Dialer.PlayFabClient != nil {
 		return errors.New("relay dialer must not authenticate; the relay logs in with each client's identity")
+	}
+	if listen.AuthenticationDisabled {
+		return errors.New("relay mode requires client authentication; the backend trusts the XUID the relay forwards")
 	}
 	return nil
 }
@@ -72,6 +81,8 @@ type relayClientConn interface {
 	relayServerConn
 	ClientData() login.ClientData
 	Proto() minecraft.Protocol
+	Authenticated() bool
+	LoginKeyProven() bool
 }
 
 // relayServerConn is the batch surface relayed between the two legs.
@@ -80,6 +91,7 @@ type relayServerConn interface {
 	WritePacket(packet.Packet) error
 	Flush() error
 	Close() error
+	Abort() error
 }
 
 // relayDialFunc dials the backend for one client. The broadcaster's default uses d.DialContext.
@@ -124,21 +136,37 @@ func (s *relaySet) xuids() map[string]struct{} {
 	return xuids
 }
 
-// staleSessionMembers counts session members that are not being relayed. In
-// transfer mode that is every member; relayed members are live players, not
-// leftovers that block joiners.
-func (b *Broadcaster) staleSessionMembers(members iter.Seq2[string, mpsd.MemberDescription]) int {
+// sessionOccupancy counts a session's members, those being relayed right now, and those recreating the
+// session would reclaim: members that are neither relayed nor its owner. In transfer mode no member is live.
+func (b *Broadcaster) sessionOccupancy(members iter.Seq2[string, mpsd.MemberDescription], ownerXUID string) (total, live, reclaimable int) {
 	relayed := b.relays.xuids()
-	count := 0
 	for _, member := range members {
+		total++
 		if member.Constants != nil && member.Constants.System != nil {
-			if _, ok := relayed[member.Constants.System.XUID]; ok {
+			xuid := member.Constants.System.XUID
+			if _, ok := relayed[xuid]; ok {
+				live++
+				continue
+			}
+			if xuid != "" && xuid == ownerXUID {
 				continue
 			}
 		}
-		count++
+		reclaimable++
 	}
-	return count
+	return total, live, reclaimable
+}
+
+// sessionFullIssue reports why a full session should be recreated, or "" when it should not. Recreating
+// drops every member, and MPSD offers the host no way to remove one, so live relayed players would leave
+// the session and their friends would lose sight of the world. A full session is therefore only recreated
+// when stale members outnumber live ones; otherwise it stays full until players leave.
+func (b *Broadcaster) sessionFullIssue(what string, members iter.Seq2[string, mpsd.MemberDescription], ownerXUID string) string {
+	total, live, reclaimable := b.sessionOccupancy(members, ownerXUID)
+	if total < sessionMemberRestartThreshold || reclaimable <= live {
+		return ""
+	}
+	return fmt.Sprintf("%s has %d/30 members, %d stale and %d relayed", what, total, reclaimable, live)
 }
 
 // handleClient relays conn when relay mode is configured and transfers it otherwise.
@@ -153,16 +181,25 @@ func (b *Broadcaster) handleClient(conn relayClientConn) {
 // relay logs conn's player into the backend with their own identity and pumps
 // packets both ways until either side disconnects.
 func (b *Broadcaster) relay(conn relayClientConn) {
+	defer conn.Close()
+	defer b.abortOnStop(conn)()
 	cfg := b.conf.Relay
 	id := conn.IdentityData()
-	b.relays.add(conn, id.XUID)
-	defer b.relays.remove(conn)
-	defer conn.Close()
 
 	ctx := b.ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// NetherNet has no Minecraft encryption, so without a transport identity a Login captured elsewhere could
+	// be replayed and relayed as its player.
+	if !conn.Authenticated() || !conn.LoginKeyProven() {
+		b.info("rejected relay client that did not prove its login key", "xuid", id.XUID, "name", id.DisplayName)
+		b.disconnectRelayClient(conn, "Please update Minecraft to the latest version to join this world.")
+		return
+	}
+	b.relays.add(conn, id.XUID)
+	defer b.relays.remove(conn)
+
 	dialCtx, cancel := context.WithTimeout(ctx, cfg.dialTimeout())
 	target, err := b.resolveRelayTarget(dialCtx, id, conn.ClientData())
 	if err != nil {
@@ -190,12 +227,30 @@ func (b *Broadcaster) relay(conn relayClientConn) {
 	errs := make(chan error, 2)
 	go func() { errs <- relayPump(conn, server) }()
 	go func() { errs <- relayPump(server, conn) }()
+	pending := 2
 	select {
 	case err := <-errs:
+		pending--
 		if err != nil && !errors.Is(err, net.ErrClosed) {
 			b.debug("relay ended", "xuid", id.XUID, "name", id.DisplayName, "err", err)
 		}
 	case <-ctx.Done():
+	}
+	if pending == 1 && ctx.Err() == nil {
+		// The other leg may still be delivering what it read before the end, such as a backend's final
+		// Disconnect or Transfer, so it gets a short window to finish.
+		select {
+		case <-errs:
+			pending--
+		case <-time.After(relayDrainTimeout):
+		case <-ctx.Done():
+		}
+	}
+	// Aborting both legs unblocks a pump stuck writing to a peer that stopped reading.
+	_ = conn.Abort()
+	_ = server.Abort()
+	for ; pending > 0; pending-- {
+		<-errs
 	}
 }
 
@@ -231,6 +286,7 @@ func (b *Broadcaster) dialRelayTarget(ctx context.Context, conn relayClientConn,
 	}
 	d.KeepXBLIdentityData = true
 	d.DisablePacketHandling = true
+	d.ForwardClientCacheStatus = true // the real client's own status follows through the relay
 	d.EnableBatchReading = true
 	d.FlushRate = -1 // relayPump flushes once per forwarded batch
 	d.Protocol = conn.Proto()

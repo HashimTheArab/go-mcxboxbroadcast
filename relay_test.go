@@ -3,6 +3,7 @@ package broadcaster
 import (
 	"context"
 	"errors"
+	"fmt"
 	"iter"
 	"net"
 	"sync"
@@ -29,9 +30,12 @@ type fakeRelayConn struct {
 	batches  chan []packet.Packet
 	written  []packet.Packet
 	flushes  int
+	writeErr error // returned by WritePacket, as by a peer that is gone
 	closed   chan struct{}
 	identity login.IdentityData
 	client   login.ClientData
+	// anonymous reports the login key as unproven, as for a NetherNet peer without an identity.
+	anonymous bool
 }
 
 func newFakeRelayConn(batches ...[]packet.Packet) *fakeRelayConn {
@@ -42,7 +46,13 @@ func newFakeRelayConn(batches ...[]packet.Packet) *fakeRelayConn {
 	return c
 }
 
+// ReadBatch serves every queued batch before reporting the conn closed.
 func (c *fakeRelayConn) ReadBatch() ([]packet.Packet, error) {
+	select {
+	case batch := <-c.batches:
+		return batch, nil
+	default:
+	}
 	select {
 	case batch := <-c.batches:
 		return batch, nil
@@ -59,6 +69,9 @@ func (c *fakeRelayConn) SendStartGame(minecraft.GameData) error {
 func (c *fakeRelayConn) WritePacket(pk packet.Packet) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.writeErr != nil {
+		return c.writeErr
+	}
 	c.written = append(c.written, pk)
 	return nil
 }
@@ -81,6 +94,9 @@ func (c *fakeRelayConn) Close() error {
 	return nil
 }
 
+func (c *fakeRelayConn) Abort() error                       { return c.Close() }
+func (c *fakeRelayConn) LoginKeyProven() bool               { return !c.anonymous }
+func (c *fakeRelayConn) Authenticated() bool                { return c.identity.XUID != "" }
 func (c *fakeRelayConn) ReadPacket() (packet.Packet, error) { return nil, net.ErrClosed }
 func (c *fakeRelayConn) SetReadDeadline(time.Time) error    { return nil }
 func (c *fakeRelayConn) IdentityData() login.IdentityData   { return c.identity }
@@ -121,10 +137,7 @@ func TestRelayPumpForwardsEachBatchWithOneFlush(t *testing.T) {
 	second := []packet.Packet{&packet.Text{Message: "c"}}
 	src := newFakeRelayConn(first, second)
 	dst := newFakeRelayConn()
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		src.Close()
-	}()
+	src.Close()
 
 	err := relayPump(src, dst)
 	if !errors.Is(err, net.ErrClosed) {
@@ -169,7 +182,7 @@ func TestBroadcasterRelayDialsWithClientIdentityAndForwardsBothWays(t *testing.T
 	server.Close()
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(relayDrainTimeout + time.Second):
 		t.Fatal("relay did not stop after the server closed")
 	}
 	client.waitClosed(t, "client")
@@ -188,6 +201,9 @@ func TestBroadcasterRelayDialsWithClientIdentityAndForwardsBothWays(t *testing.T
 	}
 	if !gotDialer.DisablePacketHandling || !gotDialer.EnableBatchReading || gotDialer.FlushRate != -1 {
 		t.Fatalf("dialer passthrough flags = %v/%v/%v, want passthrough batch reading with relay-owned flushing", gotDialer.DisablePacketHandling, gotDialer.EnableBatchReading, gotDialer.FlushRate)
+	}
+	if !gotDialer.ForwardClientCacheStatus {
+		t.Fatal("dialer sends its own ClientCacheStatus; the backend would get the client's as a second one")
 	}
 	if gotDialer.Protocol == nil || gotDialer.Protocol.ID() != minecraft.DefaultProtocol.ID() {
 		t.Fatalf("dialer protocol %v, want the client's", gotDialer.Protocol)
@@ -225,6 +241,7 @@ func TestBroadcasterRelayUsesResolvedTarget(t *testing.T) {
 
 func TestBroadcasterRelayDisconnectsClientWhenTargetResolutionFails(t *testing.T) {
 	client := newFakeRelayConn()
+	client.identity = login.IdentityData{XUID: "visitor"}
 	dialed := false
 	b := relayTestBroadcaster(&RelayConfig{
 		ResolveTarget: func(context.Context, login.IdentityData, login.ClientData) (string, error) {
@@ -244,6 +261,7 @@ func TestBroadcasterRelayDisconnectsClientWhenTargetResolutionFails(t *testing.T
 
 func TestBroadcasterRelayDisconnectsClientWhenDialFails(t *testing.T) {
 	client := newFakeRelayConn()
+	client.identity = login.IdentityData{XUID: "visitor"}
 	b := relayTestBroadcaster(&RelayConfig{}, func(context.Context, minecraft.Dialer, string, string) (relayServerConn, error) {
 		return nil, errors.New("connection refused")
 	})
@@ -290,25 +308,71 @@ func TestHandleClientTransfersWithoutRelayConfig(t *testing.T) {
 	}
 }
 
-func TestStaleSessionMembersIgnoresRelayedPlayers(t *testing.T) {
-	b := relayTestBroadcaster(&RelayConfig{}, nil)
-	live := newFakeRelayConn()
-	b.relays.add(live, "relayed")
-
-	members := func(yield func(string, mpsd.MemberDescription) bool) {
-		for _, xuid := range []string{"relayed", "stale", "host"} {
+// sessionMembers yields a member per XUID, then one without constants.
+func sessionMembers(xuids ...string) iter.Seq2[string, mpsd.MemberDescription] {
+	return func(yield func(string, mpsd.MemberDescription) bool) {
+		for _, xuid := range xuids {
 			if !yield(xuid, mpsd.MemberDescription{Constants: &mpsd.MemberConstants{System: &mpsd.MemberConstantsSystem{XUID: xuid}}}) {
 				return
 			}
 		}
 		yield("anonymous", mpsd.MemberDescription{})
 	}
-	if got := b.staleSessionMembers(iter.Seq2[string, mpsd.MemberDescription](members)); got != 3 {
-		t.Fatalf("stale members = %d, want 3 (everyone but the relayed player)", got)
+}
+
+// Relayed players and the owner occupy the session but cannot be reclaimed by recreating it.
+func TestSessionOccupancyCountsRelayedPlayersAsLive(t *testing.T) {
+	b := relayTestBroadcaster(&RelayConfig{}, nil)
+	live := newFakeRelayConn()
+	b.relays.add(live, "relayed")
+
+	members := sessionMembers("relayed", "stale", "host")
+	if total, relayed, reclaimable := b.sessionOccupancy(members, "host"); total != 4 || relayed != 1 || reclaimable != 2 {
+		t.Fatalf("occupancy = %d total, %d relayed, %d reclaimable; want 4, 1 and 2 (stale and anonymous)", total, relayed, reclaimable)
 	}
 	b.relays.remove(live)
-	if got := b.staleSessionMembers(iter.Seq2[string, mpsd.MemberDescription](members)); got != 4 {
-		t.Fatalf("stale members = %d after the relay ended, want 4", got)
+	if total, relayed, reclaimable := b.sessionOccupancy(members, "host"); total != 4 || relayed != 0 || reclaimable != 3 {
+		t.Fatalf("occupancy = %d total, %d relayed, %d reclaimable after the relay ended; want 4, 0 and 3", total, relayed, reclaimable)
+	}
+}
+
+// fullSession yields an owner "0" plus stale and relayed members, relaying the latter through b.
+func fullSession(b *Broadcaster, stale, relayed int) iter.Seq2[string, mpsd.MemberDescription] {
+	xuids := []string{"0"}
+	for i := range stale {
+		xuids = append(xuids, fmt.Sprint("stale-", i))
+	}
+	for i := range relayed {
+		xuid := fmt.Sprint("relayed-", i)
+		b.relays.add(newFakeRelayConn(), xuid)
+		xuids = append(xuids, xuid)
+	}
+	return func(yield func(string, mpsd.MemberDescription) bool) {
+		for _, xuid := range xuids {
+			if !yield(xuid, mpsd.MemberDescription{Constants: &mpsd.MemberConstants{System: &mpsd.MemberConstantsSystem{XUID: xuid}}}) {
+				return
+			}
+		}
+	}
+}
+
+// A full session is judged by total membership, and recreated when stale members outnumber live ones.
+func TestSessionFullIssueRecreatesMostlyStaleSession(t *testing.T) {
+	for _, tt := range []struct{ stale, relayed int }{{29, 0}, {26, 3}, {14, 13}} {
+		b := relayTestBroadcaster(&RelayConfig{}, nil)
+		if reason := b.sessionFullIssue("session", fullSession(b, tt.stale, tt.relayed), "0"); reason == "" {
+			t.Fatalf("full session with %d stale and %d relayed members was not recreated", tt.stale, tt.relayed)
+		}
+	}
+}
+
+// Recreating drops live relayed players from the session, so a full session they mostly hold is kept.
+func TestSessionFullIssueKeepsMostlyLiveSession(t *testing.T) {
+	for _, tt := range []struct{ stale, relayed int }{{0, 29}, {1, 26}, {13, 14}} {
+		b := relayTestBroadcaster(&RelayConfig{}, nil)
+		if reason := b.sessionFullIssue("session", fullSession(b, tt.stale, tt.relayed), "0"); reason != "" {
+			t.Fatalf("full session with %d stale and %d relayed members was recreated: %s", tt.stale, tt.relayed, reason)
+		}
 	}
 }
 
@@ -355,6 +419,19 @@ func TestStatusReportsRelayedPlayersWhenNotQuerying(t *testing.T) {
 	}
 }
 
+func TestNewRejectsRelayWithAuthenticationDisabled(t *testing.T) {
+	_, err := New(Config{
+		XBLTokenSource: staticTokenSource{},
+		XUID:           "123",
+		Server:         ServerInfo{Host: "127.0.0.1", Port: 19132},
+		Relay:          &RelayConfig{},
+		ListenConfig:   minecraft.ListenConfig{AuthenticationDisabled: true},
+	})
+	if err == nil {
+		t.Fatal("relay mode accepted unauthenticated clients whose XUID the backend would trust")
+	}
+}
+
 func TestNewRejectsAuthenticatingRelayDialer(t *testing.T) {
 	_, err := New(Config{
 		XBLTokenSource: staticTokenSource{},
@@ -397,4 +474,150 @@ func waitFor(t *testing.T, cond func() bool, msg string) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal(msg)
+}
+
+// stallingRelayConn is a peer that stopped reading: writes and graceful closes block until aborted.
+type stallingRelayConn struct {
+	*fakeRelayConn
+	aborted   chan struct{}
+	abortOnce sync.Once
+}
+
+func newStallingRelayConn() *stallingRelayConn {
+	return &stallingRelayConn{fakeRelayConn: newFakeRelayConn(), aborted: make(chan struct{})}
+}
+
+func (c *stallingRelayConn) WritePacket(packet.Packet) error {
+	<-c.aborted
+	return net.ErrClosed
+}
+
+func (c *stallingRelayConn) Close() error {
+	<-c.aborted
+	return c.fakeRelayConn.Close()
+}
+
+func (c *stallingRelayConn) Abort() error {
+	c.abortOnce.Do(func() { close(c.aborted) })
+	return c.fakeRelayConn.Close()
+}
+
+// When one leg ends while the other is stuck writing to a peer that stopped reading, teardown must not hang.
+func TestRelayTeardownAbortsStalledLeg(t *testing.T) {
+	client := newFakeRelayConn([]packet.Packet{&packet.Text{Message: "to a backend that stopped reading"}})
+	client.identity = login.IdentityData{XUID: "visitor"}
+	server := newStallingRelayConn()
+	b := relayTestBroadcaster(&RelayConfig{}, func(context.Context, minecraft.Dialer, string, string) (relayServerConn, error) {
+		return server, nil
+	})
+
+	done := make(chan struct{})
+	go func() {
+		b.relay(client)
+		close(done)
+	}()
+	waitFor(t, func() bool { return b.relays.count() == 1 && len(client.batches) == 0 }, "relay did not start forwarding")
+	server.fakeRelayConn.Close() // the backend's read side ends
+	select {
+	case <-done:
+	case <-time.After(relayDrainTimeout + time.Second):
+		t.Fatal("relay teardown hung on the leg blocked writing to a stalled backend")
+	}
+	if b.relays.count() != 0 {
+		t.Fatalf("relayed clients = %d after teardown, want 0", b.relays.count())
+	}
+}
+
+// Close must stop relays blocked on stalled peers and return only after their handlers have.
+func TestCloseWaitsForStalledRelay(t *testing.T) {
+	client := newStallingRelayConn()
+	client.identity = login.IdentityData{XUID: "visitor"}
+	server := newStallingRelayConn()
+	b := relayTestBroadcaster(&RelayConfig{}, func(context.Context, minecraft.Dialer, string, string) (relayServerConn, error) {
+		return server, nil
+	})
+	b.announcer = &fakeAnnouncer{}
+	b.started = true
+	b.ctx, b.cancel = context.WithCancel(context.Background())
+	b.done = make(chan struct{})
+	close(b.done)
+
+	relayDone := make(chan struct{})
+	b.clientWg.Add(1)
+	go func() {
+		defer b.clientWg.Done()
+		b.relay(client)
+		close(relayDone)
+	}()
+	waitFor(t, func() bool { return b.relays.count() == 1 }, "relay did not start")
+
+	closed := make(chan error, 1)
+	go func() { closed <- b.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close hung on a relay blocked on stalled peers")
+	}
+	select {
+	case <-relayDone:
+	default:
+		t.Fatal("Close returned before the relay handler did")
+	}
+}
+
+// slowRelayConn delivers writes after a delay and fails them once aborted, like a client on a slow link.
+type slowRelayConn struct {
+	*fakeRelayConn
+}
+
+func (c slowRelayConn) WritePacket(pk packet.Packet) error {
+	time.Sleep(100 * time.Millisecond)
+	if c.isClosed() {
+		return net.ErrClosed
+	}
+	return c.fakeRelayConn.WritePacket(pk)
+}
+
+// A backend's last packet must reach the client even when the other leg notices the backend closing first.
+func TestRelayDeliversBackendTransferBeforeTeardown(t *testing.T) {
+	client := slowRelayConn{newFakeRelayConn([]packet.Packet{&packet.Text{Message: "to a closed backend"}})}
+	client.identity = login.IdentityData{XUID: "visitor"}
+	server := newFakeRelayConn([]packet.Packet{&packet.Transfer{Address: "play.example.net", Port: 19132}})
+	server.writeErr = net.ErrClosed
+	server.Close()
+	b := relayTestBroadcaster(&RelayConfig{}, func(context.Context, minecraft.Dialer, string, string) (relayServerConn, error) {
+		return server, nil
+	})
+
+	b.relay(client)
+	written, _ := client.snapshot()
+	if len(written) != 1 {
+		t.Fatalf("client received %d packets, want the backend's Transfer", len(written))
+	}
+	if _, ok := written[0].(*packet.Transfer); !ok {
+		t.Fatalf("client received %T, want Transfer", written[0])
+	}
+}
+
+// A client that did not prove its login key, or has no Xbox identity, must not be relayed as that player.
+func TestRelayRejectsUnprovenLogins(t *testing.T) {
+	for name, client := range map[string]*fakeRelayConn{
+		"anonymous transport": {anonymous: true, identity: login.IdentityData{XUID: "visitor"}},
+		"no xbox identity":    {},
+	} {
+		client.batches, client.closed = make(chan []packet.Packet), make(chan struct{})
+		dialed := false
+		b := relayTestBroadcaster(&RelayConfig{}, func(context.Context, minecraft.Dialer, string, string) (relayServerConn, error) {
+			dialed = true
+			return nil, errors.New("unreachable")
+		})
+		b.relay(client)
+		if dialed {
+			t.Fatalf("%s: relayed a login that may be replayed", name)
+		}
+		assertDisconnected(t, client)
+	}
 }

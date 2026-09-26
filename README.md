@@ -99,6 +99,11 @@ authentication boundary. Public servers that verify login chains cannot be
 relayed to, and a `Transfer` sent by the backend still moves the client out of
 the session.
 
+NetherNet has no Minecraft encryption, so relay mode only accepts clients that
+prove they hold their login key through a NetherNet identity. Vanilla clients
+send one from 1.26.40; clients without one can still join in transfer mode.
+Relay mode also requires client authentication.
+
 Library users can route each player individually with `RelayConfig.ResolveTarget`
 and customize the backend dial with `RelayConfig.Dialer`. Xbox Live's session
 member limit bounds how many players one session can relay at a time.
