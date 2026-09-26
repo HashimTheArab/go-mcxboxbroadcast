@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 )
@@ -106,18 +105,11 @@ func (s *FileHistoryStore) load() (map[string]int64, error) {
 }
 
 func (s *FileHistoryStore) save(history map[string]int64) error {
-	if err := os.MkdirAll(filepath.Dir(s.Path), 0o755); err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(history, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := s.Path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.Path)
+	return writeFileAtomic(s.Path, data)
 }
 
 func ctxErr(ctx context.Context) error {

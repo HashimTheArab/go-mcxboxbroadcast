@@ -13,7 +13,9 @@ import (
 	"net/http"
 	"runtime/pprof"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/df-mc/go-playfab/v2"
@@ -22,6 +24,7 @@ import (
 	"github.com/df-mc/go-xsapi/v2/xal/xasu"
 	"github.com/df-mc/go-xsapi/v2/xal/xsts"
 	"github.com/sandertv/gophertunnel/minecraft/auth"
+	"github.com/sandertv/gophertunnel/minecraft/auth/authclient"
 	"github.com/sandertv/gophertunnel/minecraft/service"
 	"golang.org/x/oauth2"
 )
@@ -175,11 +178,12 @@ func TestLiveTokenSourceDoesNotFallBackToDeviceCodeOnTransientRefreshError(t *te
 		return nil, errors.New("network down")
 	})}
 	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, client)
-	src := NewLiveTokenSource(ctx, &oauth2.Token{
+	src := newLiveTokenSource(ctx, &oauth2.Token{
 		AccessToken:  "old-access",
 		RefreshToken: "old-refresh",
 		Expiry:       time.Now().Add(-time.Hour),
-	}, io.Discard)
+	}, io.Discard, nil)
+	src.retry = fastLiveRetry
 
 	if _, err := src.Token(); err == nil {
 		t.Fatal("expected transient refresh error to surface")
@@ -193,17 +197,146 @@ func TestLiveTokenSourceDoesNotFallBackToDeviceCodeOnTransientServerError(t *tes
 		return tokenTestResponse(http.StatusServiceUnavailable, `{"error":"server_error","error_description":"try again"}`), nil
 	})}
 	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, client)
-	src := NewLiveTokenSource(ctx, &oauth2.Token{
+	src := newLiveTokenSource(ctx, &oauth2.Token{
 		AccessToken:  "old-access",
 		RefreshToken: "old-refresh",
 		Expiry:       time.Now().Add(-time.Hour),
-	}, io.Discard)
+	}, io.Discard, nil)
+	src.retry = fastLiveRetry
 
 	_, err := src.Token()
 	var refreshErr *liveRefreshError
 	if !errors.As(err, &refreshErr) || refreshErr.Code != "server_error" {
 		t.Fatalf("Token() error = %v, want surfaced refresh error", err)
 	}
+}
+
+// A refresh response that omits refresh_token must keep the previous one, not force a device-code login later.
+func TestLiveTokenSourceKeepsRefreshTokenWhenResponseOmitsIt(t *testing.T) {
+	client := &http.Client{Transport: tokenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.String() != "https://login.live.com/oauth20_token.srf" {
+			t.Errorf("unexpected request %s", req.URL)
+			return nil, errors.New("unexpected request")
+		}
+		return tokenTestResponse(http.StatusOK, `{"access_token":"new-access","token_type":"bearer","expires_in":3600}`), nil
+	})}
+	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, client)
+	var persisted *oauth2.Token
+	src := newLiveTokenSource(ctx, &oauth2.Token{
+		AccessToken:  "old-access",
+		RefreshToken: "old-refresh",
+		Expiry:       time.Now().Add(-time.Hour),
+	}, io.Discard, func(tok *oauth2.Token) { persisted = tok })
+
+	tok, err := src.Token()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.RefreshToken != "old-refresh" || persisted == nil || persisted.RefreshToken != "old-refresh" {
+		t.Fatalf("refresh token = %q, persisted %v; want old-refresh kept", tok.RefreshToken, persisted)
+	}
+}
+
+// A refresh token rejected after startup must not hold callers for the whole device-code login.
+func TestLiveTokenSourceRuntimeReauthRunsInBackground(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var approved atomic.Bool
+		ctx := context.WithValue(context.Background(), oauth2.HTTPClient, deviceLoginTestClient(t, &approved))
+		var out strings.Builder
+		var persisted atomic.Pointer[oauth2.Token]
+		src := newLiveTokenSource(ctx, &oauth2.Token{
+			AccessToken:  "old-access",
+			RefreshToken: "revoked",
+			Expiry:       time.Now().Add(-time.Hour),
+		}, &out, func(tok *oauth2.Token) { persisted.Store(tok) })
+		src.issued = true
+
+		for range 2 {
+			if _, err := src.Token(); !errors.Is(err, errLiveReauthPending) {
+				t.Fatalf("Token() error = %v, want pending re-authentication", err)
+			}
+		}
+		approved.Store(true)
+		time.Sleep(5 * time.Second)
+		synctest.Wait()
+
+		tok, err := src.Token()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tok.AccessToken != "fresh" || persisted.Load() == nil || persisted.Load().AccessToken != "fresh" {
+			t.Fatalf("token = %q, persisted %v; want fresh token stored", tok.AccessToken, persisted.Load())
+		}
+		if !strings.Contains(out.String(), "Microsoft sign-in expired") {
+			t.Fatalf("sign-in output = %q, want expiry notice", out.String())
+		}
+		drainTokenTestTimers()
+	})
+}
+
+// An abandoned runtime sign-in must end at its deadline and report the failure.
+func TestLiveTokenSourceRuntimeReauthTimesOut(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx := context.WithValue(context.Background(), oauth2.HTTPClient, deviceLoginTestClient(t, new(atomic.Bool)))
+		var out strings.Builder
+		src := newLiveTokenSource(ctx, &oauth2.Token{
+			AccessToken:  "old-access",
+			RefreshToken: "revoked",
+			Expiry:       time.Now().Add(-time.Hour),
+		}, &out, nil)
+		src.issued = true
+		src.reauthTimeout = time.Minute
+
+		if _, err := src.Token(); !errors.Is(err, errLiveReauthPending) {
+			t.Fatalf("Token() error = %v, want pending re-authentication", err)
+		}
+		time.Sleep(2 * time.Minute)
+		synctest.Wait()
+
+		if _, err := src.Token(); err == nil || errors.Is(err, errLiveReauthPending) {
+			t.Fatalf("Token() error = %v, want the failed sign-in", err)
+		}
+		if !strings.Contains(out.String(), "Microsoft sign-in failed") {
+			t.Fatalf("sign-in output = %q, want failure notice", out.String())
+		}
+		// The next call starts a fresh sign-in.
+		if _, err := src.Token(); !errors.Is(err, errLiveReauthPending) {
+			t.Fatalf("Token() error = %v, want a new pending re-authentication", err)
+		}
+		drainTokenTestTimers()
+	})
+}
+
+// drainTokenTestTimers lets pending logins and HTTP client timers expire so
+// the synctest bubble can exit.
+func drainTokenTestTimers() {
+	time.Sleep(time.Hour)
+	synctest.Wait()
+}
+
+// deviceLoginTestClient rejects refresh tokens and completes device-code
+// polling once approved is set.
+func deviceLoginTestClient(t *testing.T, approved *atomic.Bool) *http.Client {
+	return &http.Client{Transport: tokenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.String() {
+		case "https://login.live.com/oauth20_connect.srf":
+			return tokenTestJSONResponse(http.StatusOK, `{"device_code":"device","user_code":"code","verification_uri":"https://www.microsoft.com/link","expires_in":900,"interval":1}`), nil
+		case "https://login.live.com/oauth20_token.srf":
+			if err := req.ParseForm(); err != nil {
+				return nil, err
+			}
+			if req.Form.Get("grant_type") == "refresh_token" {
+				return tokenTestResponse(http.StatusBadRequest, `{"error":"invalid_grant","error_description":"revoked"}`), nil
+			}
+			if !approved.Load() {
+				return tokenTestJSONResponse(http.StatusBadRequest, `{"error":"authorization_pending"}`), nil
+			}
+			return tokenTestJSONResponse(http.StatusOK, `{"access_token":"fresh","token_type":"bearer","refresh_token":"fresh-refresh","expires_in":3600}`), nil
+		default:
+			t.Errorf("unexpected request %s %s", req.Method, req.URL)
+			return nil, errors.New("unexpected request")
+		}
+	})}
 }
 
 func TestLiveTokenSourceFallsBackToDeviceCodeWhenRefreshRejected(t *testing.T) {
@@ -370,6 +503,9 @@ func TestNewXSAPIClientUsesLazyRTA(t *testing.T) {
 		t.Fatal("xsapi client opened RTA during construction")
 	}
 }
+
+// fastLiveRetry keeps the refresh retry budget but not its real backoff.
+var fastLiveRetry = authclient.RetryOptions{Attempts: 5, MinDelay: time.Millisecond, MaxDelay: time.Millisecond}
 
 type tokenRoundTripFunc func(*http.Request) (*http.Response, error)
 

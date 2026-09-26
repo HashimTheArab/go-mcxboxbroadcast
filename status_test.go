@@ -1,8 +1,12 @@
 package broadcaster
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"net"
+	"runtime/pprof"
+	"strings"
 	"testing"
 	"time"
 
@@ -55,51 +59,50 @@ func TestStatusDefaults(t *testing.T) {
 	}
 }
 
-func TestStatusVersionOverride(t *testing.T) {
-	status := func(version string) room.Status {
-		b, err := New(Config{
-			XBLTokenSource: staticTokenSource{},
-			XUID:           "123",
-			Server:         ServerInfo{Host: "127.0.0.1", Port: 19132},
-			Status:         Status{HostName: "Host", Version: version},
+// Every advertised protocol/version pair must be one the broadcaster's own listener accepts.
+func TestStatusAdvertisesPairListenerAccepts(t *testing.T) {
+	legacy := room.Status{HostName: "Host", Protocol: 2168, Version: "1.26.44"}
+	for name, conf := range map[string]Config{
+		"configured":      {Status: Status{HostName: "Host"}},
+		"status provider": {StatusProvider: room.NewStatusProvider(legacy)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			conf.XBLTokenSource = staticTokenSource{}
+			conf.XUID = "123"
+			conf.Server = ServerInfo{Host: "127.0.0.1", Port: 19132}
+			conf.ListenConfig = minecraft.ListenConfig{AuthenticationDisabled: true}
+			b, err := New(conf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			status, err := b.status(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status.Protocol != protocol.CurrentProtocol || status.Version != protocol.CurrentVersion {
+				t.Fatalf("advertised %s/%d, want %s/%d", status.Version, status.Protocol, protocol.CurrentVersion, protocol.CurrentProtocol)
+			}
+			l, err := b.minecraftListenConfig(status).Listen("raknet", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer l.Close()
+			dialer := minecraft.Dialer{Protocol: minecraft.BasicProtocol{Protocol: status.Protocol, Version: status.Version}}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			go func() {
+				conn, err := l.Accept()
+				if err != nil {
+					return
+				}
+				_ = conn.(*minecraft.Conn).StartGame(minecraft.GameData{})
+			}()
+			conn, err := dialer.DialContext(ctx, "raknet", l.Addr().String())
+			if err != nil {
+				t.Fatalf("listener rejects the advertised pair: %v", err)
+			}
+			_ = conn.Close()
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		st, err := b.status(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		return st
-	}
-	if got := status("1.26.32").Version; got != "1.26.32" {
-		t.Fatalf("version override not applied: %q", got)
-	}
-	if got := status("").Version; got != protocol.CurrentVersion {
-		t.Fatalf("empty version should fall back to protocol.CurrentVersion, got %q", got)
-	}
-}
-
-func TestStatusAdvertisedProtocolOverride(t *testing.T) {
-	b, err := New(Config{
-		XBLTokenSource: staticTokenSource{},
-		XUID:           "123",
-		Server:         ServerInfo{Host: "127.0.0.1", Port: 19132},
-		Status: Status{
-			HostName: "Host",
-			Version:  "1.26.44",
-			Protocol: 2168,
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	status, err := b.status(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if status.Version != "1.26.44" || status.Protocol != 2168 {
-		t.Fatalf("advertised pair = %s/%d, want 1.26.44/2168", status.Version, status.Protocol)
 	}
 }
 
@@ -248,5 +251,29 @@ func TestRoomListenerAnnouncesStatusResolvedByUpdate(t *testing.T) {
 	listener.ServerStatus(minecraft.ServerStatus{})
 	if got := announcer.Status().MemberCount; got != 3 {
 		t.Fatalf("listener announced member count %d, want the updated 3", got)
+	}
+}
+
+// A timed-out status query must not leave its RakNet ping running.
+func TestQueryStatusStopsPingOnTimeout(t *testing.T) {
+	silent, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer silent.Close()
+	if _, err := queryStatus(context.Background(), silent.LocalAddr().String(), 20*time.Millisecond); err == nil {
+		t.Fatal("expected a timeout from a server that never answers")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		var dump bytes.Buffer
+		_ = pprof.Lookup("goroutine").WriteTo(&dump, 2)
+		if !strings.Contains(dump.String(), "go-raknet.Dialer.Ping") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ping still running after queryStatus returned:\n%s", dump.String())
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

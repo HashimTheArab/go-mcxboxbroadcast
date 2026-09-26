@@ -38,7 +38,8 @@ CMD ["/bin/sh", "/entrypoint.sh"]
 
 FROM runtime-base AS standalone
 
-RUN addgroup -S app && adduser -S -G app -h /opt/app app
+# Fixed IDs so volume ownership stays valid across image rebuilds.
+RUN addgroup -S -g 101 app && adduser -S -u 100 -G app -h /opt/app app
 
 WORKDIR /opt/app/config
 
