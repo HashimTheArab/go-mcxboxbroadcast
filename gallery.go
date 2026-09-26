@@ -144,16 +144,20 @@ func (g GalleryClient) Upload(ctx context.Context, imagePath string, featured bo
 		return GalleryImage{}, err
 	}
 	defer f.Close()
+	stat, err := f.Stat()
+	if err != nil {
+		return GalleryImage{}, err
+	}
 	req, err := g.request(ctx, http.MethodPost, galleryURL, f)
 	if err != nil {
 		return GalleryImage{}, err
 	}
+	// Send a Content-Length instead of a chunked body.
+	req.ContentLength = stat.Size()
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("X-Ms-Showcased-Featured", fmt.Sprint(featured))
-	if stat, err := f.Stat(); err == nil {
-		// UTC with milliseconds, matching Java's Instant.toString().
-		req.Header.Set("X-Ms-Showcased-Timetaken", stat.ModTime().UTC().Format("2006-01-02T15:04:05.000Z"))
-	}
+	// UTC with milliseconds, matching Java's Instant.toString().
+	req.Header.Set("X-Ms-Showcased-Timetaken", stat.ModTime().UTC().Format("2006-01-02T15:04:05.000Z"))
 	resp, err := g.client().Do(req)
 	if err != nil {
 		return GalleryImage{}, err
@@ -162,11 +166,11 @@ func (g GalleryClient) Upload(ctx context.Context, imagePath string, featured bo
 	if resp.StatusCode != http.StatusAccepted {
 		return GalleryImage{}, fmt.Errorf("%s %s: %s", req.Method, req.URL, resp.Status)
 	}
-	var data galleryUploadResponse
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+	var uploaded galleryUploadResponse
+	if err := json.NewDecoder(resp.Body).Decode(&uploaded); err != nil {
 		return GalleryImage{}, err
 	}
-	return data.Result, nil
+	return uploaded.Result, nil
 }
 
 func (g GalleryClient) Delete(ctx context.Context, imageID string) error {

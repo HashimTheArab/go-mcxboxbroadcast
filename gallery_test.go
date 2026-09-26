@@ -438,3 +438,23 @@ type galleryTokenSource struct {
 func (s galleryTokenSource) ServiceToken(context.Context) (*service.Token, error) {
 	return &service.Token{AuthorizationHeader: s.authorization, ValidUntil: time.Now().Add(time.Hour)}, nil
 }
+
+// Uploads must carry a Content-Length rather than a chunked body.
+func TestGalleryUploadSendsContentLength(t *testing.T) {
+	var gotLength int64
+	var gotEncoding []string
+	path := filepath.Join(t.TempDir(), "a.png")
+	if err := os.WriteFile(path, []byte("0123456789"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g := GalleryClient{TokenSource: galleryTokenSource{authorization: "Bearer t"}, Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		gotLength, gotEncoding = req.ContentLength, req.TransferEncoding
+		return response(http.StatusAccepted, `{"result":{"id":"x"}}`), nil
+	})}}
+	if _, err := g.Upload(context.Background(), path, true); err != nil {
+		t.Fatal(err)
+	}
+	if gotLength != 10 || len(gotEncoding) != 0 {
+		t.Fatalf("ContentLength=%d TransferEncoding=%v, want 10 and none", gotLength, gotEncoding)
+	}
+}

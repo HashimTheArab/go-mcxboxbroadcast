@@ -1,4 +1,4 @@
-configVersion: 4
+configVersion: 5
 debugMode: false
 suppressSessionUpdateMessage: false
 
@@ -32,10 +32,15 @@ friendSync:
   autoFollow: true
   autoUnfollow: true
   initialInvite: true
-  expiry:
-    enabled: true
-    days: 8
-    check: 1800
+  # Keeps room on the friend list (Xbox allows 1000). 0 turns a rule off.
+  cleanup:
+    # Remove friends not seen for this many days.
+    inactiveDays: 15
+    # Keep friends plus pending requests at or below this, removing the least
+    # recently seen friends first.
+    maxFriends: 950
+    # Seconds between inactive-friend checks.
+    interval: 1800
     historyPath: cache/player_history.json
 
 notifications:

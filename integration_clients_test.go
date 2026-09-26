@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -239,61 +238,45 @@ func TestFriendSyncerSendsInitialInvite(t *testing.T) {
 	}
 }
 
-func TestFriendSyncerExpiresInactiveFriends(t *testing.T) {
-	var unfollowed bool
+func TestFriendSyncerRemovesInactiveFriends(t *testing.T) {
+	var removed bool
+	history := newMemoryHistory()
+	history.set("me", "1", time.Now().Add(-48*time.Hour))
 	syncer := FriendSyncer{
 		Client: fakeFriendClient{
-			people:   []Person{{XUID: "1", Gamertag: "Old", IsFollowedByCaller: true}},
-			unfollow: func(xuid string) { unfollowed = xuid == "1" },
+			people:       []Person{{XUID: "1", Gamertag: "Old", IsFollowingCaller: true, IsFollowedByCaller: true}},
+			removeFriend: func(xuid string) { removed = xuid == "1" },
 		},
-		History: fakeHistoryStore{seen: map[string]time.Time{"1": time.Now().Add(-48 * time.Hour)}},
-		Config:  FriendSyncConfig{ExpiryEnabled: true, ExpiryDays: 1},
+		History: history,
+		Account: "me",
+		Config:  FriendSyncConfig{Cleanup: FriendCleanupConfig{InactiveDays: 1}},
 	}
 	if err := syncer.Sync(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if !unfollowed {
-		t.Fatal("expected inactive friend to be unfollowed")
+	if !removed {
+		t.Fatal("expected inactive friend to be removed")
 	}
 }
 
-func TestFriendSyncerDefaultsExpiryDays(t *testing.T) {
-	var unfollowed bool
+func TestFriendSyncerKeepsFriendsWhenInactiveDaysIsZero(t *testing.T) {
+	var removed bool
+	history := newMemoryHistory()
+	history.set("me", "1", time.Now().Add(-365*24*time.Hour))
 	syncer := FriendSyncer{
 		Client: fakeFriendClient{
-			people:   []Person{{XUID: "1", Gamertag: "Recent", IsFollowedByCaller: true}},
-			unfollow: func(string) { unfollowed = true },
+			people:       []Person{{XUID: "1", Gamertag: "Old", IsFollowedByCaller: true}},
+			removeFriend: func(string) { removed = true },
 		},
-		History: fakeHistoryStore{seen: map[string]time.Time{"1": time.Now().Add(-24 * time.Hour)}},
-		Config:  FriendSyncConfig{ExpiryEnabled: true},
+		History: history,
+		Account: "me",
+		Config:  FriendSyncConfig{Cleanup: FriendCleanupConfig{MaxFriends: 10}},
 	}
 	if err := syncer.Sync(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if unfollowed {
-		t.Fatal("zero expiry days should default instead of pruning recent friends")
-	}
-}
-
-func TestFileHistoryStoreRecordsAndClearsLastSeen(t *testing.T) {
-	store := NewFileHistoryStore(filepath.Join(t.TempDir(), "player_history.json"))
-	when := time.Now().Add(-time.Hour).Truncate(time.Second)
-
-	if err := store.Seen(context.Background(), "1", when); err != nil {
-		t.Fatal(err)
-	}
-	lastSeen, ok, err := store.LastSeen(context.Background(), "1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ok || !lastSeen.Equal(when) {
-		t.Fatalf("last seen = %s, %v", lastSeen, ok)
-	}
-	if err := store.Clear(context.Background(), "1"); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok, err := store.LastSeen(context.Background(), "1"); err != nil || ok {
-		t.Fatalf("expected cleared history, ok=%v err=%v", ok, err)
+	if removed {
+		t.Fatal("inactiveDays 0 must not remove friends for inactivity")
 	}
 }
 
@@ -714,9 +697,10 @@ func (s staticStatusProvider) RoomStatus() room.Status {
 }
 
 type fakeFriendClient struct {
-	people   []Person
-	follow   func(string)
-	unfollow func(string)
+	people       []Person
+	follow       func(string)
+	unfollow     func(string)
+	removeFriend func(string)
 }
 
 func (f fakeFriendClient) Friends(context.Context) ([]Person, error) { return f.people, nil }
@@ -732,6 +716,13 @@ func (f fakeFriendClient) Unfollow(_ context.Context, xuid string) error {
 	}
 	return nil
 }
+func (f fakeFriendClient) RemoveFriend(_ context.Context, xuid string) error {
+	if f.removeFriend != nil {
+		f.removeFriend(xuid)
+	}
+	return nil
+}
+func (f fakeFriendClient) RemoveFollower(context.Context, string) error { return nil }
 
 type fakeInviter struct {
 	invite func(string)
@@ -739,20 +730,6 @@ type fakeInviter struct {
 
 func (f fakeInviter) Invite(_ context.Context, xuid, _ string) error {
 	f.invite(xuid)
-	return nil
-}
-
-type fakeHistoryStore struct {
-	seen map[string]time.Time
-}
-
-func (f fakeHistoryStore) LastSeen(_ context.Context, xuid string) (time.Time, bool, error) {
-	t, ok := f.seen[xuid]
-	return t, ok, nil
-}
-
-func (f fakeHistoryStore) Clear(_ context.Context, xuid string) error {
-	delete(f.seen, xuid)
 	return nil
 }
 

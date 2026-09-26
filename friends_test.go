@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -247,10 +248,11 @@ func TestFriendClientAcceptPendingFriendRequestsUsesAddFriends(t *testing.T) {
 			return nil, nil
 		})))}
 
-	accepted, err := client.AcceptPendingFriendRequests(context.Background())
+	result, err := client.AcceptPendingFriendRequests(context.Background(), XboxFriendLimit, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	accepted := result.Accepted
 	wantRequests := strings.Join([]string{
 		http.MethodGet + " " + pendingRequestsURL,
 		http.MethodPost + " " + addFriendsURL,
@@ -298,11 +300,11 @@ func TestFriendClientAcceptPendingFriendRequestsBatchesAdds(t *testing.T) {
 			return nil, nil
 		})})}
 
-	accepted, err := client.AcceptPendingFriendRequests(context.Background())
+	result, err := client.AcceptPendingFriendRequests(context.Background(), XboxFriendLimit, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(accepted) != len(pending) {
+	if accepted := result.Accepted; len(accepted) != len(pending) {
 		t.Fatalf("accepted %d people, want %d", len(accepted), len(pending))
 	}
 	if got := fmt.Sprint(batchSizes); got != "[50 1]" {
@@ -339,12 +341,12 @@ func TestFriendClientAcceptPendingFriendRequestsSplitsLimitErrors(t *testing.T) 
 			return nil, nil
 		})})}
 
-	accepted, err := client.AcceptPendingFriendRequests(context.Background())
+	result, err := client.AcceptPendingFriendRequests(context.Background(), XboxFriendLimit, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(accepted) != 4 {
-		t.Fatalf("accepted people = %#v, want all four", accepted)
+	if len(result.Accepted) != 4 {
+		t.Fatalf("accepted people = %#v, want all four", result.Accepted)
 	}
 	if got := fmt.Sprint(batchSizes); got != "[4 2 2]" {
 		t.Fatalf("bulk batch sizes = %s, want [4 2 2]", got)
@@ -367,7 +369,7 @@ func TestFriendClientAcceptPendingFriendRequestsReturnsRetryAfterError(t *testin
 			return nil, nil
 		})})}
 
-	_, err := client.AcceptPendingFriendRequests(context.Background())
+	_, err := client.AcceptPendingFriendRequests(context.Background(), XboxFriendLimit, nil)
 	if err == nil {
 		t.Fatal("expected retry-after error")
 	}
@@ -387,32 +389,162 @@ func TestFriendClientAcceptPendingFriendRequestsReportsFailedUpdates(t *testing.
 			case http.MethodGet:
 				return response(http.StatusOK, `{"people":[{"xuid":"1","gamertag":"One"},{"xuid":"2","gamertag":"Two"}]}`), nil
 			case http.MethodPost:
-				return response(http.StatusOK, `{"updatedPeople":["1"]}`), nil
+				return response(http.StatusOK, `{"updatedPeople":["1"],"failedToUpdate":["2"]}`), nil
 			default:
 				t.Fatalf("unexpected request %s %s", req.Method, req.URL)
 			}
 			return nil, nil
 		})})}
 
-	accepted, err := client.AcceptPendingFriendRequests(context.Background())
-	if err == nil {
-		t.Fatal("expected failed updates error")
+	result, err := client.AcceptPendingFriendRequests(context.Background(), XboxFriendLimit, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(accepted) != 1 || accepted[0].XUID != "1" {
-		t.Fatalf("accepted people = %#v, want xuid 1", accepted)
+	if len(result.Accepted) != 1 || result.Accepted[0].XUID != "1" {
+		t.Fatalf("accepted people = %#v, want xuid 1", result.Accepted)
 	}
-	var acceptErr interface {
-		FailedXUIDs() []string
+	if len(result.Rejected) != 1 || result.Rejected[0].Person.XUID != "2" || !errors.Is(result.Rejected[0].Err, ErrFriendRequestNotAccepted) {
+		t.Fatalf("rejected = %#v, want xuid 2 not accepted", result.Rejected)
 	}
-	if !errors.As(err, &acceptErr) {
-		t.Fatalf("expected accept failure error, got %T: %v", err, err)
-	}
-	if got := strings.Join(acceptErr.FailedXUIDs(), ","); got != "2" {
-		t.Fatalf("failed xuids = %s, want 2", got)
+	if result.Waiting != 1 {
+		t.Fatalf("waiting = %d, want 1", result.Waiting)
 	}
 }
 
-func TestFriendClientForceUnfollowDeletesFollowerRelationship(t *testing.T) {
+// bulkAddServer answers pending-list reads and bulk adds from a callback, recording each batch.
+func bulkAddServer(t *testing.T, pending []string, add func(xuids []string) *http.Response) (FriendClient, *[][]string) {
+	t.Helper()
+	people := make([]map[string]string, 0, len(pending))
+	for _, xuid := range pending {
+		people = append(people, map[string]string{"xuid": xuid, "gamertag": "GT" + xuid})
+	}
+	pendingBody, err := json.Marshal(map[string]any{"people": people})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var batches [][]string
+	client := FriendClient{Social: newTestSocialClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		var resp *http.Response
+		switch req.Method {
+		case http.MethodGet:
+			resp = response(http.StatusOK, string(pendingBody))
+		case http.MethodPost:
+			var body struct {
+				XUIDs []string `json:"xuids"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			batches = append(batches, body.XUIDs)
+			resp = add(body.XUIDs)
+		default:
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL)
+		}
+		resp.Request = req
+		return resp, nil
+	})})}
+	return client, &batches
+}
+
+func updated(xuids []string) *http.Response {
+	body, _ := json.Marshal(map[string]any{"updatedPeople": xuids})
+	return response(http.StatusOK, string(body))
+}
+
+// One refused request must not block the rest of its batch or later batches.
+func TestFriendClientAcceptIsolatesRefusedRequests(t *testing.T) {
+	xuids := make([]string, addFriendsBatchSize+2)
+	for i := range xuids {
+		xuids[i] = fmt.Sprint(i + 1)
+	}
+	client, batches := bulkAddServer(t, xuids, func(batch []string) *http.Response {
+		for _, xuid := range batch {
+			switch xuid {
+			case "3":
+				return response(http.StatusBadRequest, "Bad Request")
+			case "4":
+				return response(http.StatusForbidden, `{"code":1049,"description":"privacy"}`)
+			}
+		}
+		return updated(batch)
+	})
+
+	result, err := client.AcceptPendingFriendRequests(context.Background(), XboxFriendLimit, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Accepted) != len(xuids)-2 {
+		t.Fatalf("accepted %d people, want %d", len(result.Accepted), len(xuids)-2)
+	}
+	rejected := map[string]error{}
+	for _, r := range result.Rejected {
+		rejected[r.Person.XUID] = r.Err
+	}
+	if len(rejected) != 2 || !strings.Contains(fmt.Sprint(rejected["3"]), "Bad Request") || !errors.Is(rejected["4"], xblsocial.ErrFriendRestricted) {
+		t.Fatalf("rejected = %v, want 3 with its body and 4 restricted", rejected)
+	}
+	if last := (*batches)[len(*batches)-1]; strings.Join(last, ",") != fmt.Sprintf("%d,%d", addFriendsBatchSize+1, addFriendsBatchSize+2) {
+		t.Fatalf("last batch = %v, want the second page of requests", last)
+	}
+}
+
+// A full-list refusal may be one requester's list, so it is narrowed to the people it applies to.
+func TestFriendClientAcceptSplitsFullListRefusals(t *testing.T) {
+	client, _ := bulkAddServer(t, []string{"1", "2", "3"}, func(batch []string) *http.Response {
+		if slices.Contains(batch, "2") {
+			return response(http.StatusBadRequest, `{"code":1028,"description":"full"}`)
+		}
+		return updated(batch)
+	})
+	result, err := client.AcceptPendingFriendRequests(context.Background(), XboxFriendLimit, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Accepted) != 2 || len(result.Rejected) != 1 || result.Rejected[0].Person.XUID != "2" || !errors.Is(result.Rejected[0].Err, xblsocial.ErrFriendListFull) {
+		t.Fatalf("result = %+v, want 1 and 3 accepted and 2 refused as list full", result)
+	}
+}
+
+// Only per-person or bulk-size refusals are split; an account-wide one fails the request once.
+func TestFriendClientAcceptDoesNotSplitAccountWideRefusals(t *testing.T) {
+	client, batches := bulkAddServer(t, []string{"1", "2", "3"}, func([]string) *http.Response {
+		return response(http.StatusForbidden, "")
+	})
+	result, err := client.AcceptPendingFriendRequests(context.Background(), XboxFriendLimit, nil)
+	if err == nil || len(*batches) != 1 || len(result.Rejected) != 0 || result.Waiting != 3 {
+		t.Fatalf("err=%v batches=%v result=%+v, want one failed request and nobody marked rejected", err, *batches, result)
+	}
+}
+
+func TestFriendClientAcceptSkipsRequests(t *testing.T) {
+	client, batches := bulkAddServer(t, []string{"1", "2"}, updated)
+	result, err := client.AcceptPendingFriendRequests(context.Background(), XboxFriendLimit, func(xuid string) bool { return xuid == "1" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(*batches) != "[[2]]" || result.Waiting != 1 {
+		t.Fatalf("batches = %v waiting = %d, want [[2]] and 1", *batches, result.Waiting)
+	}
+}
+
+func TestFriendClientRemoveFriendEndsFriendship(t *testing.T) {
+	var requests []string
+	client := FriendClient{Social: newTestSocialClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests = append(requests, req.Method+" "+req.URL.String())
+		resp := response(http.StatusNotFound, "")
+		resp.Request = req
+		return resp, nil
+	})})}
+	// A 404 means no friendship was ended, so it must not pass as a freed slot.
+	if err := client.RemoveFriend(context.Background(), "123"); !isNotFound(err) {
+		t.Fatalf("RemoveFriend() error = %v, want the 404", err)
+	}
+	if want := "DELETE https://social.xboxlive.com/users/me/people/friends/v2/xuid(123)?deleteRelationships=friends"; strings.Join(requests, ",") != want {
+		t.Fatalf("requests = %v, want %s", requests, want)
+	}
+}
+
+func TestFriendClientRemoveFollowerDeletesFollowerRelationship(t *testing.T) {
 	called := false
 	client := FriendClient{Social: newTestSocialClient(
 		&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -426,7 +558,7 @@ func TestFriendClientForceUnfollowDeletesFollowerRelationship(t *testing.T) {
 			return response(http.StatusNoContent, ""), nil
 		})})}
 
-	if err := client.ForceUnfollow(context.Background(), "123"); err != nil {
+	if err := client.RemoveFollower(context.Background(), "123"); err != nil {
 		t.Fatal(err)
 	}
 	if !called {
