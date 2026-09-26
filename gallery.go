@@ -1,7 +1,6 @@
 package broadcaster
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -140,20 +139,21 @@ func (g GalleryClient) Images(ctx context.Context, xuid string) ([]GalleryImage,
 }
 
 func (g GalleryClient) Upload(ctx context.Context, imagePath string, featured bool) (GalleryImage, error) {
-	stat, err := os.Stat(imagePath)
+	f, err := os.Open(imagePath)
 	if err != nil {
 		return GalleryImage{}, err
 	}
-	// Read the whole image so the request carries a Content-Length instead of
-	// being sent chunked.
-	data, err := os.ReadFile(imagePath)
+	defer f.Close()
+	stat, err := f.Stat()
 	if err != nil {
 		return GalleryImage{}, err
 	}
-	req, err := g.request(ctx, http.MethodPost, galleryURL, bytes.NewReader(data))
+	req, err := g.request(ctx, http.MethodPost, galleryURL, f)
 	if err != nil {
 		return GalleryImage{}, err
 	}
+	// Send a Content-Length instead of a chunked body.
+	req.ContentLength = stat.Size()
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("X-Ms-Showcased-Featured", fmt.Sprint(featured))
 	// UTC with milliseconds, matching Java's Instant.toString().

@@ -248,7 +248,7 @@ func TestFriendClientAcceptPendingFriendRequestsUsesAddFriends(t *testing.T) {
 			return nil, nil
 		})))}
 
-	result, err := client.AcceptPendingFriendRequests(context.Background(), nil)
+	result, err := client.AcceptPendingFriendRequests(context.Background(), XboxFriendLimit, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +300,7 @@ func TestFriendClientAcceptPendingFriendRequestsBatchesAdds(t *testing.T) {
 			return nil, nil
 		})})}
 
-	result, err := client.AcceptPendingFriendRequests(context.Background(), nil)
+	result, err := client.AcceptPendingFriendRequests(context.Background(), XboxFriendLimit, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -341,7 +341,7 @@ func TestFriendClientAcceptPendingFriendRequestsSplitsLimitErrors(t *testing.T) 
 			return nil, nil
 		})})}
 
-	result, err := client.AcceptPendingFriendRequests(context.Background(), nil)
+	result, err := client.AcceptPendingFriendRequests(context.Background(), XboxFriendLimit, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,7 +369,7 @@ func TestFriendClientAcceptPendingFriendRequestsReturnsRetryAfterError(t *testin
 			return nil, nil
 		})})}
 
-	_, err := client.AcceptPendingFriendRequests(context.Background(), nil)
+	_, err := client.AcceptPendingFriendRequests(context.Background(), XboxFriendLimit, nil)
 	if err == nil {
 		t.Fatal("expected retry-after error")
 	}
@@ -396,7 +396,7 @@ func TestFriendClientAcceptPendingFriendRequestsReportsFailedUpdates(t *testing.
 			return nil, nil
 		})})}
 
-	result, err := client.AcceptPendingFriendRequests(context.Background(), nil)
+	result, err := client.AcceptPendingFriendRequests(context.Background(), XboxFriendLimit, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,7 +469,7 @@ func TestFriendClientAcceptIsolatesRefusedRequests(t *testing.T) {
 		return updated(batch)
 	})
 
-	result, err := client.AcceptPendingFriendRequests(context.Background(), nil)
+	result, err := client.AcceptPendingFriendRequests(context.Background(), XboxFriendLimit, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -496,7 +496,7 @@ func TestFriendClientAcceptSplitsFullListRefusals(t *testing.T) {
 		}
 		return updated(batch)
 	})
-	result, err := client.AcceptPendingFriendRequests(context.Background(), nil)
+	result, err := client.AcceptPendingFriendRequests(context.Background(), XboxFriendLimit, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -510,7 +510,7 @@ func TestFriendClientAcceptDoesNotSplitAccountWideRefusals(t *testing.T) {
 	client, batches := bulkAddServer(t, []string{"1", "2", "3"}, func([]string) *http.Response {
 		return response(http.StatusForbidden, "")
 	})
-	result, err := client.AcceptPendingFriendRequests(context.Background(), nil)
+	result, err := client.AcceptPendingFriendRequests(context.Background(), XboxFriendLimit, nil)
 	if err == nil || len(*batches) != 1 || len(result.Rejected) != 0 || result.Waiting != 3 {
 		t.Fatalf("err=%v batches=%v result=%+v, want one failed request and nobody marked rejected", err, *batches, result)
 	}
@@ -518,7 +518,7 @@ func TestFriendClientAcceptDoesNotSplitAccountWideRefusals(t *testing.T) {
 
 func TestFriendClientAcceptSkipsRequests(t *testing.T) {
 	client, batches := bulkAddServer(t, []string{"1", "2"}, updated)
-	result, err := client.AcceptPendingFriendRequests(context.Background(), func(xuid string) bool { return xuid == "1" })
+	result, err := client.AcceptPendingFriendRequests(context.Background(), XboxFriendLimit, func(xuid string) bool { return xuid == "1" })
 	if err != nil {
 		t.Fatal(err)
 	}

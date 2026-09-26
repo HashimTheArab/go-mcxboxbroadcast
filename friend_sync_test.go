@@ -445,14 +445,15 @@ func TestFriendSyncRunStateTracksSeparateFollowAndUnfollowBackoff(t *testing.T) 
 	}
 }
 
-func TestFriendSyncRunStateSuppressesAutoFollowWhenFriendListIsFull(t *testing.T) {
+// A pass that finds the list full stops the next pass from accepting.
+func TestFriendSyncRunStateStopsAcceptsWhenFriendListIsFull(t *testing.T) {
 	now := time.Unix(100, 0)
-	state := friendSyncRunState{}
-	state.record(now, friendSyncResult{friendListFull: true})
+	state := friendSyncRunState{room: 5}
+	state.record(now, friendSyncResult{scanned: true, friendListFull: true})
 
 	opts := state.options(now.Add(time.Minute), true)
-	if opts.autoFollow {
-		t.Fatal("expected auto-follow suppressed after friend-list-full")
+	if opts.acceptLimit != 0 {
+		t.Fatalf("accept limit = %d, want 0 after friend-list-full", opts.acceptLimit)
 	}
 	if !opts.autoUnfollow {
 		t.Fatal("expected auto-unfollow to keep running after friend-list-full")
@@ -512,7 +513,7 @@ func (c *syncFriendClient) RemoveFollower(ctx context.Context, xuid string) erro
 	return nil
 }
 
-func (c *syncFriendClient) AcceptPendingFriendRequests(ctx context.Context, _ func(string) bool) (FriendRequestResult, error) {
+func (c *syncFriendClient) AcceptPendingFriendRequests(ctx context.Context, _ int, _ func(string) bool) (FriendRequestResult, error) {
 	if c.accept == nil {
 		return FriendRequestResult{}, nil
 	}
@@ -569,7 +570,7 @@ func (c *deadlineFriendClient) RemoveFollower(ctx context.Context, _ string) err
 	return nil
 }
 
-func (c *deadlineFriendClient) AcceptPendingFriendRequests(ctx context.Context, _ func(string) bool) (FriendRequestResult, error) {
+func (c *deadlineFriendClient) AcceptPendingFriendRequests(ctx context.Context, _ int, _ func(string) bool) (FriendRequestResult, error) {
 	c.record("accept", ctx)
 	return FriendRequestResult{Accepted: []Person{{XUID: "pending", Gamertag: "Pending"}}}, nil
 }
@@ -876,6 +877,7 @@ func TestFriendSyncRetriesRefusedRequestsLater(t *testing.T) {
 		return updated(xuids)
 	}
 	s := &FriendSyncer{Client: x.client(), Config: FriendSyncConfig{AutoFollow: true}}
+	s.runSync(context.Background(), false) // learns the room
 	s.runSync(context.Background(), false)
 	posts := x.bulkPosts
 	s.runSync(context.Background(), false)
@@ -1060,23 +1062,40 @@ func TestFriendSyncMakesRoomWhenAcceptFindsListFull(t *testing.T) {
 	if !x.following["9"] || x.following["1000"] || len(x.following) != XboxFriendLimit {
 		t.Fatalf("9 added=%v 1000 kept=%v size=%d, want 9 in place of 1000, the least recently seen", x.following["9"], x.following["1000"], len(x.following))
 	}
-	if !s.state.autoFollowUntil.IsZero() {
-		t.Fatal("a list made room for must not back off accepts")
-	}
 }
 
-// At the Xbox limit without maxFriends, accepts back off instead of retrying every pass.
-func TestFriendSyncBacksOffWhenAcceptFindsListFull(t *testing.T) {
+// At the Xbox limit without maxFriends, no pass posts an accept Xbox would refuse.
+func TestFriendSyncSkipsAcceptsAtLimit(t *testing.T) {
 	x := newFakeXbox()
 	x.limit = XboxFriendLimit
 	x.befriendMany(XboxFriendLimit)
-	x.pending["9"] = true
+	for i := range 3 * addFriendsBatchSize {
+		x.pending[strconv.Itoa(i)] = true
+	}
 	s := &FriendSyncer{Client: x.client(), Config: FriendSyncConfig{AutoFollow: true}}
 	for range 3 {
-		s.runSync(context.Background(), false)
+		if _, again := s.runSync(context.Background(), false); again {
+			t.Fatal("a full list must not ask for another pass")
+		}
 	}
-	if x.bulkPosts != 1 || s.state.autoFollowUntil.IsZero() {
-		t.Fatalf("bulk posts=%d backoff=%v, want one post then backoff", x.bulkPosts, s.state.autoFollowUntil)
+	if x.bulkPosts != 0 {
+		t.Fatalf("bulk posts = %d, want none", x.bulkPosts)
+	}
+}
+
+// Room left below the limit caps the accept, and the rest wait for the next pass.
+func TestFriendSyncAcceptsOnlyIntoRoom(t *testing.T) {
+	x := newFakeXbox()
+	x.limit = XboxFriendLimit
+	x.befriendMany(XboxFriendLimit - 2)
+	x.pending["1"], x.pending["2"], x.pending["3"] = true, true, true
+	s := &FriendSyncer{Client: x.client(), Config: FriendSyncConfig{AutoFollow: true}}
+	if _, again := s.runSync(context.Background(), false); !again {
+		t.Fatal("expected another pass to accept into the room just found")
+	}
+	s.runSync(context.Background(), false)
+	if len(x.following) != XboxFriendLimit || len(x.pending) != 1 || x.bulkPosts != 1 {
+		t.Fatalf("following=%d pending=%d posts=%d, want 2 accepted in one post and 1 left waiting", len(x.following), len(x.pending), x.bulkPosts)
 	}
 }
 
@@ -1097,14 +1116,12 @@ func TestFriendSyncTreatsFullListBelowLimitAsRequesters(t *testing.T) {
 	}
 	s := &FriendSyncer{Client: x.client(), History: newMemoryHistory(), Account: "100",
 		Config: FriendSyncConfig{AutoFollow: true, AutoUnfollow: true, Cleanup: FriendCleanupConfig{MaxFriends: 10}}}
+	s.runSync(context.Background(), false) // learns the room
 	s.runSync(context.Background(), false)
 	posts := x.bulkPosts
 	s.runSync(context.Background(), false)
 	if !x.following["10"] || !x.following["1"] || !x.following["2"] || x.bulkPosts != posts {
 		t.Fatalf("following=%v posts %d -> %d, want 10 accepted, nobody removed and 9 not retried yet", x.following, posts, x.bulkPosts)
-	}
-	if !s.state.autoFollowUntil.IsZero() {
-		t.Fatal("one requester's full list must not back off every accept")
 	}
 }
 
@@ -1179,19 +1196,21 @@ func TestFriendSyncBacksOffAccountWideAcceptRefusal(t *testing.T) {
 	}
 }
 
-// A later cleanup that makes room lifts the full-list backoff, so waiting requests aren't blocked for the hour.
-func TestFriendSyncCleanupLiftsListFullBackoff(t *testing.T) {
+// Room made by cleanup at the limit is used for waiting requests on the very next pass.
+func TestFriendSyncCleanupMakesRoomForWaitingRequests(t *testing.T) {
 	x := newFakeXbox()
-	x.befriend("1", "2", "3")
+	x.limit = XboxFriendLimit
+	x.befriendMany(XboxFriendLimit)
+	x.pending["9"] = true
 	history := newMemoryHistory()
-	history.set("100", "1", time.Now().Add(-20*24*time.Hour))
+	history.set("100", "1000", time.Now().Add(-20*24*time.Hour))
 	s := &FriendSyncer{Client: x.client(), History: history, Account: "100",
 		Config: FriendSyncConfig{AutoFollow: true, AutoUnfollow: true, Cleanup: FriendCleanupConfig{InactiveDays: 15}}}
-	s.state.autoFollowUntil = time.Now().Add(friendListFullBackoff)
 	if _, again := s.runSync(context.Background(), true); !again {
 		t.Fatal("expected another pass to accept waiting requests")
 	}
-	if x.following["1"] || !s.state.autoFollowUntil.IsZero() {
-		t.Fatalf("1 kept=%v backoff=%v, want 1 removed and the backoff lifted", x.following["1"], s.state.autoFollowUntil)
+	s.runSync(context.Background(), false)
+	if x.following["1000"] || !x.following["9"] {
+		t.Fatalf("1000 kept=%v 9 added=%v, want 1000 removed and 9 accepted", x.following["1000"], x.following["9"])
 	}
 }

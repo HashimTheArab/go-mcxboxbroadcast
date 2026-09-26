@@ -41,6 +41,8 @@ type FriendRequestResult struct {
 	Rejected []RejectedFriendRequest
 	// Waiting counts requests still pending afterwards, including skipped ones.
 	Waiting int
+	// Deferred counts requests left untried because of the limit.
+	Deferred int
 }
 
 // RejectedFriendRequest is an incoming friend request Xbox refused to accept.
@@ -71,11 +73,11 @@ func (c FriendClient) Friends(ctx context.Context) ([]Person, error) {
 	return mergePeople(peopleFromSocialUsers(followers), peopleFromSocialUsers(following)), nil
 }
 
-// AcceptPendingFriendRequests accepts incoming Xbox friend requests in bounded
-// batches, leaving requests for which skip reports true pending. It stops at
-// the first rate limit or server error; refusals are narrowed down to the
-// people they apply to and reported in Rejected.
-func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context, skip func(xuid string) bool) (FriendRequestResult, error) {
+// AcceptPendingFriendRequests tries at most limit incoming Xbox friend requests
+// in bounded batches, leaving requests for which skip reports true pending. It
+// stops at the first rate limit or server error; refusals are narrowed down to
+// the people they apply to and reported in Rejected.
+func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context, limit int, skip func(xuid string) bool) (FriendRequestResult, error) {
 	var result FriendRequestResult
 	pending, err := c.social().People(ctx, xblsocial.PeopleListIncomingFriendRequests, xblsocial.PeopleListConfig{Undecorated: true})
 	if err != nil {
@@ -91,6 +93,10 @@ func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context, skip func
 		if skip == nil || !skip(user.XUID) {
 			xuids = append(xuids, user.XUID)
 		}
+	}
+	if len(xuids) > max(limit, 0) {
+		result.Deferred = len(xuids) - max(limit, 0)
+		xuids = xuids[:max(limit, 0)]
 	}
 	for start := 0; start < len(xuids) && err == nil; start += addFriendsBatchSize {
 		err = c.acceptFriends(ctx, xuids[start:min(start+addFriendsBatchSize, len(xuids))], byXUID, &result)

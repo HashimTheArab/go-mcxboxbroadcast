@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -150,6 +151,9 @@ func TestFileHistoryStoreMigratesFlatHistoryForEveryReadAccount(t *testing.T) {
 
 // A failed write must be retried by the next update, even one that changes nothing.
 func TestFileHistoryStoreRetriesFailedSave(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("a read-only directory still accepts writes here")
+	}
 	ctx := context.Background()
 	dir := filepath.Join(t.TempDir(), "cache")
 	if err := os.Mkdir(dir, 0o500); err != nil {
