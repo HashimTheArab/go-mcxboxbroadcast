@@ -395,6 +395,21 @@ func TestBroadcasterInviteRequiresActiveBroadcaster(t *testing.T) {
 	}
 }
 
+// A failed dial must leave no signaling to close, since closing a nil *Conn panics.
+func TestDialDefaultSignalingFailureLeavesNoConn(t *testing.T) {
+	for _, mode := range []SignalingMode{SignalingModeWebSocket, SignalingModeJSONRPC} {
+		result := dialDefaultSignaling(t.Context(), defaultSignalingConfig{
+			mode:            mode,
+			httpClient:      http.DefaultClient,
+			minecraftTokens: failingMinecraftTokenSource{err: errors.New("no token")},
+		})
+		if result.err == nil || result.signaling != nil {
+			t.Fatalf("%s: err=%v signaling=%#v, want an error and no signaling", mode, result.err, result.signaling)
+		}
+		closeDefaultSignalingResult(result)
+	}
+}
+
 func TestBroadcasterBuildsWebSocketSignalingConnection(t *testing.T) {
 	b := &Broadcaster{}
 	connection, err := b.signalingConnection(&fakeSignaling{networkID: "123456789"})

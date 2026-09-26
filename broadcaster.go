@@ -971,7 +971,12 @@ func dialDefaultSignaling(ctx context.Context, conf defaultSignalingConfig) (res
 	if conf.mode == SignalingModeJSONRPC {
 		debugLog(conf.log, "dialing jsonrpc messaging signaling websocket")
 		d := messaging.Dialer{Log: conf.log, HTTPClient: conf.httpClient}
-		result.signaling, result.err = d.DialContext(ctx, src)
+		sig, err := d.DialContext(ctx, src)
+		if err != nil {
+			result.err = err
+			return result
+		}
+		result.signaling = sig
 		return result
 	}
 	debugLog(conf.log, "dialing websocket signaling websocket")
@@ -979,7 +984,13 @@ func dialDefaultSignaling(ctx context.Context, conf defaultSignalingConfig) (res
 		Log:        conf.log,
 		HTTPClient: conf.httpClient,
 	}
-	result.signaling, result.err = d.DialContext(ctx, src)
+	// A failed dial's nil *Conn must not become a non-nil interface.
+	sig, err := d.DialContext(ctx, src)
+	if err != nil {
+		result.err = err
+		return result
+	}
+	result.signaling = sig
 	return result
 }
 
