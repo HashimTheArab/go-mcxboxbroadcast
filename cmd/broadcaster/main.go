@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -122,6 +123,28 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 		return err
 	}
 
+	// Keep liveness available while sign-in waits for the operator. Once the
+	// broadcaster exists, it owns both probes, including startup readiness.
+	startingHealth := http.NewServeMux()
+	startingHealth.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprintln(w, "ok")
+	})
+	startingHealth.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "starting", http.StatusServiceUnavailable)
+	})
+	var activeHealth atomic.Pointer[http.Handler]
+	stopHealth, err := serveHealth(cfg.Health.Listen, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if handler := activeHealth.Load(); handler != nil {
+			(*handler).ServeHTTP(w, r)
+			return
+		}
+		startingHealth.ServeHTTP(w, r)
+	}), log)
+	if err != nil {
+		return err
+	}
+	defer stopHealth()
+
 	var notifier broadcaster.Notifier
 	if cfg.Notifications.Enabled {
 		notifier = broadcaster.SlackNotifier{WebhookURL: cfg.Notifications.WebhookURL, Client: httpClient}
@@ -220,11 +243,8 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 	if err != nil {
 		return fmt.Errorf("configure broadcaster: %w", err)
 	}
-	stopHealth, err := serveHealth(cfg.Health.Listen, b.HealthHandler(), log)
-	if err != nil {
-		return err
-	}
-	defer stopHealth()
+	healthHandler := b.HealthHandler()
+	activeHealth.Store(&healthHandler)
 	if err := b.Start(ctx); err != nil {
 		return fmt.Errorf("start: %w", err)
 	}
