@@ -463,7 +463,7 @@ func (b *Broadcaster) minecraftListenConfig(status room.Status) minecraft.Listen
 	if b.conf.Relay != nil {
 		// Accept right after login so the backend owns the rest of the login
 		// sequence, including resource packs, end to end with the real client.
-		conf.DisablePacketHandling = true
+		conf.Handoff = minecraft.HandoffAfterLogin
 		conf.EnableBatchReading = true
 		conf.FlushRate = -1 // relayPump flushes once per forwarded batch
 		conf.AllowUnknownPackets = true

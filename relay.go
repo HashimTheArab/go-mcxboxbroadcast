@@ -230,7 +230,7 @@ func (b *Broadcaster) dialRelayTarget(ctx context.Context, conn relayClientConn,
 		d.ClientData.PlatformOnlineID = d.IdentityData.XUID
 	}
 	d.KeepXBLIdentityData = true
-	d.DisablePacketHandling = true
+	d.Handoff = minecraft.HandoffAfterLogin
 	d.EnableBatchReading = true
 	d.FlushRate = -1 // relayPump flushes once per forwarded batch
 	d.Protocol = conn.Proto()

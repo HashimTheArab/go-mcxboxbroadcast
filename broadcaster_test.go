@@ -509,7 +509,7 @@ func TestMinecraftListenConfigKeepsFullLoginFlow(t *testing.T) {
 	}
 
 	conf := b.minecraftListenConfig(room.Status{HostName: "Host", WorldName: "World"})
-	if conf.DisablePacketHandling {
+	if conf.Handoff != minecraft.HandoffNone {
 		t.Fatal("expected listener to wait for resource-pack login flow")
 	}
 	if conf.AuthenticationDisabled {

@@ -186,8 +186,8 @@ func TestBroadcasterRelayDialsWithClientIdentityAndForwardsBothWays(t *testing.T
 	if gotDialer.ClientData.PlatformOnlineID != "visitor" || gotDialer.ClientData.SelfSignedID != "device-uuid" {
 		t.Fatalf("dialer platform ids online=%q self=%q, want the verified XUID and the client's own self-signed id", gotDialer.ClientData.PlatformOnlineID, gotDialer.ClientData.SelfSignedID)
 	}
-	if !gotDialer.DisablePacketHandling || !gotDialer.EnableBatchReading || gotDialer.FlushRate != -1 {
-		t.Fatalf("dialer passthrough flags = %v/%v/%v, want passthrough batch reading with relay-owned flushing", gotDialer.DisablePacketHandling, gotDialer.EnableBatchReading, gotDialer.FlushRate)
+	if gotDialer.Handoff != minecraft.HandoffAfterLogin || !gotDialer.EnableBatchReading || gotDialer.FlushRate != -1 {
+		t.Fatalf("dialer passthrough flags = %v/%v/%v, want passthrough batch reading with relay-owned flushing", gotDialer.Handoff, gotDialer.EnableBatchReading, gotDialer.FlushRate)
 	}
 	if gotDialer.Protocol == nil || gotDialer.Protocol.ID() != minecraft.DefaultProtocol.ID() {
 		t.Fatalf("dialer protocol %v, want the client's", gotDialer.Protocol)
@@ -315,8 +315,8 @@ func TestStaleSessionMembersIgnoresRelayedPlayers(t *testing.T) {
 func TestMinecraftListenConfigRelayModeUsesPassthroughBatches(t *testing.T) {
 	b := relayTestBroadcaster(&RelayConfig{}, nil)
 	conf := b.minecraftListenConfig(room.Status{})
-	if !conf.DisablePacketHandling || !conf.EnableBatchReading || conf.FlushRate != -1 {
-		t.Fatalf("relay listen config = handling off %v, batches %v, flush %v; want passthrough batch reading with relay-owned flushing", conf.DisablePacketHandling, conf.EnableBatchReading, conf.FlushRate)
+	if conf.Handoff != minecraft.HandoffAfterLogin || !conf.EnableBatchReading || conf.FlushRate != -1 {
+		t.Fatalf("relay listen config = handoff %v, batches %v, flush %v; want passthrough batch reading with relay-owned flushing", conf.Handoff, conf.EnableBatchReading, conf.FlushRate)
 	}
 	if !conf.AllowUnknownPackets || !conf.AllowInvalidPackets {
 		t.Fatal("relay listen config must pass unknown and invalid packets through")
@@ -327,7 +327,7 @@ func TestMinecraftListenConfigRelayModeUsesPassthroughBatches(t *testing.T) {
 
 	b.conf.Relay = nil
 	conf = b.minecraftListenConfig(room.Status{})
-	if conf.DisablePacketHandling || conf.EnableBatchReading || conf.CompressionThreshold != -1 {
+	if conf.Handoff != minecraft.HandoffNone || conf.EnableBatchReading || conf.CompressionThreshold != -1 {
 		t.Fatalf("transfer listen config changed: %#v", conf)
 	}
 }
