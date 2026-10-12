@@ -365,30 +365,63 @@ func TestLiveTokenSourceFallsBackToDeviceCodeWhenRefreshRejected(t *testing.T) {
 	}
 }
 
-func TestRequestLiveTokenWriterSuggestsPasswordResetForInvalidGrant(t *testing.T) {
-	client := &http.Client{Transport: tokenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		switch req.URL.String() {
-		case "https://login.live.com/oauth20_connect.srf":
-			return tokenTestJSONResponse(http.StatusOK, `{"device_code":"device","user_code":"code","verification_uri":"https://www.microsoft.com/link","expires_in":900,"interval":1}`), nil
-		case "https://login.live.com/oauth20_token.srf":
-			return tokenTestJSONResponse(http.StatusBadRequest, `{"error":"invalid_grant","error_description":"user interaction is required"}`), nil
-		default:
-			t.Fatalf("unexpected device auth request %s %s", req.Method, req.URL)
-			return nil, nil
-		}
-	})}
-	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, client)
+// A rejected or expired code is explained and replaced in the same call.
+func TestRequestLiveTokenWriterRetriesRejectedAndExpiredCodes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var codes atomic.Int32
+		client := &http.Client{Transport: tokenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.URL.String() {
+			case "https://login.live.com/oauth20_connect.srf":
+				codes.Add(1)
+				return tokenTestJSONResponse(http.StatusOK, `{"device_code":"device","user_code":"code","verification_uri":"https://www.microsoft.com/link","expires_in":30,"interval":1}`), nil
+			case "https://login.live.com/oauth20_token.srf":
+				switch codes.Load() {
+				case 1:
+					resp := tokenTestJSONResponse(http.StatusBadRequest, `{"error":"invalid_grant","error_description":"The user could not be authenticated."}`)
+					resp.Header.Set("X-Ms-Clientdata", "m|0x8004345C|0x80043558|microsoftonline.com|none")
+					return resp, nil
+				case 2:
+					return tokenTestJSONResponse(http.StatusBadRequest, `{"error":"authorization_pending"}`), nil
+				default:
+					return tokenTestJSONResponse(http.StatusOK, `{"access_token":"fresh","token_type":"bearer","expires_in":3600}`), nil
+				}
+			default:
+				t.Errorf("unexpected device auth request %s %s", req.Method, req.URL)
+				return nil, errors.New("unexpected request")
+			}
+		})}
+		ctx := context.WithValue(context.Background(), oauth2.HTTPClient, client)
+		var out strings.Builder
 
-	_, err := requestLiveTokenWriter(ctx, auth.AndroidConfig, io.Discard)
-	if err == nil {
-		t.Fatal("expected device authentication error")
-	}
-	if !strings.Contains(err.Error(), "set or reset the Microsoft account password") {
-		t.Fatalf("error = %q, want password-reset guidance", err)
-	}
-	var retrieveErr *oauth2.RetrieveError
-	if !errors.As(err, &retrieveErr) || retrieveErr.ErrorCode != "invalid_grant" {
-		t.Fatalf("error = %v, want wrapped invalid_grant retrieve error", err)
+		tok, err := requestLiveTokenWriter(ctx, auth.AndroidConfig, &out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tok.AccessToken != "fresh" || codes.Load() != 3 {
+			t.Fatalf("token = %q after %d codes, want fresh after 3", tok.AccessToken, codes.Load())
+		}
+		for _, want := range []string{"needs a password", "code expired"} {
+			if !strings.Contains(out.String(), want) {
+				t.Fatalf("sign-in output = %q, want %q", out.String(), want)
+			}
+		}
+		drainTokenTestTimers()
+	})
+}
+
+// Unknown Microsoft account errors carry their codes so they can be diagnosed.
+func TestLiveLoginRejectionReportsUnknownCodes(t *testing.T) {
+	resp := tokenTestJSONResponse(http.StatusBadRequest, "")
+	resp.Header.Set("X-Ms-Clientdata", "m|0x8004345C|0x80047857|microsoftonline.com|none")
+	got := liveLoginRejection(&oauth2.RetrieveError{
+		Response:         resp,
+		Body:             []byte(`{"error":"invalid_grant","error_description":"Interaction required.","correlation_id":"abc"}`),
+		ErrorCode:        "invalid_grant",
+		ErrorDescription: "Interaction required.",
+	})
+	want := "Microsoft rejected the sign-in: Interaction required. (error 0x8004345C, sub-error 0x80047857, correlation ID abc)"
+	if !strings.HasPrefix(got, want) {
+		t.Fatalf("notice = %q, want prefix %q", got, want)
 	}
 }
 

@@ -287,6 +287,9 @@ func (s *liveTokenSource) finishReauth() (*oauth2.Token, error) {
 	return login.tok, nil
 }
 
+// requestLiveTokenWriter runs device-code logins until one succeeds or ctx ends.
+// A code that expires or that Microsoft rejects is explained on out and
+// replaced, so the operator sees why before the next code.
 func requestLiveTokenWriter(ctx context.Context, conf auth.Config, out io.Writer) (*oauth2.Token, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -294,12 +297,83 @@ func requestLiveTokenWriter(ctx context.Context, conf auth.Config, out io.Writer
 	if out == nil {
 		out = io.Discard
 	}
-	tok, err := conf.RequestLiveTokenContext(ctx, out)
-	var retrieveErr *oauth2.RetrieveError
-	if errors.As(err, &retrieveErr) && retrieveErr.ErrorCode == "invalid_grant" {
-		return nil, fmt.Errorf("%w; set or reset the Microsoft account password, then retry the device login", err)
+	for {
+		tok, err := conf.RequestLiveTokenContext(ctx, out)
+		if err == nil {
+			return tok, nil
+		}
+		notice, retry := liveLoginRetry(ctx, err)
+		if !retry {
+			return nil, err
+		}
+		_, _ = fmt.Fprintln(out, notice)
 	}
-	return tok, err
+}
+
+// msaSubErrorPasswordRequired is the Microsoft account sub-error returned for
+// an account without a password; setting one let the same sign-in succeed.
+const msaSubErrorPasswordRequired = "0x80043558"
+
+// liveLoginRetry reports whether a failed device-code login should restart
+// with a new code, and the notice explaining the failure.
+func liveLoginRetry(ctx context.Context, err error) (notice string, retry bool) {
+	if ctx.Err() != nil {
+		return "", false
+	}
+	const expired = "The sign-in code expired before anyone used it. Use the new code below."
+	// Polling ends with the bare context error once the code's own deadline passes.
+	if errors.Is(err, context.DeadlineExceeded) && !errors.As(err, new(*url.Error)) {
+		return expired, true
+	}
+	var retrieveErr *oauth2.RetrieveError
+	if !errors.As(err, &retrieveErr) {
+		return "", false
+	}
+	switch retrieveErr.ErrorCode {
+	case "expired_token":
+		return expired, true
+	case "access_denied":
+		return "The Microsoft sign-in was declined. Use the new code below.", true
+	case "invalid_grant":
+		return liveLoginRejection(retrieveErr), true
+	}
+	return "", false
+}
+
+// liveLoginRejection explains an invalid_grant from device-code polling. The
+// Microsoft account error codes only arrive in response headers.
+func liveLoginRejection(e *oauth2.RetrieveError) string {
+	var code, subCode string
+	if e.Response != nil {
+		// Account type | error | sub-error | cloud instance | data boundary.
+		if parts := strings.Split(e.Response.Header.Get("X-Ms-Clientdata"), "|"); len(parts) >= 3 {
+			code, subCode = strings.TrimSpace(parts[1]), strings.TrimSpace(parts[2])
+		}
+		if code == "" {
+			code = e.Response.Header.Get("X-Wlid-Error")
+		}
+	}
+	if strings.EqualFold(subCode, msaSubErrorPasswordRequired) {
+		return "Microsoft rejected the sign-in because this account needs a password. Set one at https://account.microsoft.com/security, then use the new code below."
+	}
+	var body struct {
+		CorrelationID string `json:"correlation_id"`
+	}
+	_ = json.Unmarshal(e.Body, &body)
+	var details []string
+	for _, d := range [][2]string{{"error", code}, {"sub-error", subCode}, {"correlation ID", body.CorrelationID}} {
+		if d[1] != "" {
+			details = append(details, d[0]+" "+d[1])
+		}
+	}
+	description := e.ErrorDescription
+	if description == "" {
+		description = e.ErrorCode
+	}
+	if len(details) > 0 {
+		description += " (" + strings.Join(details, ", ") + ")"
+	}
+	return "Microsoft rejected the sign-in: " + description + " Sign in at https://account.microsoft.com with this account and finish any steps it asks for, then use the new code below."
 }
 
 // refreshLiveToken redeems refreshToken, keeping it when the response omits a
