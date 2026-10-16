@@ -108,12 +108,17 @@ func TestFriendRequestSubscriptionHandlerCoalescesEvents(t *testing.T) {
 type fakeSocialSubscriber struct {
 	subscribeErr error
 	subscribed   chan xblsocial.SubscriptionHandler
+	attempts     atomic.Int32
 	cleanupCalls atomic.Int32
 }
 
 // Subscribe records the handler and returns its cleanup or the configured error.
 func (f *fakeSocialSubscriber) Subscribe(_ context.Context, h xblsocial.SubscriptionHandler) (func(context.Context) error, error) {
-	f.subscribed <- h
+	f.attempts.Add(1)
+	select {
+	case f.subscribed <- h:
+	default:
+	}
 	if f.subscribeErr != nil {
 		return nil, f.subscribeErr
 	}
@@ -160,10 +165,11 @@ func TestSocialSubscriptionSetupTimesOut(t *testing.T) {
 		default:
 			t.Fatal("subscription setup did not time out")
 		}
-		b.socialWg.Wait()
 		if err := b.ctx.Err(); err != nil {
 			t.Fatalf("setup timeout stopped the broadcaster: %v", err)
 		}
+		b.cancel()
+		b.socialWg.Wait()
 	})
 }
 
@@ -250,20 +256,20 @@ func TestReactiveFriendSyncPreservesMutationBackoff(t *testing.T) {
 		defer cancel()
 		go syncer.Run(ctx)
 		synctest.Wait()
-		if accepts != 1 || client.removeCalls != 1 {
-			t.Fatalf("initial accepts=%d removals=%d, want 1 each", accepts, client.removeCalls)
+		if accepts != 1 || client.unfollowCalls != 1 {
+			t.Fatalf("initial accepts=%d removals=%d, want 1 each", accepts, client.unfollowCalls)
 		}
 		trigger <- struct{}{}
 		time.Sleep(20 * time.Second)
 		synctest.Wait()
-		if accepts != 1 || client.removeCalls != 2 {
-			t.Fatalf("during backoff accepts=%d removals=%d, want 1 and 2", accepts, client.removeCalls)
+		if accepts != 1 || client.unfollowCalls != 2 {
+			t.Fatalf("during backoff accepts=%d removals=%d, want 1 and 2", accepts, client.unfollowCalls)
 		}
 		time.Sleep(40 * time.Second)
 		trigger <- struct{}{}
 		synctest.Wait()
-		if accepts != 2 || client.removeCalls != 3 {
-			t.Fatalf("after backoff accepts=%d removals=%d, want 2 and 3", accepts, client.removeCalls)
+		if accepts != 2 || client.unfollowCalls != 3 {
+			t.Fatalf("after backoff accepts=%d removals=%d, want 2 and 3", accepts, client.unfollowCalls)
 		}
 	})
 }
@@ -296,10 +302,50 @@ func TestSocialSubscriptionFailureKeepsPolling(t *testing.T) {
 		if accepts.Load() != 2 {
 			t.Fatalf("polling accepts=%d after failed subscription, want 2", accepts.Load())
 		}
+		if got := sub.attempts.Load(); got < 2 {
+			t.Fatalf("subscribe attempts = %d after 20s, want retries", got)
+		}
 		b.cancel()
 		b.socialWg.Wait()
 		if sub.cleanupCalls.Load() != 0 {
 			t.Fatal("failed subscription was cleaned up")
+		}
+	})
+}
+
+// A lost subscription must be replaced, releasing the old registration first.
+func TestSubscribeSocialResubscribesAfterLoss(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		b := &Broadcaster{log: testBroadcasterLogger()}
+		b.ctx, b.cancel = context.WithCancel(t.Context())
+		defer b.cancel()
+		sub := &fakeSocialSubscriber{subscribed: make(chan xblsocial.SubscriptionHandler, 1)}
+		trigger := b.subscribeSocial(sub, b.log)
+		synctest.Wait()
+		h := <-sub.subscribed
+		if len(trigger) != 0 {
+			t.Fatal("first subscription should not request an extra sync")
+		}
+
+		h.HandleSubscriptionLost()
+		synctest.Wait()
+		if sub.cleanupCalls.Load() != 1 {
+			t.Fatalf("cleanup calls = %d, want the lost registration released", sub.cleanupCalls.Load())
+		}
+		time.Sleep(socialResubscribeMinDelay)
+		synctest.Wait()
+		if got := sub.attempts.Load(); got != 2 {
+			t.Fatalf("subscribe attempts = %d, want 2", got)
+		}
+		select {
+		case <-trigger:
+		default:
+			t.Fatal("resubscribing should request a sync to catch up")
+		}
+		b.cancel()
+		b.socialWg.Wait()
+		if sub.cleanupCalls.Load() != 2 {
+			t.Fatalf("cleanup calls = %d, want 2 after shutdown", sub.cleanupCalls.Load())
 		}
 	})
 }

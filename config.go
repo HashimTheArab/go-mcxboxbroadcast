@@ -53,7 +53,8 @@ type Config struct {
 	SuppressSessionUpdateMessage bool
 	// FriendSync controls optional follower/friend synchronization.
 	FriendSync *FriendSyncConfig
-	// FriendHistory records player activity for friend expiry.
+	// FriendHistory records when each account's friends were last seen, for
+	// FriendSync cleanup. Without it, cleanup is skipped.
 	FriendHistory HistoryStore
 	// SubAccounts contains additional accounts that publish independently owned
 	// MPSD sessions for the same NetherNet listener.
@@ -171,9 +172,33 @@ type FriendSyncConfig struct {
 	AutoFollow     bool
 	AutoUnfollow   bool
 	InitialInvite  bool
-	ExpiryEnabled  bool
-	ExpiryDays     int
-	ExpiryCheck    time.Duration
+	Cleanup        FriendCleanupConfig
+}
+
+// FriendCleanupConfig removes friends so the list keeps room for new players.
+// Each rule is off at zero, and the two can be combined.
+type FriendCleanupConfig struct {
+	// InactiveDays removes friends not seen for this many days.
+	InactiveDays int
+	// MaxFriends keeps friends plus pending friend requests at or below this
+	// count by removing the least recently seen friends. At most XboxFriendLimit.
+	MaxFriends int
+	// Interval spaces inactive-friend checks. MaxFriends is enforced on every sync.
+	Interval time.Duration
+}
+
+func (c FriendCleanupConfig) enabled() bool {
+	return c.InactiveDays > 0 || c.MaxFriends > 0
+}
+
+func (c FriendCleanupConfig) validate() error {
+	if c.InactiveDays < 0 {
+		return fmt.Errorf("friend cleanup inactive days must not be negative (got %d)", c.InactiveDays)
+	}
+	if c.MaxFriends < 0 || c.MaxFriends > XboxFriendLimit {
+		return fmt.Errorf("friend cleanup max friends must be between 0 and %d (got %d)", XboxFriendLimit, c.MaxFriends)
+	}
+	return nil
 }
 
 type SubAccountConfig struct {

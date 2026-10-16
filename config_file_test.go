@@ -46,8 +46,8 @@ func TestLoadConfigFileCreatesDefaultsAndRefusesToRun(t *testing.T) {
 	if cfg.Gallery.ImagePath != "screenshot.jpg" {
 		t.Fatalf("unexpected image path %q", cfg.Gallery.ImagePath)
 	}
-	if cfg.FriendSync.Expiry.HistoryPath != "cache/player_history.json" {
-		t.Fatalf("unexpected history path %q", cfg.FriendSync.Expiry.HistoryPath)
+	if want := (FriendCleanupFile{InactiveDays: 15, MaxFriends: 950, Interval: 1800, HistoryPath: "cache/player_history.json"}); cfg.FriendSync.Cleanup != want {
+		t.Fatalf("friend cleanup = %#v, want %#v", cfg.FriendSync.Cleanup, want)
 	}
 }
 
@@ -175,8 +175,8 @@ accounts:
 	if cfg.FriendSync.UpdateInterval != 75 || cfg.FriendSync.AutoFollow || !cfg.FriendSync.AutoUnfollow || cfg.FriendSync.InitialInvite {
 		t.Fatalf("canonical friendSync keys were not loaded: %#v", cfg.FriendSync)
 	}
-	if cfg.FriendSync.Expiry.HistoryPath != "cache/upstream_history.json" || cfg.FriendSync.Expiry.Enabled {
-		t.Fatalf("canonical friendSync expiry keys were not loaded: %#v", cfg.FriendSync.Expiry)
+	if want := (FriendCleanupFile{Interval: 2400, HistoryPath: "cache/upstream_history.json"}); cfg.FriendSync.Cleanup != want {
+		t.Fatalf("friendSync expiry was not migrated: %#v, want %#v", cfg.FriendSync.Cleanup, want)
 	}
 	if cfg.Notifications.WebhookURL != "https://example.net/webhook" {
 		t.Fatalf("canonical notification key was not loaded: %#v", cfg.Notifications)
@@ -369,7 +369,7 @@ func TestConfigFileDisablesFriendSyncWhenNoActionsConfigured(t *testing.T) {
 	cfg := DefaultConfigFile()
 	cfg.FriendSync.AutoFollow = false
 	cfg.FriendSync.AutoUnfollow = false
-	cfg.FriendSync.Expiry.Enabled = false
+	cfg.FriendSync.Cleanup = FriendCleanupFile{}
 
 	runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{
 		XBLTokenSource: staticTokenSource{},
@@ -379,6 +379,19 @@ func TestConfigFileDisablesFriendSyncWhenNoActionsConfigured(t *testing.T) {
 	}
 	if runtime.FriendSync != nil {
 		t.Fatalf("expected friend sync disabled, got %#v", runtime.FriendSync)
+	}
+}
+
+// With cleanup off, friend sync still needs history to finish earlier removals.
+func TestConfigFileKeepsFriendHistoryWithCleanupOff(t *testing.T) {
+	cfg := DefaultConfigFile()
+	cfg.FriendSync.Cleanup = FriendCleanupFile{HistoryPath: "cache/player_history.json"}
+	runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{XBLTokenSource: staticTokenSource{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.FriendSync == nil || runtime.FriendHistory == nil {
+		t.Fatalf("friend sync = %#v history = %v, want both set", runtime.FriendSync, runtime.FriendHistory)
 	}
 }
 
@@ -444,7 +457,119 @@ ip = "bedrock.test"
 	if cfg.Session.UpdateInterval != 20 {
 		t.Fatalf("expected interval clamp during migration, got %d", cfg.Session.UpdateInterval)
 	}
-	if cfg.FriendSync.Expiry.HistoryPath != "cache/player_history.json" {
-		t.Fatalf("expected default history path, got %q", cfg.FriendSync.Expiry.HistoryPath)
+	if cfg.FriendSync.Cleanup.HistoryPath != "cache/player_history.json" {
+		t.Fatalf("expected default history path, got %q", cfg.FriendSync.Cleanup.HistoryPath)
 	}
+}
+
+// Old expiry settings must keep working after an upgrade, with the new
+// capacity limit left off until the operator opts in.
+func TestLoadConfigFileMigratesFriendExpiry(t *testing.T) {
+	tests := []struct {
+		name string
+		file string
+		data string
+		want FriendCleanupFile
+	}{
+		{
+			name: "enabled",
+			file: "config.yml",
+			data: "configVersion: 3\nfriendSync:\n  expiry:\n    enabled: true\n    days: 7\n    check: 600\n    historyPath: cache/h.json\n",
+			want: FriendCleanupFile{InactiveDays: 7, Interval: 600, HistoryPath: "cache/h.json"},
+		},
+		{
+			name: "production v3",
+			file: "config.yml",
+			data: "configVersion: 3\ndebugMode: false\nfriendSync:\n  updateInterval: 60\n  autoFollow: true\n  autoUnfollow: true\n  initialInvite: true\n  expiry:\n    enabled: true\n    days: 15\n    check: 1800\n    historyPath: cache/player_history.json\n",
+			want: FriendCleanupFile{InactiveDays: 15, Interval: 1800, HistoryPath: "cache/player_history.json"},
+		},
+		{
+			name: "disabled",
+			file: "config.yml",
+			data: "configVersion: 3\nfriendSync:\n  expiry:\n    enabled: false\n    days: 7\n",
+			want: FriendCleanupFile{Interval: 1800, HistoryPath: "cache/player_history.json"},
+		},
+		{
+			name: "partial block keeps old defaults",
+			file: "config.yml",
+			data: "configVersion: 3\nfriendSync:\n  expiry:\n    days: 9\n",
+			want: FriendCleanupFile{InactiveDays: 9, Interval: 1800, HistoryPath: "cache/player_history.json"},
+		},
+		{
+			name: "absent",
+			file: "config.yml",
+			data: "configVersion: 3\n",
+			want: FriendCleanupFile{InactiveDays: 15, Interval: 1800, HistoryPath: "cache/player_history.json"},
+		},
+		{
+			name: "toml",
+			file: "config.toml",
+			data: "configVersion = 3\n[friendSync.expiry]\nenabled = true\ndays = 5\n",
+			want: FriendCleanupFile{InactiveDays: 5, Interval: 1800, HistoryPath: "cache/player_history.json"},
+		},
+		{
+			name: "unversioned expiry block",
+			file: "config.yml",
+			data: "friendSync:\n  expiry:\n    enabled: true\n    days: 4\n",
+			want: FriendCleanupFile{InactiveDays: 4, Interval: 1800, HistoryPath: "cache/player_history.json"},
+		},
+		{
+			name: "current version keeps cleanup",
+			file: "config.yml",
+			data: "configVersion: 4\nfriendSync:\n  cleanup:\n    inactiveDays: 3\n    maxFriends: 900\n    interval: 60\n",
+			want: FriendCleanupFile{InactiveDays: 3, MaxFriends: 900, Interval: 60, HistoryPath: "cache/player_history.json"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), tt.file)
+			if err := os.WriteFile(path, []byte(tt.data+testTarget(tt.file)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadConfigFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.FriendSync.Cleanup != tt.want || cfg.ConfigVersion != CurrentConfigVersion {
+				t.Fatalf("version %d cleanup = %#v, want %d and %#v", cfg.ConfigVersion, cfg.FriendSync.Cleanup, CurrentConfigVersion, tt.want)
+			}
+			// The rewritten file must load to the same settings.
+			reloaded, err := LoadConfigFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reloaded.FriendSync.Cleanup != tt.want {
+				t.Fatalf("reloaded cleanup = %#v, want %#v", reloaded.FriendSync.Cleanup, tt.want)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), "expiry") {
+				t.Fatalf("migrated file still has an expiry block:\n%s", data)
+			}
+		})
+	}
+}
+
+func TestLoadConfigFileNotesFriendLimitWithoutHeadroom(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := os.WriteFile(path, []byte("configVersion: 5\nfriendSync:\n  cleanup:\n    maxFriends: 1000\n"+testTarget(path)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfigFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(cfg.Notes, func(note string) bool { return strings.Contains(note, "maxFriends 1000") }) {
+		t.Fatalf("notes = %q, want a maxFriends headroom note", cfg.Notes)
+	}
+}
+
+// testTarget returns a session target block for path's format, since the example host is refused.
+func testTarget(path string) string {
+	if strings.HasSuffix(path, ".toml") {
+		return "\n[session.sessionInfo]\nip = \"bedrock.test\"\n"
+	}
+	return "session:\n  sessionInfo:\n    ip: bedrock.test\n"
 }

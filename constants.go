@@ -7,6 +7,9 @@ const (
 	TemplateName    = "MinecraftLobby"
 	TitleID         = 896928775
 
+	// XboxFriendLimit is the most friends Xbox Live allows one account.
+	XboxFriendLimit = 1000
+
 	xboxLiveRelyingParty = "http://xboxlive.com"
 )
 

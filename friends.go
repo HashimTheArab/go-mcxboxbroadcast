@@ -3,7 +3,7 @@ package broadcaster
 import (
 	"context"
 	"errors"
-	"fmt"
+	"net/http"
 
 	xblsocial "github.com/df-mc/go-xsapi/v2/social"
 )
@@ -30,23 +30,33 @@ type Person struct {
 var friendListConfig = xblsocial.PeopleListConfig{Undecorated: true, ContractVersion: 5}
 
 // addFriendsBatchSize stays below Xbox Live's undocumented bulk-operation
-// limit. Code 1050 responses are also split dynamically in case the service
-// applies a lower limit to a particular account or request.
+// limit. Rejected batches are also split dynamically; see acceptFriends.
 const addFriendsBatchSize = 50
 
-// AcceptFriendRequestsError reports a successful bulk accept response that
-// still failed to update one or more pending friend requests.
-type AcceptFriendRequestsError struct {
-	Failed []string
+// FriendRequestResult reports what happened to incoming friend requests.
+type FriendRequestResult struct {
+	// Accepted lists requests Xbox reported as accepted.
+	Accepted []Person
+	// Rejected lists requests Xbox refused, each with the reason.
+	Rejected []RejectedFriendRequest
+	// Waiting counts requests still pending afterwards, including skipped ones.
+	Waiting int
+	// Deferred counts requests left untried because of the limit.
+	Deferred int
 }
 
-func (e *AcceptFriendRequestsError) Error() string {
-	return fmt.Sprintf("accept pending friend requests: failed to update %d users", len(e.Failed))
+// RejectedFriendRequest is an incoming friend request Xbox refused to accept.
+// Err matches [xblsocial.ErrFriendRestricted] when the person's privacy or
+// enforcement settings block the friendship, and [xblsocial.ErrFriendListFull]
+// when either the account's or the requester's list is full.
+type RejectedFriendRequest struct {
+	Person Person
+	Err    error
 }
 
-func (e *AcceptFriendRequestsError) FailedXUIDs() []string {
-	return append([]string(nil), e.Failed...)
-}
+// ErrFriendRequestNotAccepted is reported for a request a bulk accept listed
+// as failed without giving a reason.
+var ErrFriendRequestNotAccepted = errors.New("xbox did not accept the friend request")
 
 // Friends returns a merged view of people following the authenticated account
 // and people the authenticated account follows.
@@ -63,82 +73,90 @@ func (c FriendClient) Friends(ctx context.Context) ([]Person, error) {
 	return mergePeople(peopleFromSocialUsers(followers), peopleFromSocialUsers(following)), nil
 }
 
-// AcceptPendingFriendRequests accepts incoming Xbox friend requests with
-// bounded add calls and returns the people that Xbox reported as updated.
-func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]Person, error) {
-	socialClient := c.social()
-	pending, err := socialClient.People(ctx, xblsocial.PeopleListIncomingFriendRequests, xblsocial.PeopleListConfig{Undecorated: true})
+// AcceptPendingFriendRequests tries at most limit incoming Xbox friend requests
+// in bounded batches, leaving requests for which skip reports true pending. It
+// stops at the first rate limit or server error; refusals are narrowed down to
+// the people they apply to and reported in Rejected.
+func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context, limit int, skip func(xuid string) bool) (FriendRequestResult, error) {
+	var result FriendRequestResult
+	pending, err := c.social().People(ctx, xblsocial.PeopleListIncomingFriendRequests, xblsocial.PeopleListConfig{Undecorated: true})
 	if err != nil {
-		return nil, err
+		return result, err
 	}
-	xuids := make([]string, 0, len(pending))
 	byXUID := make(map[string]Person, len(pending))
+	xuids := make([]string, 0, len(pending))
 	for _, user := range pending {
-		if user.XUID == "" {
+		if _, dup := byXUID[user.XUID]; user.XUID == "" || dup {
 			continue
 		}
-		xuids = append(xuids, user.XUID)
 		byXUID[user.XUID] = personFromSocialUser(user)
-	}
-	if len(xuids) == 0 {
-		return nil, nil
-	}
-
-	updatedXUIDs := make([]string, 0, len(xuids))
-	var bulkErr error
-	for start := 0; start < len(xuids); start += addFriendsBatchSize {
-		end := min(start+addFriendsBatchSize, len(xuids))
-		updated, err := addFriends(ctx, socialClient, xuids[start:end])
-		updatedXUIDs = append(updatedXUIDs, updated...)
-		if err != nil {
-			bulkErr = err
-			break
+		if skip == nil || !skip(user.XUID) {
+			xuids = append(xuids, user.XUID)
 		}
 	}
-	updated := make(map[string]struct{}, len(updatedXUIDs))
-	accepted := make([]Person, 0, len(updatedXUIDs))
-	for _, xuid := range updatedXUIDs {
-		if person, ok := byXUID[xuid]; ok {
+	if len(xuids) > max(limit, 0) {
+		result.Deferred = len(xuids) - max(limit, 0)
+		xuids = xuids[:max(limit, 0)]
+	}
+	for start := 0; start < len(xuids) && err == nil; start += addFriendsBatchSize {
+		err = c.acceptFriends(ctx, xuids[start:min(start+addFriendsBatchSize, len(xuids))], byXUID, &result)
+	}
+	result.Waiting = len(byXUID) - len(result.Accepted)
+	return result, err
+}
+
+// acceptFriends accepts xuids, splitting a refused batch down to the people it
+// applies to. It returns an error only when later batches should not be tried.
+func (c FriendClient) acceptFriends(ctx context.Context, xuids []string, byXUID map[string]Person, result *FriendRequestResult) error {
+	bulk, err := c.social().AddFriends(ctx, xuids)
+	if err == nil {
+		updated := make(map[string]struct{}, len(bulk.Updated))
+		for _, xuid := range bulk.Updated {
+			person, ok := byXUID[xuid]
+			if _, dup := updated[xuid]; !ok || dup {
+				continue
+			}
 			updated[xuid] = struct{}{}
-			accepted = append(accepted, person)
+			result.Accepted = append(result.Accepted, person)
 		}
-	}
-	if bulkErr != nil {
-		return accepted, bulkErr
-	}
-	var failed []string
-	for _, xuid := range xuids {
-		if _, ok := updated[xuid]; !ok {
-			failed = append(failed, xuid)
+		for _, xuid := range xuids {
+			if _, ok := updated[xuid]; !ok {
+				result.Rejected = append(result.Rejected, RejectedFriendRequest{Person: byXUID[xuid], Err: ErrFriendRequestNotAccepted})
+			}
 		}
+		return nil
 	}
-	if len(failed) > 0 {
-		return accepted, &AcceptFriendRequestsError{Failed: failed}
+	// A full-list refusal may be one requester's list, so it is split like any other.
+	switch {
+	case !isRequestRefusal(err):
+		return err
+	case len(xuids) == 1:
+		result.Rejected = append(result.Rejected, RejectedFriendRequest{Person: byXUID[xuids[0]], Err: err})
+		return nil
 	}
-	return accepted, nil
-}
-
-// addFriends retries Xbox's bulk-limit response with progressively smaller
-// batches. Successful work from the first half is retained if the second half
-// fails for an unrelated reason such as rate limiting.
-func addFriends(ctx context.Context, client *xblsocial.Client, xuids []string) ([]string, error) {
-	result, err := client.AddFriends(ctx, xuids)
-	if err == nil || len(xuids) == 1 || !isBulkOperationLimit(err) {
-		return result.Updated, err
-	}
-
 	middle := len(xuids) / 2
-	left, err := addFriends(ctx, client, xuids[:middle])
-	if err != nil {
-		return left, err
+	if err := c.acceptFriends(ctx, xuids[:middle], byXUID, result); err != nil {
+		return err
 	}
-	right, err := addFriends(ctx, client, xuids[middle:])
-	return append(left, right...), err
+	return c.acceptFriends(ctx, xuids[middle:], byXUID, result)
 }
 
-func isBulkOperationLimit(err error) bool {
+// isRequestRefusal reports whether err may apply to only some people in a
+// bulk request, or to its size: a 400 without a code, or a known per-person
+// or bulk-limit code. Other client errors fail the whole request.
+func isRequestRefusal(err error) bool {
 	var responseErr *xblsocial.ResponseError
-	return errors.As(err, &responseErr) && responseErr.Code == 1050
+	if !errors.As(err, &responseErr) {
+		return false
+	}
+	switch responseErr.Code {
+	case 0:
+		return responseErr.StatusCode == http.StatusBadRequest
+	case 1011, 1015, 1028, 1039, 1049, 1050:
+		return true
+	default:
+		return false
+	}
 }
 
 // Follow follows the XUID, which makes the user a friend when they also follow
@@ -147,16 +165,36 @@ func (c FriendClient) Follow(ctx context.Context, xuid string) error {
 	return c.social().Follow(ctx, xuid)
 }
 
-// Unfollow removes the mutual follow relationship with xuid.
+// Unfollow drops the authenticated account's follow of xuid. Xbox keeps the
+// user's follow of the account, so use it only for people who do not follow back.
 func (c FriendClient) Unfollow(ctx context.Context, xuid string) error {
 	return c.social().RemoveMutualFollow(ctx, xuid)
 }
 
-// ForceUnfollow removes the follow relationship the user identified by xuid
-// has towards the authenticated account. It is used to drop followers whose
-// privacy or enforcement restrictions prevent a friendship.
-func (c FriendClient) ForceUnfollow(ctx context.Context, xuid string) error {
-	return c.social().RemoveFollower(ctx, xuid)
+// RemoveFriend ends the friendship with xuid, or declines their pending
+// request, so a new request is needed to be friends again. It does not remove
+// a one-way follow; a 404 means there was no friendship or request to end.
+func (c FriendClient) RemoveFriend(ctx context.Context, xuid string) error {
+	return c.social().RemoveFriend(ctx, xuid)
+}
+
+// RemoveFollower drops xuid's follow of the authenticated account.
+func (c FriendClient) RemoveFollower(ctx context.Context, xuid string) error {
+	return ignoreNotFound(c.social().RemoveFollower(ctx, xuid))
+}
+
+// ignoreNotFound treats a missing relationship as already removed.
+func ignoreNotFound(err error) error {
+	if isNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+// isNotFound reports whether err is a social 404.
+func isNotFound(err error) bool {
+	var responseErr *xblsocial.ResponseError
+	return errors.As(err, &responseErr) && responseErr.StatusCode == http.StatusNotFound
 }
 
 func (c FriendClient) social() *xblsocial.Client {

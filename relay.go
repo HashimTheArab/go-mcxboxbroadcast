@@ -180,8 +180,8 @@ func (b *Broadcaster) relay(conn relayClientConn) {
 	}
 	defer server.Close()
 
-	if recorder, ok := b.conf.FriendHistory.(HistoryRecorder); ok && id.XUID != "" {
-		if err := recorder.Seen(ctx, id.XUID, time.Now()); err != nil {
+	if b.conf.FriendHistory != nil && id.XUID != "" {
+		if err := b.conf.FriendHistory.Seen(ctx, id.XUID, time.Now()); err != nil {
 			b.log.Error("record player history", "xuid", id.XUID, "err", err)
 		}
 	}
