@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/df-mc/go-nethernet"
+	"github.com/df-mc/go-nethernet/endpoint"
 	"github.com/google/uuid"
-	"github.com/sandertv/gophertunnel/minecraft"
 	"github.com/sandertv/gophertunnel/minecraft/p2p"
 	"github.com/sandertv/gophertunnel/minecraft/room"
 	"github.com/sandertv/gophertunnel/minecraft/service"
@@ -201,80 +201,6 @@ func TestGalleryClientReportsDeleteFailures(t *testing.T) {
 	}
 }
 
-func TestFriendSyncerFollowsAndUnfollows(t *testing.T) {
-	var followed, unfollowed bool
-	syncer := FriendSyncer{
-		Client: fakeFriendClient{
-			people: []Person{
-				{XUID: "1", Gamertag: "Follower", IsFollowingCaller: true},
-				{XUID: "2", Gamertag: "Old", IsFollowedByCaller: true},
-			},
-			follow:   func(xuid string) { followed = xuid == "1" },
-			unfollow: func(xuid string) { unfollowed = xuid == "2" },
-		},
-		Config: FriendSyncConfig{AutoFollow: true, AutoUnfollow: true},
-	}
-	if err := syncer.Sync(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if !followed || !unfollowed {
-		t.Fatalf("followed=%v unfollowed=%v", followed, unfollowed)
-	}
-}
-
-func TestFriendSyncerSendsInitialInvite(t *testing.T) {
-	var invited string
-	syncer := FriendSyncer{
-		Client: fakeFriendClient{
-			people: []Person{{XUID: "1", Gamertag: "Follower", IsFollowingCaller: true}},
-		},
-		Inviter: fakeInviter{invite: func(xuid string) { invited = xuid }},
-		Config:  FriendSyncConfig{AutoFollow: true, InitialInvite: true},
-	}
-	if err := syncer.Sync(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if invited != "1" {
-		t.Fatalf("expected invite for xuid 1, got %q", invited)
-	}
-}
-
-func TestFriendSyncerExpiresInactiveFriends(t *testing.T) {
-	var unfollowed bool
-	syncer := FriendSyncer{
-		Client: fakeFriendClient{
-			people:   []Person{{XUID: "1", Gamertag: "Old", IsFollowedByCaller: true}},
-			unfollow: func(xuid string) { unfollowed = xuid == "1" },
-		},
-		History: fakeHistoryStore{seen: map[string]time.Time{"1": time.Now().Add(-48 * time.Hour)}},
-		Config:  FriendSyncConfig{ExpiryEnabled: true, ExpiryDays: 1},
-	}
-	if err := syncer.Sync(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if !unfollowed {
-		t.Fatal("expected inactive friend to be unfollowed")
-	}
-}
-
-func TestFriendSyncerDefaultsExpiryDays(t *testing.T) {
-	var unfollowed bool
-	syncer := FriendSyncer{
-		Client: fakeFriendClient{
-			people:   []Person{{XUID: "1", Gamertag: "Recent", IsFollowedByCaller: true}},
-			unfollow: func(string) { unfollowed = true },
-		},
-		History: fakeHistoryStore{seen: map[string]time.Time{"1": time.Now().Add(-24 * time.Hour)}},
-		Config:  FriendSyncConfig{ExpiryEnabled: true},
-	}
-	if err := syncer.Sync(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if unfollowed {
-		t.Fatal("zero expiry days should default instead of pruning recent friends")
-	}
-}
-
 func TestFileHistoryStoreRecordsAndClearsLastSeen(t *testing.T) {
 	store := NewFileHistoryStore(filepath.Join(t.TempDir(), "player_history.json"))
 	when := time.Now().Add(-time.Hour).Truncate(time.Second)
@@ -301,7 +227,7 @@ func TestStatusUsesConfiguredProvider(t *testing.T) {
 	b, err := New(Config{
 		XBLTokenSource: staticTokenSource{},
 		XUID:           "123",
-		Server:         ServerInfo{Host: "127.0.0.1", Port: 19132},
+		JoinURL:        "http://127.0.0.1:19132",
 		StatusProvider: staticStatusProvider{host: "Provider Host", world: "Provider World", titleID: TitleID},
 	})
 	if err != nil {
@@ -319,98 +245,6 @@ func TestStatusUsesConfiguredProvider(t *testing.T) {
 	}
 	if status.TitleID != 0 {
 		t.Fatalf("provider title id = %d", status.TitleID)
-	}
-}
-
-func TestRoomStatusProviderNormalizesConfiguredProvider(t *testing.T) {
-	b := &Broadcaster{conf: Config{
-		XUID:           "123",
-		StatusProvider: staticStatusProvider{host: "Provider Host", world: "Provider World", titleID: TitleID},
-	}}
-	status := b.roomStatusProvider(room.Status{}).RoomStatus()
-	if status.Protocol == 0 || status.Version == "" {
-		t.Fatalf("provider status was not normalized: %#v", status)
-	}
-	if status.OwnerID != "123" {
-		t.Fatalf("provider owner id = %q", status.OwnerID)
-	}
-	if status.TransportLayer != p2p.TransportLayerNetherNet {
-		t.Fatalf("provider transport layer = %d", status.TransportLayer)
-	}
-	if status.TitleID != 0 {
-		t.Fatalf("provider title id = %d", status.TitleID)
-	}
-	if status.BroadcastSetting == 0 {
-		t.Fatalf("provider session controls were not normalized: %#v", status)
-	}
-	if status.Joinability != p2p.JoinabilityFriends {
-		t.Fatalf("provider joinability = %q, want %q", status.Joinability, p2p.JoinabilityFriends)
-	}
-	if !status.OnlineCrossPlatformGame {
-		t.Fatalf("provider status missing cross-platform default: %#v", status)
-	}
-}
-
-func TestMinecraftStatusProviderMirrorsConfiguredProvider(t *testing.T) {
-	b := &Broadcaster{conf: Config{
-		StatusProvider: staticStatusProvider{host: "Provider Host", world: "Provider World"},
-	}}
-	status := b.minecraftStatusProvider(room.Status{}).ServerStatus(0, 0)
-	if status.ServerName != "Provider World" || status.ServerSubName != "Provider Host" {
-		t.Fatalf("minecraft status provider did not mirror room provider: %#v", status)
-	}
-	if status.PlayerCount != 1 || status.MaxPlayers != 2 {
-		t.Fatalf("minecraft status provider did not mirror counts: %#v", status)
-	}
-	if !b.roomListenConfig(room.Status{}).DisableServerStatusOverride {
-		t.Fatal("room server status override must stay disabled so listener pong status does not rewrite MPSD")
-	}
-}
-
-func TestRoomListenerDoesNotOverridePublishedStatusWithMinecraftPong(t *testing.T) {
-	inner := &fakeAnnouncer{}
-	b := &Broadcaster{
-		announcer: signalingConnectionAnnouncer{
-			Announcer: inner,
-			connection: p2p.Connection{
-				Type:        p2p.ConnectionTypeSignalingOverWebSocket,
-				NetherNetID: p2p.NetherNetID("123456789"),
-			},
-		},
-	}
-	listener := b.roomListenConfig(room.Status{
-		HostName:       "CoveredJLA",
-		WorldName:      "Minecraft World",
-		WorldType:      WorldTypeSurvival,
-		MemberCount:    1,
-		MaxMemberCount: 20,
-		TransportLayer: p2p.TransportLayerNetherNet,
-	}).Wrap(fakeNetworkListener{
-		addr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 19132},
-	})
-
-	listener.ServerStatus(minecraft.ServerStatus{
-		ServerName:    "Lunar Proxy",
-		ServerSubName: "\u00a7bLunar Proxy",
-		PlayerCount:   0,
-		MaxPlayers:    1,
-	})
-
-	status := inner.Status()
-	if status.HostName != "CoveredJLA" || status.WorldName != "Minecraft World" {
-		t.Fatalf("listener pong rewrote published names: %#v", status)
-	}
-	if status.MemberCount != 1 || status.MaxMemberCount != 20 {
-		t.Fatalf("listener pong rewrote published counts: %#v", status)
-	}
-	if len(status.SupportedConnections) != 1 {
-		t.Fatalf("unexpected supported connections: %#v", status.SupportedConnections)
-	}
-	connection := status.SupportedConnections[0]
-	if connection.Type != p2p.ConnectionTypeSignalingOverWebSocket ||
-		connection.NetherNetID != p2p.NetherNetID("123456789") ||
-		connection.PlayerMessagingID != uuid.Nil {
-		t.Fatalf("websocket connection was not preserved: %#v", connection)
 	}
 }
 
@@ -454,12 +288,9 @@ func TestStartAlwaysAdvertisesWebSocketForInjectedSignaling(t *testing.T) {
 	announcer := &fakeAnnouncer{}
 	b := &Broadcaster{
 		conf: Config{
-			Server:         ServerInfo{Host: "127.0.0.1", Port: 19132},
+			JoinURL:        "http://127.0.0.1:19132",
 			XBLTokenSource: staticTokenSource{xuid: "123"},
 			Signaling:      sig,
-			ListenConfig: minecraft.ListenConfig{
-				AuthenticationDisabled: true,
-			},
 			Status:         Status{HostName: "Host", WorldName: "World"},
 			UpdateInterval: 30 * time.Second,
 		},
@@ -505,15 +336,12 @@ func TestStartAdvertisesOpaqueNetherNetID(t *testing.T) {
 	announcer := &fakeAnnouncer{}
 	b := &Broadcaster{
 		conf: Config{
-			Server:               ServerInfo{Host: "127.0.0.1", Port: 19132},
+			JoinURL:              "http://127.0.0.1:19132",
 			XBLTokenSource:       staticTokenSource{xuid: "123"},
 			Signaling:            sig,
 			MinecraftTokenSource: minecraftTokenSourceWithPMID{pmid: pmsgID},
-			ListenConfig: minecraft.ListenConfig{
-				AuthenticationDisabled: true,
-			},
-			Status:         Status{HostName: "Host", WorldName: "World"},
-			UpdateInterval: 30 * time.Second,
+			Status:               Status{HostName: "Host", WorldName: "World"},
+			UpdateInterval:       30 * time.Second,
 		},
 		announcerFactory: func(*Broadcaster) room.Announcer {
 			return announcer
@@ -546,7 +374,7 @@ func TestStartTimesOutDefaultSignalingDial(t *testing.T) {
 		}
 	})}
 	b, err := New(Config{
-		Server:               ServerInfo{Host: "127.0.0.1", Port: 19132},
+		JoinURL:              "http://127.0.0.1:19132",
 		XBLTokenSource:       staticTokenSource{xuid: "123"},
 		MinecraftTokenSource: minecraftTokenSourceWithPMID{pmid: uuid.New()},
 		HTTPClient:           blockingClient,
@@ -568,7 +396,7 @@ func TestStartTimesOutDefaultSignalingTokenSourceCreation(t *testing.T) {
 	defer close(unblock)
 
 	b, err := New(Config{
-		Server:               ServerInfo{Host: "127.0.0.1", Port: 19132},
+		JoinURL:              "http://127.0.0.1:19132",
 		XBLTokenSource:       blockingTokenSource{started: started, unblock: unblock},
 		SignalingDialTimeout: 10 * time.Millisecond,
 	})
@@ -623,7 +451,7 @@ func TestStartCleansUpWhenPrimaryAnnounceFails(t *testing.T) {
 	announcer := &fakeAnnouncer{announceErr: announceErr}
 	b := &Broadcaster{
 		conf: Config{
-			Server:    ServerInfo{Host: "127.0.0.1", Port: 19132},
+			JoinURL:   "http://127.0.0.1:19132",
 			Signaling: sig,
 			StatusProvider: room.NewStatusProvider(room.Status{
 				HostName:  "Host",
@@ -655,11 +483,8 @@ func TestStartAdvertisesWebSocketConnectionByDefault(t *testing.T) {
 	announcer := &fakeAnnouncer{}
 	b := &Broadcaster{
 		conf: Config{
-			Server:    ServerInfo{Host: "127.0.0.1", Port: 19132},
-			Signaling: sig,
-			ListenConfig: minecraft.ListenConfig{
-				AuthenticationDisabled: true,
-			},
+			JoinURL:        "http://127.0.0.1:19132",
+			Signaling:      sig,
 			Status:         Status{HostName: "Host", WorldName: "World"},
 			UpdateInterval: 30 * time.Second,
 		},
@@ -683,10 +508,13 @@ func TestStartAdvertisesWebSocketConnectionByDefault(t *testing.T) {
 
 func TestQueryStatusFallsBackToWeb(t *testing.T) {
 	status, err := queryStatusWithFallback(context.Background(), QueryOptions{
-		Address:            "127.0.0.1:1",
+		JoinURL:            "http://127.0.0.1:1",
 		Timeout:            time.Nanosecond,
 		WebFallbackEnabled: true,
 		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Host != "checker.geysermc.org" || req.URL.Query().Get("hostname") != "127.0.0.1" || req.URL.Query().Get("port") != "1" {
+				return nil, errors.New("endpoint unreachable")
+			}
 			return response(http.StatusOK, `{"success":true,"ping":{"pong":{"motd":"World","subMotd":"Host","playerCount":3,"maximumPlayerCount":10}}}`), nil
 		})},
 	})
@@ -711,49 +539,6 @@ func (s staticStatusProvider) RoomStatus() room.Status {
 		MaxMemberCount: 2,
 		TitleID:        s.titleID,
 	}
-}
-
-type fakeFriendClient struct {
-	people   []Person
-	follow   func(string)
-	unfollow func(string)
-}
-
-func (f fakeFriendClient) Friends(context.Context) ([]Person, error) { return f.people, nil }
-func (f fakeFriendClient) Follow(_ context.Context, xuid string) error {
-	if f.follow != nil {
-		f.follow(xuid)
-	}
-	return nil
-}
-func (f fakeFriendClient) Unfollow(_ context.Context, xuid string) error {
-	if f.unfollow != nil {
-		f.unfollow(xuid)
-	}
-	return nil
-}
-
-type fakeInviter struct {
-	invite func(string)
-}
-
-func (f fakeInviter) Invite(_ context.Context, xuid, _ string) error {
-	f.invite(xuid)
-	return nil
-}
-
-type fakeHistoryStore struct {
-	seen map[string]time.Time
-}
-
-func (f fakeHistoryStore) LastSeen(_ context.Context, xuid string) (time.Time, bool, error) {
-	t, ok := f.seen[xuid]
-	return t, ok, nil
-}
-
-func (f fakeHistoryStore) Clear(_ context.Context, xuid string) error {
-	delete(f.seen, xuid)
-	return nil
 }
 
 type fakeNotifier struct {
@@ -800,16 +585,6 @@ func (f *fakeAnnouncer) Closed() bool {
 	defer f.mu.Unlock()
 	return f.closed
 }
-
-type fakeNetworkListener struct {
-	addr net.Addr
-}
-
-func (f fakeNetworkListener) Accept() (net.Conn, error) { return nil, net.ErrClosed }
-func (f fakeNetworkListener) Close() error              { return nil }
-func (f fakeNetworkListener) Addr() net.Addr            { return f.addr }
-func (f fakeNetworkListener) ID() int64                 { return 1 }
-func (f fakeNetworkListener) PongData([]byte)           {}
 
 type fakeSignaling struct {
 	closed    bool
@@ -858,4 +633,29 @@ func (s minecraftTokenSourceWithPMID) ServiceToken(context.Context) (*service.To
 		ValidUntil:          time.Now().Add(time.Hour),
 		Claims:              service.Claims{PlayerMessagingID: s.pmid},
 	}, nil
+}
+
+// Status queries read the target's /v1/join status document and send the advertised client info.
+func TestQueryStatusReadsHTTPSignalingStatus(t *testing.T) {
+	var query url.Values
+	status, err := queryStatus(context.Background(), QueryOptions{
+		JoinURL:    "https://bedrock.test:19132",
+		ClientInfo: endpoint.ClientInfo{Version: "1.26.60", Protocol: 2225, Platform: relayClientPlatform},
+		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method != http.MethodGet || req.URL.Path != "/v1/join" {
+				t.Fatalf("unexpected request %s %s", req.Method, req.URL)
+			}
+			query = req.URL.Query()
+			return response(http.StatusOK, `{"name":"World","level":"Host","players":3,"maxPlayers":10,"protocol":2225,"version":"1.26.60"}`), nil
+		})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.ServerName != "World" || status.ServerSubName != "Host" || status.PlayerCount != 3 || status.MaxPlayers != 10 {
+		t.Fatalf("unexpected status %#v", status)
+	}
+	if query.Get("version") != "1.26.60" || query.Get("protocol") != "2225" || query.Get("platform") != "-1" || query.Get("id") == "" {
+		t.Fatalf("probe query = %v", query)
+	}
 }

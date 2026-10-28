@@ -23,6 +23,8 @@ type sessionNonceAnnouncer struct {
 
 	ownerXUID string
 	log       *slog.Logger
+	// membersChanged receives the member count after each session change.
+	membersChanged func(count int)
 
 	custom          []byte
 	readRestriction string
@@ -32,13 +34,36 @@ type sessionNonceAnnouncer struct {
 	handledSession  *mpsd.Session
 }
 
-func newSessionNonceAnnouncer(announcer *room.XBLAnnouncer, ownerXUID string, log *slog.Logger) *sessionNonceAnnouncer {
+func newSessionNonceAnnouncer(announcer *room.XBLAnnouncer, ownerXUID string, log *slog.Logger, membersChanged func(int)) *sessionNonceAnnouncer {
 	return &sessionNonceAnnouncer{
-		XBLAnnouncer: announcer,
-		ownerXUID:    ownerXUID,
-		log:          log,
-		nonces:       make(map[string]string),
+		XBLAnnouncer:   announcer,
+		ownerXUID:      ownerXUID,
+		log:            log,
+		membersChanged: membersChanged,
+		nonces:         make(map[string]string),
 	}
+}
+
+// hide makes the published session invite-only so its members no longer
+// advertise it to their friends. It keeps the session's restrictions, since
+// changing them would republish it.
+func (a *sessionNonceAnnouncer) hide(ctx context.Context) error {
+	a.Lock()
+	defer a.Unlock()
+	if a.Session == nil {
+		return errors.New("session is not published")
+	}
+	a.lastStatus.BroadcastSetting = p2p.BroadcastSettingInviteOnly
+	a.lastStatus.Joinability = p2p.JoinabilityInviteOnly
+	custom, err := marshalStatusWithNonces(a.lastStatus, a.nonces)
+	if err != nil {
+		return fmt.Errorf("encode: %w", err)
+	}
+	if err := a.Session.SetCustomProperties(ctx, custom); err != nil {
+		return fmt.Errorf("set custom properties: %w", err)
+	}
+	a.custom = custom
+	return nil
 }
 
 func (a *sessionNonceAnnouncer) Announce(ctx context.Context, status room.Status) error {
@@ -197,6 +222,9 @@ type sessionNonceHandler struct {
 }
 
 func (h sessionNonceHandler) HandleSessionChange(session *mpsd.Session) {
+	if h.announcer.membersChanged != nil {
+		h.announcer.membersChanged(sessionMemberCount(session))
+	}
 	ctx, cancel := context.WithTimeout(session.Context(), 15*time.Second)
 	defer cancel()
 	if err := h.announcer.updateNoncesFromSession(ctx, session); err != nil {

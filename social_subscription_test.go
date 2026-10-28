@@ -26,7 +26,7 @@ func TestFriendSyncerRunSyncsOnTrigger(t *testing.T) {
 		trigger := make(chan struct{}, 1)
 		syncer := FriendSyncer{
 			Client:  client,
-			Config:  FriendSyncConfig{AutoFollow: true, UpdateInterval: time.Hour},
+			Config:  FriendSyncConfig{AutoFriend: true, UpdateInterval: time.Hour},
 			Trigger: trigger,
 		}
 		ctx, cancel := context.WithCancel(t.Context())
@@ -58,7 +58,7 @@ func TestFriendSyncerRunHandlesClosedTrigger(t *testing.T) {
 	trigger := make(chan struct{})
 	syncer := FriendSyncer{
 		Client:  client,
-		Config:  FriendSyncConfig{AutoFollow: true, UpdateInterval: time.Hour},
+		Config:  FriendSyncConfig{AutoFriend: true, UpdateInterval: time.Hour},
 		Trigger: trigger,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -220,52 +220,14 @@ func TestReactiveFriendSyncApplicable(t *testing.T) {
 	}{
 		{"nil", nil, false},
 		{"neither", &FriendSyncConfig{}, false},
-		{"auto-follow", &FriendSyncConfig{AutoFollow: true}, true},
-		{"auto-unfollow", &FriendSyncConfig{AutoUnfollow: true}, true},
+		{"auto-friend", &FriendSyncConfig{AutoFriend: true}, true},
+		{"expiry only", &FriendSyncConfig{ExpiryEnabled: true}, false},
 	}
 	for _, tc := range cases {
 		if got := reactiveFriendSyncApplicable(tc.conf); got != tc.want {
 			t.Errorf("%s: reactiveFriendSyncApplicable = %v, want %v", tc.name, got, tc.want)
 		}
 	}
-}
-
-func TestReactiveFriendSyncPreservesMutationBackoff(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		accepts := 0
-		client := &syncFriendClient{
-			people: []Person{{XUID: "123", IsFollowedByCaller: true}},
-			accept: func(context.Context) ([]Person, error) {
-				accepts++
-				return nil, &xblsocial.ResponseError{StatusCode: 429, RetryAfter: time.Minute}
-			},
-		}
-		trigger := make(chan struct{}, 1)
-		syncer := FriendSyncer{
-			Client:  client,
-			Config:  FriendSyncConfig{AutoFollow: true, AutoUnfollow: true, UpdateInterval: time.Hour},
-			Trigger: trigger,
-		}
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		go syncer.Run(ctx)
-		synctest.Wait()
-		if accepts != 1 || client.removeCalls != 1 {
-			t.Fatalf("initial accepts=%d removals=%d, want 1 each", accepts, client.removeCalls)
-		}
-		trigger <- struct{}{}
-		time.Sleep(20 * time.Second)
-		synctest.Wait()
-		if accepts != 1 || client.removeCalls != 2 {
-			t.Fatalf("during backoff accepts=%d removals=%d, want 1 and 2", accepts, client.removeCalls)
-		}
-		time.Sleep(40 * time.Second)
-		trigger <- struct{}{}
-		synctest.Wait()
-		if accepts != 2 || client.removeCalls != 3 {
-			t.Fatalf("after backoff accepts=%d removals=%d, want 2 and 3", accepts, client.removeCalls)
-		}
-	})
 }
 
 func TestSocialSubscriptionFailureKeepsPolling(t *testing.T) {
@@ -283,7 +245,7 @@ func TestSocialSubscriptionFailureKeepsPolling(t *testing.T) {
 				accepts.Add(1)
 				return nil, nil
 			}},
-			Config:  FriendSyncConfig{AutoFollow: true, UpdateInterval: 20 * time.Second},
+			Config:  FriendSyncConfig{AutoFriend: true, UpdateInterval: 20 * time.Second},
 			Trigger: b.subscribeSocial(sub, b.log),
 		}
 		go syncer.Run(b.ctx)
@@ -303,3 +265,55 @@ func TestSocialSubscriptionFailureKeepsPolling(t *testing.T) {
 		}
 	})
 }
+
+// A social event during add backoff must not accept requests early, while expiry keeps running.
+func TestReactiveFriendSyncPreservesAddBackoff(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var accepts atomic.Int32
+		old := time.Now().Add(-48 * time.Hour)
+		client := &syncFriendClient{
+			people: []Person{{XUID: "123"}},
+			accept: func(context.Context) ([]Person, error) {
+				accepts.Add(1)
+				return nil, &xblsocial.ResponseError{StatusCode: 429, RetryAfter: time.Minute}
+			},
+		}
+		history := inactiveHistory{seen: old}
+		trigger := make(chan struct{}, 1)
+		syncer := FriendSyncer{
+			Client:  client,
+			History: history,
+			Config: FriendSyncConfig{AutoFriend: true, ExpiryEnabled: true, ExpiryDays: 1,
+				UpdateInterval: time.Hour, ExpiryCheck: 20 * time.Second},
+			Trigger: trigger,
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go syncer.Run(ctx)
+		synctest.Wait()
+		if accepts.Load() != 1 || len(client.removals()) != 1 {
+			t.Fatalf("initial accepts=%d removals=%v, want 1 each", accepts.Load(), client.removals())
+		}
+		trigger <- struct{}{}
+		time.Sleep(20 * time.Second)
+		synctest.Wait()
+		if accepts.Load() != 1 || len(client.removals()) != 2 {
+			t.Fatalf("during backoff accepts=%d removals=%v, want 1 and 2", accepts.Load(), client.removals())
+		}
+		time.Sleep(40 * time.Second)
+		trigger <- struct{}{}
+		synctest.Wait()
+		if accepts.Load() != 2 {
+			t.Fatalf("after backoff accepts=%d, want 2", accepts.Load())
+		}
+	})
+}
+
+// inactiveHistory reports every friend as last seen at the same old time.
+type inactiveHistory struct{ seen time.Time }
+
+func (h inactiveHistory) LastSeen(context.Context, string) (time.Time, bool, error) {
+	return h.seen, true, nil
+}
+
+func (inactiveHistory) Clear(context.Context, string) error { return nil }

@@ -1,8 +1,9 @@
 # go-mcxboxbroadcast
 
 `go-mcxboxbroadcast` publishes a Minecraft: Bedrock Edition server as an Xbox Live
-friend-list world and transfers clients that join the published NetherNet
-session to the configured Bedrock server.
+friend-list world. When a player joins, it relays their join offer to the
+server's NetherNet HTTP signaling endpoint and returns the server's answer, so
+the player connects to the server directly, as MCXboxBroadcast does.
 
 ## Acknowledgements
 
@@ -16,13 +17,12 @@ The library is modelled after
 [MCXboxBroadcast](https://github.com/rtm516/MCXboxBroadcast) while using
 Go-first building blocks:
 
-- `github.com/df-mc/go-xsapi/v2` for Xbox Live MPSD/RTA session publishing.
-- `github.com/df-mc/go-nethernet` for NetherNet/WebRTC listener support.
+- `github.com/df-mc/go-xsapi/v2` for Xbox Live MPSD/RTA session publishing and
+  friends.
+- `github.com/df-mc/go-nethernet` for the NetherNet HTTP signaling client.
 - `github.com/sandertv/gophertunnel`, using the
-  `HashimTheArab/gophertunnel` fork, for NetherNet, signaling, room
+  `HashimTheArab/gophertunnel` fork, for Xbox signaling, room
   announcements, and `minecraft/p2p`-compatible session metadata.
-- `github.com/sandertv/go-raknet`, using the `HashimTheArab/go-raknet` fork,
-  for RakNet ping compatibility.
 
 ## CLI
 
@@ -31,15 +31,19 @@ go run ./cmd/broadcaster -config config.yml
 ```
 
 If `config.yml` does not exist, the command writes a default one and exits so
-you can set `session.sessionInfo.ip` and `port`; it refuses to start while the
-target is still the example host. The first run starts Microsoft device-code
+you can set `session.joinUrl`; it refuses to start while the target is still
+the example host. The first run starts Microsoft device-code
 authentication and stores the Live token at `accounts.primaryCachePath`.
 
 Configuration keys use the exact camelCase names shown in
 [`config.example.yml`](config.example.yml). YAML and TOML are supported. Unknown
 keys, including legacy kebab-case keys and `slack-webhook`, stop startup with an
 error naming the key. Older `configVersion`s are migrated and rewritten on load.
-Sessions always advertise the Minecraft version this build accepts.
+
+Sessions advertise Minecraft 1.26.60 (protocol 2225), like MCXboxBroadcast.
+Xbox filters players by this pair before they join, so one bot serves one
+version. Set `session.sessionInfo.version` and `protocol` together to advertise
+another pair.
 
 Use `-debug` or set `debugMode: true` in the config to show detailed runtime
 events such as session creation, presence heartbeats, friend sync scans, pending
@@ -49,19 +53,52 @@ counts for each sync pass.
 The config exposes the same operator-facing areas as MCXboxBroadcast:
 
 - session target, update interval, query options, broadcast setting,
-  world type, and displayed MOTD data
+  world type, displayed MOTD data, and how old sessions are retired
 - gallery showcase image upload through `gallery.imagePath`
-- friend sync automation and expiry settings, including last-seen history path
+- friend request acceptance and expiry settings, including last-seen history path
   (stored as JSON at `friendSync.expiry.historyPath`, not Java's SQLite
   database — operators migrating from MCXboxBroadcast start with a fresh
   expiry history)
 - Slack/Discord-compatible webhook notifications
 - primary and sub-account token cache paths
 - optional HTTP proxy URL through `http.proxy`
-- selectable NetherNet signaling through `session.signalingMode`: `websocket`
+- selectable Xbox signaling through `session.signalingMode`: `websocket`
   (default) or `jsonrpc` (only when no sub-accounts are enabled).
-- relay mode through `relay.enabled`, which keeps players inside the NetherNet
-  session instead of transferring them (see below).
+
+### Joining
+
+`session.joinUrl` is the base URL of the server's NetherNet HTTP signaling,
+such as `https://play.example.net:19132`. For each join offer the broadcaster
+waits for the client's trickled candidates (500 ms after the last one, 3 s at
+most), checks `GET {joinUrl}/v1/join`, and posts the complete offer to
+`{joinUrl}/v1/join/{connectionId}`. The answer is sent back over Xbox signaling.
+If the check fails the client gets connect error 1; if the join request fails
+it gets error 6. The broadcaster never accepts the game connection itself, so
+the server sees the player's real address and login.
+
+The player's identity token in the offer is verified, then their last-seen
+time is recorded for friend expiry. `session.queryServer` reads the same
+status document the server serves on `/v1/join`.
+
+### Session rotation
+
+Players stay members of the session while they play, so their friends can find
+and join the world too. An Xbox session holds 30 members. At 28 the broadcaster
+publishes a new session on the same signaling connection and keeps the old one
+for players who are still joining. After 30 seconds the old session is made
+invite-only when `session.hideOldSessions` is true (the default), so its
+members stop showing it to their friends. Set it to false to keep the
+friends-of-friends tag on old sessions.
+
+### Friends
+
+Minecraft only lets friends join a session, so friend sync works with friends
+alone. `friendSync.autoFriend` accepts incoming friend requests, and requests
+from accounts whose restrictions prevent a friendship are declined. Expiry
+removes friends that have not joined within `friendSync.expiry.days`; the
+broadcaster's own accounts are never expired. Sub-accounts become friends with
+the primary account before publishing. An account can have at most 1000
+friends.
 
 ### Session recovery
 
@@ -79,29 +116,6 @@ another player can join. Keep an independent friend-account monitor for that.
 If recovery keeps failing, the command closes its resources and exits with an
 error. Run it under Kubernetes or another process supervisor with automatic
 restart enabled so the next process recreates authentication and client state.
-
-### Relay mode
-
-By default a joining client receives a `Transfer` to `sessionInfo.ip:port` and
-leaves the Xbox session, so only the bot's own friends ever see the world. With
-`relay.enabled: true` the broadcaster instead logs the player into the backend
-itself and relays every packet batch in both directions. The player stays a
-member of the session for as long as they play, which lets their own friends
-discover and join the world too. The backend owns the whole login sequence,
-including resource packs, so the client sees exactly what a direct join would.
-
-The backend receives the relay's address and a self-signed login chain that
-still carries the XUID the broadcaster verified, so it must trust the relay:
-Geyser with `advanced.bedrock.validate-bedrock-login: false`, BDS with
-`online-mode=false`, or a gophertunnel listener with `AuthenticationDisabled`.
-Bind such a backend to loopback or a private network; the broadcaster is its
-authentication boundary. Public servers that verify login chains cannot be
-relayed to, and a `Transfer` sent by the backend still moves the client out of
-the session.
-
-Library users can route each player individually with `RelayConfig.ResolveTarget`
-and customize the backend dial with `RelayConfig.Dialer`. Xbox Live's session
-member limit bounds how many players one session can relay at a time.
 
 ### Signaling modes
 
@@ -146,8 +160,8 @@ nest to run the broadcaster from the panel. The egg uses the Pterodactyl-specifi
 image published at `ghcr.io/hashimthearab/go-mcxboxbroadcast:pterodactyl`,
 which runs as the required `container` user from `/home/container`.
 
-The egg creates `config.yml` on install and exposes the target Bedrock
-host/port, displayed server names, query behavior, notifications, and gallery
+The egg creates `config.yml` on install and exposes the target join URL,
+displayed server names, query behavior, notifications, and gallery
 settings as panel variables. Account tokens, friend history, and other runtime
 state are stored under `/home/container/cache`. On first start, complete the
 Microsoft device-code sign-in shown in the console; if notifications are
@@ -181,10 +195,8 @@ b, err := broadcaster.New(broadcaster.Config{
     XBLTokenSource:      xblSource,
     XUID:                 xblClient.UserInfo().XUID,
     MinecraftTokenSource: minecraftTokens,
-    Server: broadcaster.ServerInfo{
-        Host: "play.example.net",
-        Port: 19132,
-    },
+    JoinURL:              "https://play.example.net:19132",
+    HideOldSessions:      true,
     Status: broadcaster.Status{
         HostName:    "Example",
         WorldName:   "Example World",
@@ -210,6 +222,9 @@ return errors.Join(runErr, closeErr)
 
 Contexts are accepted for start, update, signaling setup, announcement, and
 shutdown-sensitive operations.
+
+`Status.Version` and `Status.Protocol` override the advertised pair together;
+leave both empty for 1.26.60/2225.
 
 ## Development
 

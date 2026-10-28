@@ -2,280 +2,401 @@ package broadcaster
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"iter"
-	"net"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/df-mc/go-xsapi/v2/mpsd"
-	"github.com/sandertv/gophertunnel/minecraft"
+	"github.com/coreos/go-oidc/v3/oidc"
+	"github.com/df-mc/go-nethernet"
+	"github.com/df-mc/go-nethernet/endpoint"
+	"github.com/go-jose/go-jose/v4"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/login"
-	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
-	"github.com/sandertv/gophertunnel/minecraft/text"
+	"github.com/sandertv/gophertunnel/minecraft/service"
+	"golang.org/x/oauth2"
 )
 
-const defaultRelayDialTimeout = 15 * time.Second
+const (
+	offerGatherQuiet = 500 * time.Millisecond // wait after the last trickled candidate
+	offerGatherMax   = 3 * time.Second        // longest wait for candidates
+	relayTimeout     = 15 * time.Second       // bounds the probe, join request and answer
+	// relayClientPlatform is the platform the relay reports on probes, as the Java relay does.
+	relayClientPlatform = -1
+)
 
-// RelayConfig keeps joined clients inside the NetherNet session and relays
-// their traffic to the backend server instead of transferring them. A relayed
-// player stays a member of the Xbox session for as long as they play, which is
-// what lets friends of that player discover the world. Xbox Live's session
-// member limit therefore bounds concurrent relayed players.
-//
-// The backend sees the relay's address and an unsigned login chain that still
-// carries the player's verified XUID, so it must trust this relay: Geyser with
-// validate-bedrock-login off, BDS with online-mode off, or a gophertunnel
-// listener with AuthenticationDisabled. Public servers that verify chains
-// cannot be relayed to.
-type RelayConfig struct {
-	// ResolveTarget picks the backend address for a client. Nil relays every
-	// client to Config.Server.
-	ResolveTarget func(ctx context.Context, identity login.IdentityData, client login.ClientData) (string, error)
-	// Network is the gophertunnel network used to dial the backend. Empty uses "raknet".
-	Network string
-	// Dialer customizes the backend dial. It must not authenticate: identity,
-	// client data, protocol, and passthrough settings are set per client.
-	Dialer minecraft.Dialer
-	// DialTimeout bounds target resolution plus the backend dial. Zero uses 15s.
-	DialTimeout time.Duration
+// Connect error codes the client shows as session-not-found and connect-request failures.
+const (
+	relayErrorServerNotFound = nethernet.ErrorCodeDestinationNotLoggedIn
+	relayErrorConnectRequest = nethernet.ErrorCodeConnectRequest
+)
+
+// offerIdentity is the verified player behind a join offer.
+type offerIdentity struct {
+	XUID     string
+	Gamertag string
 }
 
-func (c *RelayConfig) validate() error {
-	if c == nil {
-		return nil
-	}
-	if c.Dialer.TokenSource != nil || c.Dialer.XBLClient != nil || c.Dialer.PlayFabClient != nil {
-		return errors.New("relay dialer must not authenticate; the relay logs in with each client's identity")
-	}
-	return nil
-}
+// httpRelay forwards join offers from Xbox signaling to the target's HTTP
+// signaling endpoint and returns its answer, so the client connects to the
+// target directly.
+type httpRelay struct {
+	signaling nethernet.Signaling
+	joinURL   string
+	client    endpoint.ClientConfig // NetworkID is set per offer
+	verify    func(ctx context.Context, sdp string) (offerIdentity, error)
+	history   HistoryRecorder // nil skips history
+	log       *slog.Logger
+	ctx       context.Context
+	cancel    context.CancelFunc
 
-func (c *RelayConfig) dialTimeout() time.Duration {
-	if c.DialTimeout <= 0 {
-		return defaultRelayDialTimeout
-	}
-	return c.DialTimeout
-}
+	quiet, max time.Duration
 
-func (c *RelayConfig) network() string {
-	if c.Network == "" {
-		return "raknet"
-	}
-	return c.Network
-}
-
-// relayClientConn is the accepted client surface the relay needs; *minecraft.Conn satisfies it.
-type relayClientConn interface {
-	transferConn
-	relayServerConn
-	ClientData() login.ClientData
-	Proto() minecraft.Protocol
-}
-
-// relayServerConn is the batch surface relayed between the two legs.
-type relayServerConn interface {
-	ReadBatch() ([]packet.Packet, error)
-	WritePacket(packet.Packet) error
-	Flush() error
-	Close() error
-}
-
-// relayDialFunc dials the backend for one client. The broadcaster's default uses d.DialContext.
-type relayDialFunc func(ctx context.Context, d minecraft.Dialer, network, address string) (relayServerConn, error)
-
-// relaySet tracks the clients being relayed so session health can tell their
-// live memberships from stale ones.
-type relaySet struct {
 	mu      sync.Mutex
-	clients map[relayClientConn]string // conn -> XUID
+	pending map[offerKey]*pendingOffer
+	closed  bool
+	stop    func()
+	wg      sync.WaitGroup
 }
 
-func (s *relaySet) add(conn relayClientConn, xuid string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.clients == nil {
-		s.clients = make(map[relayClientConn]string)
+type offerKey struct {
+	networkID    string
+	connectionID uint64
+}
+
+// pendingOffer collects the candidates trickled after one offer.
+type pendingOffer struct {
+	key        offerKey
+	sdp        string
+	candidates []string
+	quiet, max *time.Timer
+}
+
+func (o *pendingOffer) cancel() {
+	o.quiet.Stop()
+	o.max.Stop()
+}
+
+// startHTTPRelay subscribes to sig and relays its offers until close.
+func startHTTPRelay(ctx context.Context, sig nethernet.Signaling, r *httpRelay) *httpRelay {
+	r.signaling = sig
+	r.ctx, r.cancel = context.WithCancel(ctx)
+	r.pending = make(map[offerKey]*pendingOffer)
+	if r.quiet == 0 {
+		r.quiet = offerGatherQuiet
 	}
-	s.clients[conn] = xuid
-}
-
-func (s *relaySet) remove(conn relayClientConn) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.clients, conn)
-}
-
-func (s *relaySet) count() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.clients)
-}
-
-// xuids returns the set of XUIDs currently being relayed.
-func (s *relaySet) xuids() map[string]struct{} {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	xuids := make(map[string]struct{}, len(s.clients))
-	for _, xuid := range s.clients {
-		xuids[xuid] = struct{}{}
+	if r.max == 0 {
+		r.max = offerGatherMax
 	}
-	return xuids
+	r.stop = sig.Notify(r)
+	return r
 }
 
-// staleSessionMembers counts session members that are not being relayed. In
-// transfer mode that is every member; relayed members are live players, not
-// leftovers that block joiners.
-func (b *Broadcaster) staleSessionMembers(members iter.Seq2[string, mpsd.MemberDescription]) int {
-	relayed := b.relays.xuids()
-	count := 0
-	for _, member := range members {
-		if member.Constants != nil && member.Constants.System != nil {
-			if _, ok := relayed[member.Constants.System.XUID]; ok {
-				continue
-			}
+// close stops accepting signals and waits for in-flight relays.
+func (r *httpRelay) close() {
+	r.stop()
+	r.mu.Lock()
+	r.closed = true
+	for key, o := range r.pending {
+		o.cancel()
+		delete(r.pending, key)
+	}
+	r.mu.Unlock()
+	r.cancel()
+	r.wg.Wait()
+}
+
+// NotifySignal implements nethernet.Notifier.
+func (r *httpRelay) NotifySignal(signal *nethernet.Signal) bool {
+	key := offerKey{networkID: signal.NetworkID, connectionID: signal.ConnectionID}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return false
+	}
+	switch signal.Type {
+	case nethernet.SignalTypeOffer:
+		if previous := r.pending[key]; previous != nil {
+			previous.cancel()
 		}
-		count++
-	}
-	return count
-}
-
-// handleClient relays conn when relay mode is configured and transfers it otherwise.
-func (b *Broadcaster) handleClient(conn relayClientConn) {
-	if b.conf.Relay == nil {
-		b.transfer(conn)
-		return
-	}
-	b.relay(conn)
-}
-
-// relay logs conn's player into the backend with their own identity and pumps
-// packets both ways until either side disconnects.
-func (b *Broadcaster) relay(conn relayClientConn) {
-	cfg := b.conf.Relay
-	id := conn.IdentityData()
-	b.relays.add(conn, id.XUID)
-	defer b.relays.remove(conn)
-	defer conn.Close()
-
-	ctx := b.ctx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	dialCtx, cancel := context.WithTimeout(ctx, cfg.dialTimeout())
-	target, err := b.resolveRelayTarget(dialCtx, id, conn.ClientData())
-	if err != nil {
-		cancel()
-		b.log.Error("resolve relay target", "xuid", id.XUID, "name", id.DisplayName, "err", err)
-		b.disconnectRelayClient(conn, "The server is not available right now.")
-		return
-	}
-	server, err := b.dialRelayTarget(dialCtx, conn, target)
-	cancel()
-	if err != nil {
-		b.log.Error("dial relay target", "xuid", id.XUID, "name", id.DisplayName, "target", target, "err", err)
-		b.disconnectRelayClient(conn, "Could not reach the server, try again shortly.")
-		return
-	}
-	defer server.Close()
-
-	if recorder, ok := b.conf.FriendHistory.(HistoryRecorder); ok && id.XUID != "" {
-		if err := recorder.Seen(ctx, id.XUID, time.Now()); err != nil {
-			b.log.Error("record player history", "xuid", id.XUID, "err", err)
+		o := &pendingOffer{key: key, sdp: signal.Data}
+		o.max = time.AfterFunc(r.max, func() { r.flush(o) })
+		o.quiet = time.AfterFunc(r.quiet, func() { r.flush(o) })
+		r.pending[key] = o
+		r.log.Debug("received join offer", "sender", key.networkID, "connection_id", key.connectionID)
+		return true
+	case nethernet.SignalTypeCandidate:
+		o := r.pending[key]
+		if o == nil {
+			r.log.Debug("dropping candidate for a relayed or unknown offer", "sender", key.networkID, "connection_id", key.connectionID)
+			return false
 		}
+		o.candidates = append(o.candidates, signal.Data)
+		o.quiet.Reset(r.quiet)
+		return true
+	case nethernet.SignalTypeError:
+		if o := r.pending[key]; o != nil {
+			o.cancel()
+			delete(r.pending, key)
+		}
+		r.log.Debug("client reported connect error", "sender", key.networkID, "connection_id", key.connectionID, "code", signal.Data)
+		return true
+	default:
+		r.log.Debug("unhandled signal", "sender", key.networkID, "type", signal.Type)
+		return false
 	}
-	b.info("relaying bedrock client", "xuid", id.XUID, "name", id.DisplayName, "target", target)
+}
 
-	errs := make(chan error, 2)
-	go func() { errs <- relayPump(conn, server) }()
-	go func() { errs <- relayPump(server, conn) }()
+// flush relays o once, whichever of its timers fires first.
+func (r *httpRelay) flush(o *pendingOffer) {
+	r.mu.Lock()
+	if r.closed || r.pending[o.key] != o {
+		r.mu.Unlock()
+		return
+	}
+	delete(r.pending, o.key)
+	o.cancel()
+	sdp := completeOfferSDP(o.sdp, o.candidates)
+	r.wg.Add(1)
+	r.mu.Unlock()
+	defer r.wg.Done()
+	r.relay(o, sdp)
+}
+
+func (r *httpRelay) relay(o *pendingOffer, sdp string) {
+	ctx, cancel := context.WithTimeout(r.ctx, relayTimeout)
+	defer cancel()
+	r.log.Debug("relaying join offer", "sender", o.key.networkID, "connection_id", o.key.connectionID, "candidates", len(o.candidates), "target", r.joinURL)
+
+	conf := r.client
+	conf.NetworkID = strconv.FormatUint(o.key.connectionID, 10)
+	client := conf.New()
+	if _, err := client.Status(ctx, r.joinURL); err != nil {
+		r.fail(ctx, o.key, relayErrorServerNotFound, err)
+		return
+	}
+	answers := make(chan string, 1)
+	defer client.Notify(answerNotifier(answers))()
+	err := client.Signal(ctx, &nethernet.Signal{
+		Type:         nethernet.SignalTypeOffer,
+		ConnectionID: o.key.connectionID,
+		Data:         sdp,
+		NetworkID:    r.joinURL,
+	})
+	if err != nil {
+		r.fail(ctx, o.key, relayErrorConnectRequest, err)
+		return
+	}
+	var answer string
 	select {
-	case err := <-errs:
-		if err != nil && !errors.Is(err, net.ErrClosed) {
-			b.debug("relay ended", "xuid", id.XUID, "name", id.DisplayName, "err", err)
-		}
-	case <-ctx.Done():
+	case answer = <-answers:
+	default:
+		r.fail(ctx, o.key, relayErrorConnectRequest, errors.New("join request returned no answer"))
+		return
+	}
+	if err := r.signaling.Signal(ctx, &nethernet.Signal{
+		Type:         nethernet.SignalTypeAnswer,
+		ConnectionID: o.key.connectionID,
+		Data:         answer,
+		NetworkID:    o.key.networkID,
+	}); err != nil {
+		r.log.Error("send join answer", "sender", o.key.networkID, "err", err)
+		return
+	}
+	r.recordJoin(ctx, o)
+}
+
+// fail tells the client why its join failed.
+func (r *httpRelay) fail(ctx context.Context, key offerKey, code int, cause error) {
+	r.log.Error("relay join offer", "sender", key.networkID, "target", r.joinURL, "code", code, "err", cause)
+	if err := r.signaling.Signal(ctx, &nethernet.Signal{
+		Type:         nethernet.SignalTypeError,
+		ConnectionID: key.connectionID,
+		Data:         strconv.Itoa(code),
+		NetworkID:    key.networkID,
+	}); err != nil {
+		r.log.Debug("send connect error", "sender", key.networkID, "err", err)
 	}
 }
 
-func (b *Broadcaster) resolveRelayTarget(ctx context.Context, id login.IdentityData, client login.ClientData) (string, error) {
-	if b.conf.Relay.ResolveTarget == nil {
-		return b.conf.Server.Address(), nil
-	}
-	target, err := b.conf.Relay.ResolveTarget(ctx, id, client)
+// recordJoin marks the offer's verified player as seen.
+func (r *httpRelay) recordJoin(ctx context.Context, o *pendingOffer) {
+	id, err := r.verify(ctx, o.sdp)
 	if err != nil {
-		return "", err
+		r.log.Debug("unable to record join", "sender", o.key.networkID, "err", err)
+		return
 	}
-	if target == "" {
-		return "", errors.New("resolver returned an empty target")
+	r.log.Info("relayed bedrock client", "xuid", id.XUID, "name", id.Gamertag, "target", r.joinURL)
+	if r.history == nil {
+		return
 	}
-	return target, nil
+	if err := r.history.Seen(ctx, id.XUID, time.Now()); err != nil {
+		r.log.Error("record player history", "xuid", id.XUID, "err", err)
+	}
 }
 
-// dialRelayTarget dials target with the client's identity and client data.
-// The backend cannot encrypt to the client's key, so the login chain is
-// self-signed while keeping the XUID the listener already verified.
-func (b *Broadcaster) dialRelayTarget(ctx context.Context, conn relayClientConn, target string) (relayServerConn, error) {
-	cfg := b.conf.Relay
-	d := cfg.Dialer
-	d.IdentityData = conn.IdentityData()
-	d.ClientData = conn.ClientData()
-	d.ClientData.ServerAddress = target
-	if d.IdentityData.XUID != "" {
-		// Backends that trust the relay key player data on the client-supplied
-		// platform id once the XUID is gone from the chain. Binding it to the
-		// verified XUID keeps the record stable and stops a client claiming another
-		// player's data.
-		d.ClientData.PlatformOnlineID = d.IdentityData.XUID
+type answerNotifier chan<- string
+
+func (n answerNotifier) NotifySignal(signal *nethernet.Signal) bool {
+	if signal.Type != nethernet.SignalTypeAnswer {
+		return false
 	}
-	d.KeepXBLIdentityData = true
-	d.Handoff = minecraft.HandoffAfterLogin
-	d.EnableBatchReading = true
-	d.FlushRate = -1 // relayPump flushes once per forwarded batch
-	d.Protocol = conn.Proto()
-	if d.ErrorLog == nil {
-		d.ErrorLog = b.log
+	select {
+	case n <- signal.Data:
+	default:
 	}
-	dial := b.relayDial
-	if dial == nil {
-		dial = defaultRelayDial
+	return true
+}
+
+// completeOfferSDP appends trickled candidates to the offer, since HTTP
+// signaling needs every candidate up front.
+func completeOfferSDP(sdp string, candidates []string) string {
+	var b strings.Builder
+	b.WriteString(strings.TrimRight(sdp, " \t\r\n"))
+	b.WriteString("\r\n")
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if !strings.HasPrefix(candidate, "a=") {
+			b.WriteString("a=")
+		}
+		b.WriteString(candidate)
+		b.WriteString("\r\n")
 	}
-	server, err := dial(ctx, d, cfg.network(), target)
+	return b.String()
+}
+
+// tokenVerifier lazily resolves the verifier for Minecraft multiplayer tokens.
+type tokenVerifier struct {
+	httpClient *http.Client
+
+	mu       sync.Mutex
+	verifier *oidc.IDTokenVerifier
+}
+
+func (v *tokenVerifier) get(ctx context.Context) (*oidc.IDTokenVerifier, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.verifier != nil {
+		return v.verifier, nil
+	}
+	if v.httpClient != nil {
+		ctx = context.WithValue(ctx, oauth2.HTTPClient, v.httpClient)
+	}
+	discovery, err := service.Default(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("discover service endpoints: %w", err)
+	}
+	env := &service.AuthorizationEnvironment{HTTPClient: v.httpClient}
+	if err := discovery.Environment(env); err != nil {
+		return nil, fmt.Errorf("decode authorization environment: %w", err)
+	}
+	verifier, err := env.VerifierContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return server, nil
+	v.verifier = verifier
+	return verifier, nil
 }
 
-func defaultRelayDial(ctx context.Context, d minecraft.Dialer, network, address string) (relayServerConn, error) {
-	conn, err := d.DialContext(ctx, network, address)
+// verifyOfferIdentity checks that the offer's identity token was issued by
+// Minecraft's authorization service and signed the offer's DTLS fingerprints.
+func verifyOfferIdentity(ctx context.Context, sdp string, verifier *oidc.IDTokenVerifier) (offerIdentity, error) {
+	var identityAttr string
+	var fingerprints []string
+	for line := range strings.Lines(sdp) {
+		line = strings.TrimSpace(line)
+		if v, ok := strings.CutPrefix(line, "a=identity:"); ok {
+			identityAttr = v
+		} else if v, ok := strings.CutPrefix(line, "a=fingerprint:"); ok {
+			fingerprints = append(fingerprints, v)
+		}
+	}
+	if identityAttr == "" {
+		return offerIdentity{}, errors.New("offer has no identity")
+	}
+	if len(fingerprints) == 0 {
+		return offerIdentity{}, errors.New("offer has no fingerprints")
+	}
+	raw, err := base64.StdEncoding.DecodeString(identityAttr)
 	if err != nil {
-		return nil, err
+		return offerIdentity{}, fmt.Errorf("decode identity: %w", err)
 	}
-	return conn, nil
+	var identity struct {
+		Assertion string `json:"assertion"` // JSON encoded as a string
+	}
+	var assertion struct {
+		Fingerprints string `json:"fingerprints"`
+		Token        string `json:"token"`
+	}
+	if err := json.Unmarshal(raw, &identity); err != nil {
+		return offerIdentity{}, fmt.Errorf("decode identity: %w", err)
+	}
+	if err := json.Unmarshal([]byte(identity.Assertion), &assertion); err != nil {
+		return offerIdentity{}, fmt.Errorf("decode identity assertion: %w", err)
+	}
+
+	token, err := verifier.Verify(ctx, assertion.Token)
+	if err != nil {
+		return offerIdentity{}, fmt.Errorf("verify token: %w", err)
+	}
+	var claims struct {
+		XUID     string `json:"xid"`
+		Gamertag string `json:"xname"`
+		Key      string `json:"cpk"`
+	}
+	if err := token.Claims(&claims); err != nil {
+		return offerIdentity{}, fmt.Errorf("decode token claims: %w", err)
+	}
+	if claims.XUID == "" {
+		return offerIdentity{}, errors.New("token has no xuid")
+	}
+	var key ecdsa.PublicKey
+	if err := login.ParsePublicKey(claims.Key, &key); err != nil {
+		return offerIdentity{}, fmt.Errorf("parse token key: %w", err)
+	}
+
+	payload, err := canonicalFingerprints(fingerprints)
+	if err != nil {
+		return offerIdentity{}, err
+	}
+	signature, err := jose.ParseDetached(assertion.Fingerprints, payload, []jose.SignatureAlgorithm{jose.ES384})
+	if err != nil {
+		return offerIdentity{}, fmt.Errorf("parse fingerprint signature: %w", err)
+	}
+	if _, err := signature.Verify(&key); err != nil {
+		return offerIdentity{}, fmt.Errorf("verify fingerprint signature: %w", err)
+	}
+	return offerIdentity{XUID: claims.XUID, Gamertag: claims.Gamertag}, nil
 }
 
-func (b *Broadcaster) disconnectRelayClient(conn relayClientConn, message string) {
-	_ = conn.WritePacket(&packet.Disconnect{Message: text.Colourf("<red>%v</red>", message)})
-	_ = conn.Flush()
-}
-
-// relayPump forwards each network batch read from src as one batch to dst, so
-// the relay adds no coalescing latency of its own.
-func relayPump(src, dst relayServerConn) error {
-	for {
-		batch, err := src.ReadBatch()
-		if err != nil {
-			return fmt.Errorf("read batch: %w", err)
+// canonicalFingerprints builds the payload the client signs from its
+// 'a=fingerprint:<algorithm> <digest>' values.
+func canonicalFingerprints(values []string) ([]byte, error) {
+	var b strings.Builder
+	b.WriteString(`{"fingerprint":[`)
+	for i, value := range values {
+		algorithm, digest, ok := strings.Cut(value, " ")
+		if !ok || strings.Contains(digest, " ") {
+			return nil, fmt.Errorf("invalid fingerprint %q", value)
 		}
-		for _, pk := range batch {
-			if err := dst.WritePacket(pk); err != nil {
-				return fmt.Errorf("write packet: %w", err)
-			}
+		if i != 0 {
+			b.WriteByte(',')
 		}
-		if err := dst.Flush(); err != nil {
-			return fmt.Errorf("flush batch: %w", err)
-		}
+		b.WriteString(`{"algorithm":`)
+		b.WriteString(strconv.Quote(algorithm))
+		b.WriteString(`,"digest":`)
+		b.WriteString(strconv.Quote(digest))
+		b.WriteString(`}`)
 	}
+	b.WriteString(`]}`)
+	return []byte(b.String()), nil
 }

@@ -2,399 +2,371 @@ package broadcaster
 
 import (
 	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
-	"iter"
-	"net"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
-	"github.com/df-mc/go-xsapi/v2/mpsd"
-	"github.com/sandertv/gophertunnel/minecraft"
-	"github.com/sandertv/gophertunnel/minecraft/protocol/login"
-	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
-	"github.com/sandertv/gophertunnel/minecraft/room"
-	"golang.org/x/oauth2"
+	"github.com/coreos/go-oidc/v3/oidc"
+	"github.com/df-mc/go-nethernet"
+	"github.com/df-mc/go-nethernet/endpoint"
+	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 )
 
-type relayOAuthTokenSource struct{}
+const testJoinURL = "https://bedrock.test:19132"
 
-func (relayOAuthTokenSource) Token() (*oauth2.Token, error) {
-	return &oauth2.Token{AccessToken: "token"}, nil
+func TestCompleteOfferSDPAppendsTrickledCandidates(t *testing.T) {
+	got := completeOfferSDP("v=0\r\na=fingerprint:sha-256 AA\r\n\r\n", []string{
+		"candidate:1 1 udp 1 10.0.0.1 1 typ host",
+		" a=candidate:2 1 udp 1 10.0.0.2 2 typ host ",
+		"",
+	})
+	want := "v=0\r\na=fingerprint:sha-256 AA\r\n" +
+		"a=candidate:1 1 udp 1 10.0.0.1 1 typ host\r\n" +
+		"a=candidate:2 1 udp 1 10.0.0.2 2 typ host\r\n"
+	if got != want {
+		t.Fatalf("complete SDP =\n%q\nwant\n%q", got, want)
+	}
 }
 
-// fakeRelayConn serves scripted batches and records what the relay writes.
-type fakeRelayConn struct {
+// The offer is relayed 500 ms after the last candidate, carrying every candidate, and the answer goes back to the sender.
+func TestHTTPRelayForwardsAnswerAfterCandidatesSettle(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		target := &fakeJoinEndpoint{answer: "v=0 answer"}
+		history := &syncHistoryStore{}
+		sig, r := startTestRelay(t, target, history, nil)
+
+		sig.signal(nethernet.SignalTypeOffer, "v=0\r\n")
+		time.Sleep(300 * time.Millisecond)
+		sig.signal(nethernet.SignalTypeCandidate, "candidate:1 1 udp 1 10.0.0.1 1 typ host")
+		time.Sleep(499 * time.Millisecond)
+		synctest.Wait()
+		if target.posts() != 0 {
+			t.Fatal("offer relayed before candidates settled")
+		}
+		time.Sleep(time.Millisecond)
+		synctest.Wait()
+
+		post := target.lastPost()
+		if post.path != "/v1/join/42" || post.at != 800*time.Millisecond {
+			t.Fatalf("POST %s at %s, want /v1/join/42 at 800ms", post.path, post.at)
+		}
+		if post.body != "v=0\r\na=candidate:1 1 udp 1 10.0.0.1 1 typ host\r\n" {
+			t.Fatalf("relayed SDP = %q", post.body)
+		}
+		if probe := target.probe(); probe.Get("id") != "42" || probe.Get("version") != "1.26.60" || probe.Get("protocol") != "2225" || probe.Get("platform") != "-1" {
+			t.Fatalf("probe query = %v", probe)
+		}
+		sent := sig.sent()
+		if len(sent) != 1 || sent[0].Type != nethernet.SignalTypeAnswer || sent[0].ConnectionID != 42 || sent[0].NetworkID != "client" || sent[0].Data != "v=0 answer" {
+			t.Fatalf("signals sent = %+v, want the answer for connection 42", sent)
+		}
+		if _, ok := history.lastSeen["2535400000000001"]; !ok {
+			t.Fatal("relayed join was not recorded")
+		}
+		r.close()
+	})
+}
+
+// Candidates that keep arriving cannot hold the offer past 3 s.
+func TestHTTPRelayCapsCandidateGathering(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		target := &fakeJoinEndpoint{answer: "answer"}
+		sig, r := startTestRelay(t, target, nil, nil)
+		defer r.close()
+		sig.signal(nethernet.SignalTypeOffer, "v=0")
+		for range 10 {
+			time.Sleep(400 * time.Millisecond)
+			sig.signal(nethernet.SignalTypeCandidate, "candidate:x")
+		}
+		synctest.Wait()
+		if post := target.lastPost(); post.at != offerGatherMax {
+			t.Fatalf("offer relayed at %s, want %s", post.at, offerGatherMax)
+		}
+		if got := strings.Count(target.lastPost().body, "a=candidate:x"); got != 7 {
+			t.Fatalf("relayed %d candidates, want the 7 received before the cap", got)
+		}
+	})
+}
+
+func TestHTTPRelayMapsFailuresToConnectErrors(t *testing.T) {
+	for name, tc := range map[string]struct {
+		target *fakeJoinEndpoint
+		code   string
+	}{
+		"probe fails":          {&fakeJoinEndpoint{probeStatus: http.StatusServiceUnavailable}, "1"},
+		"join request fails":   {&fakeJoinEndpoint{postStatus: http.StatusInternalServerError}, "6"},
+		"join returns a code":  {&fakeJoinEndpoint{answer: "14"}, "6"},
+		"join returns nothing": {&fakeJoinEndpoint{}, "6"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				history := &syncHistoryStore{}
+				sig, r := startTestRelay(t, tc.target, history, nil)
+				defer r.close()
+				sig.signal(nethernet.SignalTypeOffer, "v=0")
+				time.Sleep(offerGatherQuiet)
+				synctest.Wait()
+				sent := sig.sent()
+				if len(sent) != 1 || sent[0].Type != nethernet.SignalTypeError || sent[0].Data != tc.code || sent[0].ConnectionID != 42 || sent[0].NetworkID != "client" {
+					t.Fatalf("signals sent = %+v, want CONNECTERROR 42 %s", sent, tc.code)
+				}
+				if len(history.lastSeen) != 0 {
+					t.Fatal("failed join was recorded")
+				}
+			})
+		})
+	}
+}
+
+func TestHTTPRelayDropsOfferTheClientAbandons(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		target := &fakeJoinEndpoint{answer: "answer"}
+		sig, r := startTestRelay(t, target, nil, nil)
+		defer r.close()
+		sig.signal(nethernet.SignalTypeOffer, "v=0")
+		sig.signal(nethernet.SignalTypeError, "2")
+		if sig.signal(nethernet.SignalTypeCandidate, "candidate:late") {
+			t.Fatal("candidate for an abandoned offer was accepted")
+		}
+		time.Sleep(offerGatherMax)
+		synctest.Wait()
+		if target.posts() != 0 || len(sig.sent()) != 0 {
+			t.Fatal("abandoned offer was relayed")
+		}
+	})
+}
+
+// A join whose identity cannot be verified is still answered but not recorded.
+func TestHTTPRelaySkipsHistoryForUnverifiedOffer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		history := &syncHistoryStore{}
+		sig, r := startTestRelay(t, &fakeJoinEndpoint{answer: "answer"}, history, errors.New("bad token"))
+		defer r.close()
+		sig.signal(nethernet.SignalTypeOffer, "v=0")
+		time.Sleep(offerGatherQuiet)
+		synctest.Wait()
+		if sent := sig.sent(); len(sent) != 1 || sent[0].Type != nethernet.SignalTypeAnswer {
+			t.Fatalf("signals sent = %+v, want the answer", sent)
+		}
+		if len(history.lastSeen) != 0 {
+			t.Fatal("unverified join was recorded")
+		}
+	})
+}
+
+func TestVerifyOfferIdentityChecksTokenAndFingerprintBinding(t *testing.T) {
+	issuerKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientKey, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier := oidc.NewVerifier("https://authorization.test/", &oidc.StaticKeySet{PublicKeys: []crypto.PublicKey{&issuerKey.PublicKey}},
+		&oidc.Config{ClientID: "api://auth-minecraft-services/multiplayer", SupportedSigningAlgs: []string{"RS256"}})
+	offer := func(signedFingerprint, sdpFingerprint string, tokenKey *rsa.PrivateKey) string {
+		return testOffer(t, tokenKey, clientKey, signedFingerprint, sdpFingerprint)
+	}
+
+	id, err := verifyOfferIdentity(context.Background(), offer("sha-256 AA:BB", "sha-256 AA:BB", issuerKey), verifier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != (offerIdentity{XUID: "2535400000000001", Gamertag: "Player"}) {
+		t.Fatalf("identity = %+v", id)
+	}
+	if _, err := verifyOfferIdentity(context.Background(), offer("sha-256 AA:BB", "sha-256 CC:DD", issuerKey), verifier); err == nil {
+		t.Fatal("accepted an identity signed for other fingerprints")
+	}
+	otherIssuer, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifyOfferIdentity(context.Background(), offer("sha-256 AA:BB", "sha-256 AA:BB", otherIssuer), verifier); err == nil {
+		t.Fatal("accepted a token from another issuer key")
+	}
+	if _, err := verifyOfferIdentity(context.Background(), "v=0\r\na=fingerprint:sha-256 AA:BB\r\n", verifier); err == nil {
+		t.Fatal("accepted an offer without identity")
+	}
+}
+
+// testOffer builds an offer whose identity token is signed by issuer and whose
+// client key signs signedFingerprint, while the SDP carries sdpFingerprint.
+func testOffer(t *testing.T, issuer *rsa.PrivateKey, client *ecdsa.PrivateKey, signedFingerprint, sdpFingerprint string) string {
+	t.Helper()
+	der, err := x509.MarshalPKIXPublicKey(&client.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenSigner, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: issuer}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := jwt.Signed(tokenSigner).Claims(jwt.Claims{
+		Issuer:   "https://authorization.test/",
+		Subject:  "player",
+		Audience: jwt.Audience{"api://auth-minecraft-services/multiplayer"},
+		Expiry:   jwt.NewNumericDate(time.Now().Add(time.Hour)),
+	}).Claims(struct {
+		XUID     string `json:"xid"`
+		Gamertag string `json:"xname"`
+		Key      string `json:"cpk"`
+	}{"2535400000000001", "Player", base64.StdEncoding.EncodeToString(der)}).Serialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := canonicalFingerprints([]string{signedFingerprint})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprintSigner, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES384, Key: client}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature, err := fingerprintSigner.Sign(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detached, err := signature.DetachedCompactSerialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertion, _ := json.Marshal(map[string]string{"fingerprints": detached, "token": token})
+	identity, _ := json.Marshal(map[string]any{
+		"assertion": string(assertion),
+		"idp":       map[string]string{"domain": "https://authorization.test", "protocol": "default"},
+	})
+	return "v=0\r\na=identity:" + base64.StdEncoding.EncodeToString(identity) + "\r\na=fingerprint:" + sdpFingerprint + "\r\n"
+}
+
+// startTestRelay relays offers from connection 42 of "client" to fake target endpoints.
+func startTestRelay(t *testing.T, target *fakeJoinEndpoint, history HistoryRecorder, verifyErr error) (*relaySignaling, *httpRelay) {
+	t.Helper()
+	sig := &relaySignaling{}
+	target.start = time.Now()
+	r := startHTTPRelay(t.Context(), sig, &httpRelay{
+		joinURL: testJoinURL,
+		client: endpoint.ClientConfig{
+			HTTPClient: &http.Client{Transport: target},
+			Logger:     testBroadcasterLogger(),
+			ClientInfo: endpoint.ClientInfo{Version: "1.26.60", Protocol: 2225, Platform: relayClientPlatform},
+		},
+		verify: func(context.Context, string) (offerIdentity, error) {
+			return offerIdentity{XUID: "2535400000000001", Gamertag: "Player"}, verifyErr
+		},
+		history: history,
+		log:     testBroadcasterLogger(),
+	})
+	return sig, r
+}
+
+// relaySignaling is Xbox signaling that records what the relay sends.
+type relaySignaling struct {
+	fakeSignaling
 	mu       sync.Mutex
-	batches  chan []packet.Packet
-	written  []packet.Packet
-	flushes  int
-	closed   chan struct{}
-	identity login.IdentityData
-	client   login.ClientData
+	notifier nethernet.Notifier
+	out      []nethernet.Signal
 }
 
-func newFakeRelayConn(batches ...[]packet.Packet) *fakeRelayConn {
-	c := &fakeRelayConn{batches: make(chan []packet.Packet, len(batches)), closed: make(chan struct{})}
-	for _, batch := range batches {
-		c.batches <- batch
-	}
-	return c
+func (s *relaySignaling) Notify(n nethernet.Notifier) func() {
+	s.mu.Lock()
+	s.notifier = n
+	s.mu.Unlock()
+	return func() {}
 }
 
-func (c *fakeRelayConn) ReadBatch() ([]packet.Packet, error) {
-	select {
-	case batch := <-c.batches:
-		return batch, nil
-	case <-c.closed:
-		return nil, net.ErrClosed
-	}
-}
-
-// SendStartGame allows the fake client to be used by the transfer-mode routing test.
-func (c *fakeRelayConn) SendStartGame(minecraft.GameData) error {
+func (s *relaySignaling) Signal(_ context.Context, signal *nethernet.Signal) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.out = append(s.out, *signal)
 	return nil
 }
 
-func (c *fakeRelayConn) WritePacket(pk packet.Packet) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.written = append(c.written, pk)
-	return nil
+// signal delivers an incoming signal for connection 42 from "client".
+func (s *relaySignaling) signal(typ, data string) bool {
+	s.mu.Lock()
+	n := s.notifier
+	s.mu.Unlock()
+	return n.NotifySignal(&nethernet.Signal{Type: typ, ConnectionID: 42, Data: data, NetworkID: "client"})
 }
 
-func (c *fakeRelayConn) Flush() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.flushes++
-	return nil
+func (s *relaySignaling) sent() []nethernet.Signal {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]nethernet.Signal(nil), s.out...)
 }
 
-func (c *fakeRelayConn) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	select {
-	case <-c.closed:
-	default:
-		close(c.closed)
-	}
-	return nil
+// fakeJoinEndpoint serves the target's /v1/join probe and join requests.
+type fakeJoinEndpoint struct {
+	probeStatus, postStatus int
+	answer                  string
+	start                   time.Time
+
+	mu      sync.Mutex
+	query   url.Values
+	history []joinPost
 }
 
-func (c *fakeRelayConn) ReadPacket() (packet.Packet, error) { return nil, net.ErrClosed }
-func (c *fakeRelayConn) SetReadDeadline(time.Time) error    { return nil }
-func (c *fakeRelayConn) IdentityData() login.IdentityData   { return c.identity }
-func (c *fakeRelayConn) ClientData() login.ClientData       { return c.client }
-func (c *fakeRelayConn) Proto() minecraft.Protocol          { return minecraft.DefaultProtocol }
-func (c *fakeRelayConn) isClosed() bool {
-	select {
-	case <-c.closed:
-		return true
-	default:
-		return false
-	}
-}
-func (c *fakeRelayConn) snapshot() ([]packet.Packet, int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return append([]packet.Packet(nil), c.written...), c.flushes
-}
-func (c *fakeRelayConn) waitClosed(t *testing.T, what string) {
-	t.Helper()
-	select {
-	case <-c.closed:
-	case <-time.After(time.Second):
-		t.Fatalf("%s was not closed", what)
-	}
+type joinPost struct {
+	path, body string
+	at         time.Duration
 }
 
-func relayTestBroadcaster(relay *RelayConfig, dial relayDialFunc) *Broadcaster {
-	return &Broadcaster{
-		log:       testBroadcasterLogger(),
-		conf:      Config{Server: ServerInfo{Host: "backend.example.net", Port: 19133}, Relay: relay},
-		relayDial: dial,
+func (e *fakeJoinEndpoint) RoundTrip(req *http.Request) (*http.Response, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if req.URL.Host != "bedrock.test:19132" {
+		return nil, errors.New("unexpected host " + req.URL.Host)
 	}
+	if req.Method == http.MethodGet {
+		e.query = req.URL.Query()
+		return response(defaultStatus(e.probeStatus), `{"name":"World","level":"Host","players":1,"maxPlayers":10}`), nil
+	}
+	body, _ := io.ReadAll(req.Body)
+	e.history = append(e.history, joinPost{path: req.URL.Path, body: string(body), at: time.Since(e.start)})
+	return response(defaultStatus(e.postStatus), e.answer), nil
 }
 
-func TestRelayPumpForwardsEachBatchWithOneFlush(t *testing.T) {
-	first := []packet.Packet{&packet.Text{Message: "a"}, &packet.Text{Message: "b"}}
-	second := []packet.Packet{&packet.Text{Message: "c"}}
-	src := newFakeRelayConn(first, second)
-	dst := newFakeRelayConn()
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		src.Close()
-	}()
-
-	err := relayPump(src, dst)
-	if !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("pump error = %v, want net.ErrClosed", err)
+func defaultStatus(code int) int {
+	if code == 0 {
+		return http.StatusOK
 	}
-	written, flushes := dst.snapshot()
-	if len(written) != 3 || flushes != 2 {
-		t.Fatalf("forwarded %d packets with %d flushes, want 3 packets and 2 flushes", len(written), flushes)
-	}
+	return code
 }
 
-func TestBroadcasterRelayDialsWithClientIdentityAndForwardsBothWays(t *testing.T) {
-	client := newFakeRelayConn([]packet.Packet{&packet.Text{Message: "from client"}})
-	client.identity = login.IdentityData{XUID: "visitor", DisplayName: "Visitor"}
-	client.client = login.ClientData{GameVersion: "1.26.50", ServerAddress: "nethernet", PlatformOnlineID: "forged", SelfSignedID: "device-uuid"}
-	server := newFakeRelayConn([]packet.Packet{&packet.Text{Message: "from server"}})
-
-	var (
-		gotDialer  minecraft.Dialer
-		gotNetwork string
-		gotAddress string
-	)
-	b := relayTestBroadcaster(&RelayConfig{}, func(_ context.Context, d minecraft.Dialer, network, address string) (relayServerConn, error) {
-		gotDialer, gotNetwork, gotAddress = d, network, address
-		return server, nil
-	})
-
-	done := make(chan struct{})
-	go func() {
-		b.relay(client)
-		close(done)
-	}()
-	// Both legs forwarded their batch; ending the server leg tears the relay down.
-	waitFor(t, func() bool {
-		cw, _ := client.snapshot()
-		sw, _ := server.snapshot()
-		return len(cw) == 1 && len(sw) == 1
-	}, "batches were not forwarded both ways")
-	if b.relays.count() != 1 {
-		t.Fatalf("relayed clients = %d, want 1 while active", b.relays.count())
-	}
-	server.Close()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("relay did not stop after the server closed")
-	}
-	client.waitClosed(t, "client")
-
-	if gotNetwork != "raknet" || gotAddress != "backend.example.net:19133" {
-		t.Fatalf("dialed %s %s, want raknet backend.example.net:19133", gotNetwork, gotAddress)
-	}
-	if gotDialer.IdentityData.XUID != "visitor" || !gotDialer.KeepXBLIdentityData {
-		t.Fatalf("dialer identity %#v keep=%v, want the client's XUID kept", gotDialer.IdentityData, gotDialer.KeepXBLIdentityData)
-	}
-	if gotDialer.ClientData.GameVersion != "1.26.50" || gotDialer.ClientData.ServerAddress != "backend.example.net:19133" {
-		t.Fatalf("dialer client data %#v, want the client's data pointed at the backend", gotDialer.ClientData)
-	}
-	if gotDialer.ClientData.PlatformOnlineID != "visitor" || gotDialer.ClientData.SelfSignedID != "device-uuid" {
-		t.Fatalf("dialer platform ids online=%q self=%q, want the verified XUID and the client's own self-signed id", gotDialer.ClientData.PlatformOnlineID, gotDialer.ClientData.SelfSignedID)
-	}
-	if gotDialer.Handoff != minecraft.HandoffAfterLogin || !gotDialer.EnableBatchReading || gotDialer.FlushRate != -1 {
-		t.Fatalf("dialer passthrough flags = %v/%v/%v, want passthrough batch reading with relay-owned flushing", gotDialer.Handoff, gotDialer.EnableBatchReading, gotDialer.FlushRate)
-	}
-	if gotDialer.Protocol == nil || gotDialer.Protocol.ID() != minecraft.DefaultProtocol.ID() {
-		t.Fatalf("dialer protocol %v, want the client's", gotDialer.Protocol)
-	}
-	if b.relays.count() != 0 {
-		t.Fatalf("relayed clients = %d after the relay ended, want 0", b.relays.count())
-	}
+func (e *fakeJoinEndpoint) posts() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.history)
 }
 
-func TestBroadcasterRelayUsesResolvedTarget(t *testing.T) {
-	client := newFakeRelayConn()
-	client.identity = login.IdentityData{XUID: "visitor"}
-	server := newFakeRelayConn()
-	server.Close()
-
-	var gotAddress string
-	b := relayTestBroadcaster(&RelayConfig{
-		Network: "nethernet",
-		ResolveTarget: func(_ context.Context, id login.IdentityData, _ login.ClientData) (string, error) {
-			return "instance-" + id.XUID + ":19140", nil
-		},
-	}, func(_ context.Context, _ minecraft.Dialer, network, address string) (relayServerConn, error) {
-		if network != "nethernet" {
-			t.Errorf("network = %s, want nethernet", network)
-		}
-		gotAddress = address
-		return server, nil
-	})
-
-	b.relay(client)
-	if gotAddress != "instance-visitor:19140" {
-		t.Fatalf("dialed %q, want the resolved per-client target", gotAddress)
+func (e *fakeJoinEndpoint) lastPost() joinPost {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if len(e.history) == 0 {
+		return joinPost{}
 	}
+	return e.history[len(e.history)-1]
 }
 
-func TestBroadcasterRelayDisconnectsClientWhenTargetResolutionFails(t *testing.T) {
-	client := newFakeRelayConn()
-	dialed := false
-	b := relayTestBroadcaster(&RelayConfig{
-		ResolveTarget: func(context.Context, login.IdentityData, login.ClientData) (string, error) {
-			return "", errors.New("no session")
-		},
-	}, func(context.Context, minecraft.Dialer, string, string) (relayServerConn, error) {
-		dialed = true
-		return nil, nil
-	})
-
-	b.relay(client)
-	if dialed {
-		t.Fatal("backend was dialed without a target")
-	}
-	assertDisconnected(t, client)
-}
-
-func TestBroadcasterRelayDisconnectsClientWhenDialFails(t *testing.T) {
-	client := newFakeRelayConn()
-	b := relayTestBroadcaster(&RelayConfig{}, func(context.Context, minecraft.Dialer, string, string) (relayServerConn, error) {
-		return nil, errors.New("connection refused")
-	})
-
-	b.relay(client)
-	assertDisconnected(t, client)
-	if b.relays.count() != 0 {
-		t.Fatalf("relayed clients = %d after a failed dial, want 0", b.relays.count())
-	}
-}
-
-func assertDisconnected(t *testing.T, client *fakeRelayConn) {
-	t.Helper()
-	written, flushes := client.snapshot()
-	if len(written) != 1 {
-		t.Fatalf("client received %d packets, want one Disconnect", len(written))
-	}
-	if _, ok := written[0].(*packet.Disconnect); !ok {
-		t.Fatalf("client received %T, want Disconnect", written[0])
-	}
-	if flushes == 0 || !client.isClosed() {
-		t.Fatalf("disconnect flushed=%d closed=%v, want flushed and closed", flushes, client.isClosed())
-	}
-}
-
-func TestHandleClientTransfersWithoutRelayConfig(t *testing.T) {
-	client := newFakeRelayConn()
-	b := relayTestBroadcaster(nil, func(context.Context, minecraft.Dialer, string, string) (relayServerConn, error) {
-		t.Fatal("backend dialed in transfer mode")
-		return nil, nil
-	})
-	b.transferCloseTimeout = -1
-
-	b.handleClient(client)
-	written, _ := client.snapshot()
-	var transferred bool
-	for _, pk := range written {
-		if _, ok := pk.(*packet.Transfer); ok {
-			transferred = true
-		}
-	}
-	if !transferred {
-		t.Fatalf("client was not transferred: %#v", written)
-	}
-}
-
-func TestStaleSessionMembersIgnoresRelayedPlayers(t *testing.T) {
-	b := relayTestBroadcaster(&RelayConfig{}, nil)
-	live := newFakeRelayConn()
-	b.relays.add(live, "relayed")
-
-	members := func(yield func(string, mpsd.MemberDescription) bool) {
-		for _, xuid := range []string{"relayed", "stale", "host"} {
-			if !yield(xuid, mpsd.MemberDescription{Constants: &mpsd.MemberConstants{System: &mpsd.MemberConstantsSystem{XUID: xuid}}}) {
-				return
-			}
-		}
-		yield("anonymous", mpsd.MemberDescription{})
-	}
-	if got := b.staleSessionMembers(iter.Seq2[string, mpsd.MemberDescription](members)); got != 3 {
-		t.Fatalf("stale members = %d, want 3 (everyone but the relayed player)", got)
-	}
-	b.relays.remove(live)
-	if got := b.staleSessionMembers(iter.Seq2[string, mpsd.MemberDescription](members)); got != 4 {
-		t.Fatalf("stale members = %d after the relay ended, want 4", got)
-	}
-}
-
-func TestMinecraftListenConfigRelayModeUsesPassthroughBatches(t *testing.T) {
-	b := relayTestBroadcaster(&RelayConfig{}, nil)
-	conf := b.minecraftListenConfig(room.Status{})
-	if conf.Handoff != minecraft.HandoffAfterLogin || !conf.EnableBatchReading || conf.FlushRate != -1 {
-		t.Fatalf("relay listen config = handoff %v, batches %v, flush %v; want passthrough batch reading with relay-owned flushing", conf.Handoff, conf.EnableBatchReading, conf.FlushRate)
-	}
-	if !conf.AllowUnknownPackets || !conf.AllowInvalidPackets {
-		t.Fatal("relay listen config must pass unknown and invalid packets through")
-	}
-	if conf.CompressionThreshold == -1 {
-		t.Fatal("relay listen config should keep compression for gameplay traffic")
-	}
-
-	b.conf.Relay = nil
-	conf = b.minecraftListenConfig(room.Status{})
-	if conf.Handoff != minecraft.HandoffNone || conf.EnableBatchReading || conf.CompressionThreshold != -1 {
-		t.Fatalf("transfer listen config changed: %#v", conf)
-	}
-}
-
-func TestStatusReportsRelayedPlayersWhenNotQuerying(t *testing.T) {
-	b, err := New(Config{
-		XBLTokenSource: staticTokenSource{},
-		XUID:           "123",
-		Server:         ServerInfo{Host: "127.0.0.1", Port: 19132},
-		Relay:          &RelayConfig{},
-		Status:         Status{Players: 1, MaxPlayers: 20},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i := range 3 {
-		b.relays.add(newFakeRelayConn(), string(rune('a'+i)))
-	}
-	status, err := b.status(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if status.MemberCount != 3 {
-		t.Fatalf("member count = %d, want the 3 relayed players", status.MemberCount)
-	}
-}
-
-func TestNewRejectsAuthenticatingRelayDialer(t *testing.T) {
-	_, err := New(Config{
-		XBLTokenSource: staticTokenSource{},
-		XUID:           "123",
-		Server:         ServerInfo{Host: "127.0.0.1", Port: 19132},
-		Relay:          &RelayConfig{Dialer: minecraft.Dialer{TokenSource: relayOAuthTokenSource{}}},
-	})
-	if err == nil {
-		t.Fatal("expected an error for a relay dialer that authenticates as the bot")
-	}
-}
-
-func TestConfigFileMapsRelay(t *testing.T) {
-	cfg := DefaultConfigFile()
-	runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{XBLTokenSource: staticTokenSource{}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runtime.Relay != nil {
-		t.Fatal("relay mode enabled by default")
-	}
-
-	cfg.Relay.Enabled = true
-	runtime, err = cfg.RuntimeConfig(RuntimeConfigInput{XBLTokenSource: staticTokenSource{}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runtime.Relay == nil {
-		t.Fatal("relay.enabled was not mapped")
-	}
-}
-
-func waitFor(t *testing.T, cond func() bool, msg string) {
-	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatal(msg)
+func (e *fakeJoinEndpoint) probe() url.Values {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.query
 }

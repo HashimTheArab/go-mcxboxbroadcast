@@ -99,9 +99,9 @@ func TestBroadcasterUpdateRefreshesSubAccountSession(t *testing.T) {
 		}},
 		started: true,
 		conf: Config{
-			Server: ServerInfo{Host: "play.example.net", Port: 19132},
-			XUID:   "primary",
-			Status: Status{HostName: "Host", WorldName: "World"},
+			JoinURL: "http://127.0.0.1:19132",
+			XUID:    "primary",
+			Status:  Status{HostName: "Host", WorldName: "World"},
 		},
 	}
 
@@ -140,7 +140,7 @@ func TestBroadcasterUpdateReplacesFailedSubAccountSession(t *testing.T) {
 		subAnnouncersByID: map[string]room.Announcer{"sub1": stale},
 		started:           true,
 		conf: Config{
-			Server:     ServerInfo{Host: "play.example.net", Port: 19132},
+			JoinURL:    "http://127.0.0.1:19132",
 			XUID:       "primary",
 			Status:     Status{HostName: "Host", WorldName: "World"},
 			HTTPClient: client,
@@ -200,9 +200,9 @@ func TestBroadcasterSubAccountRecoveryFailureDoesNotCountAsPrimaryFailure(t *tes
 		subAnnouncersByID: map[string]room.Announcer{"sub1": stale},
 		started:           true,
 		conf: Config{
-			Server: ServerInfo{Host: "play.example.net", Port: 19132},
-			XUID:   "primary",
-			Status: Status{HostName: "Host", WorldName: "World"},
+			JoinURL: "http://127.0.0.1:19132",
+			XUID:    "primary",
+			Status:  Status{HostName: "Host", WorldName: "World"},
 			SubAccounts: []SubAccountConfig{{
 				ID:        "sub1",
 				Enabled:   true,

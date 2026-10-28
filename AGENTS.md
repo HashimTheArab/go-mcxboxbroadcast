@@ -9,13 +9,14 @@ Treat `go.mod` as the source of truth for versions and replacements.
 
 - `go-xsapi/v2` owns Xbox Live MPSD/RTA sessions, social APIs, and presence.
   It currently uses the upstream module directly.
-- `go-nethernet` owns NetherNet/WebRTC transport. It uses the upstream module,
-  which contains the networking changes previously maintained in Lunar's fork.
-- `gophertunnel` owns Bedrock protocol handling, signaling, room announcements,
-  and session metadata. It currently uses the `HashimTheArab/gophertunnel` fork.
-  Before removing the replacement, verify that upstream supports the Xbox
-  friend-list NetherNet behavior used here.
-- `go-raknet` uses the `HashimTheArab/go-raknet` fork for RakNet ping compatibility.
+- `go-nethernet` owns the NetherNet HTTP signaling client (`endpoint`) that
+  relays join offers. Use it rather than hand-rolling `/v1/join` requests.
+- `gophertunnel` owns Xbox signaling, room announcements, session metadata, and
+  multiplayer token verification. It currently uses the
+  `HashimTheArab/gophertunnel` fork. Before removing the replacement, verify that
+  upstream supports the Xbox friend-list NetherNet behavior used here.
+- `go-raknet` is only an indirect dependency; its replacement matches the one
+  gophertunnel's fork builds against.
 
 ## Session lifecycle
 
@@ -44,6 +45,22 @@ without contacting Xbox. Preserve these checks when changing recovery:
 - Do not close and reuse an injected `Config.Signaling` connection during
   recovery. `SignalingFactory` allows recreation. When static signaling prevents
   primary activity recovery, report the failure and preserve the cooldown.
+
+## Joins and session rotation
+
+`relay.go` never accepts the game connection. It gathers trickled candidates
+(500 ms quiet, 3 s cap), probes `GET /v1/join`, posts the merged offer, and
+returns the answer or a connect error (1 for a failed probe, 6 for a failed
+join). Player history is only recorded after the offer's identity token and
+fingerprint signature verify.
+
+Players stay session members while they play. Every member counts toward the
+30-member cap, so a session rotates at 28 members: the new session reuses the
+signaling connection and the old one is kept, then hidden after 30 seconds when
+`HideOldSessions` is set. A failed primary rotation falls back to full recovery.
+These thresholds mirror MCXboxBroadcast; keep them in sync with it.
+
+Friend sync manages friends only. Do not reintroduce follower handling.
 
 ## Session metadata and signaling
 

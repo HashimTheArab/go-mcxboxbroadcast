@@ -1,19 +1,14 @@
 package broadcaster
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
-	"net"
-	"runtime/pprof"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/sandertv/gophertunnel/minecraft"
 
 	"github.com/sandertv/gophertunnel/minecraft/p2p"
-	"github.com/sandertv/gophertunnel/minecraft/protocol"
 	"github.com/sandertv/gophertunnel/minecraft/room"
 )
 
@@ -21,7 +16,7 @@ func TestStatusDefaults(t *testing.T) {
 	b, err := New(Config{
 		XBLTokenSource: staticTokenSource{},
 		XUID:           "123",
-		Server:         ServerInfo{Host: "127.0.0.1", Port: 19132},
+		JoinURL:        "http://127.0.0.1:19132",
 		Status: Status{
 			HostName:   "§aHost",
 			WorldName:  "",
@@ -59,78 +54,12 @@ func TestStatusDefaults(t *testing.T) {
 	}
 }
 
-// Every advertised protocol/version pair must be one the broadcaster's own listener accepts.
-func TestStatusAdvertisesPairListenerAccepts(t *testing.T) {
-	legacy := room.Status{HostName: "Host", Protocol: 2168, Version: "1.26.44"}
-	for name, conf := range map[string]Config{
-		"configured":      {Status: Status{HostName: "Host"}},
-		"status provider": {StatusProvider: room.NewStatusProvider(legacy)},
-	} {
-		t.Run(name, func(t *testing.T) {
-			conf.XBLTokenSource = staticTokenSource{}
-			conf.XUID = "123"
-			conf.Server = ServerInfo{Host: "127.0.0.1", Port: 19132}
-			conf.ListenConfig = minecraft.ListenConfig{AuthenticationDisabled: true}
-			b, err := New(conf)
-			if err != nil {
-				t.Fatal(err)
-			}
-			status, err := b.status(context.Background())
-			if err != nil {
-				t.Fatal(err)
-			}
-			if status.Protocol != protocol.CurrentProtocol || status.Version != protocol.CurrentVersion {
-				t.Fatalf("advertised %s/%d, want %s/%d", status.Version, status.Protocol, protocol.CurrentVersion, protocol.CurrentProtocol)
-			}
-			l, err := b.minecraftListenConfig(status).Listen("raknet", "127.0.0.1:0")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer l.Close()
-			dialer := minecraft.Dialer{Protocol: minecraft.BasicProtocol{Protocol: status.Protocol, Version: status.Version}}
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			go func() {
-				conn, err := l.Accept()
-				if err != nil {
-					return
-				}
-				_ = conn.(*minecraft.Conn).StartGame(minecraft.GameData{})
-			}()
-			conn, err := dialer.DialContext(ctx, "raknet", l.Addr().String())
-			if err != nil {
-				t.Fatalf("listener rejects the advertised pair: %v", err)
-			}
-			_ = conn.Close()
-		})
-	}
-}
-
-func TestStatusDefaultsToMinecraft12650(t *testing.T) {
-	b, err := New(Config{
-		XBLTokenSource: staticTokenSource{},
-		XUID:           "123",
-		Server:         ServerInfo{Host: "127.0.0.1", Port: 19132},
-		Status:         Status{HostName: "Host"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	status, err := b.status(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if status.Protocol != 2193 || status.Version != "1.26.50" {
-		t.Fatalf("advertised protocol/version = %d/%q, want 2193/%q", status.Protocol, status.Version, "1.26.50")
-	}
-}
-
 func TestStatusLevelIDUniquePerAccount(t *testing.T) {
 	levelID := func(xuid string) string {
 		b, err := New(Config{
 			XBLTokenSource: staticTokenSource{},
 			XUID:           xuid,
-			Server:         ServerInfo{Host: "127.0.0.1", Port: 19132},
+			JoinURL:        "http://127.0.0.1:19132",
 			Status:         Status{HostName: "Host"},
 		})
 		if err != nil {
@@ -177,7 +106,7 @@ func TestStatusKeepsLastQueryResultWhenQueryFails(t *testing.T) {
 		XBLTokenSource: staticTokenSource{},
 		XUID:           "123",
 		// Port 1 on localhost is closed, so the query fails quickly.
-		Server: ServerInfo{Host: "127.0.0.1", Port: 1},
+		JoinURL: "http://127.0.0.1:1",
 		Status: Status{
 			HostName:     "Config Host",
 			WorldName:    "Config World",
@@ -210,7 +139,7 @@ func TestStatusResetsToConfigWhenQueryFailsWithConfigFallback(t *testing.T) {
 	b, err := New(Config{
 		XBLTokenSource: staticTokenSource{},
 		XUID:           "123",
-		Server:         ServerInfo{Host: "127.0.0.1", Port: 1},
+		JoinURL:        "http://127.0.0.1:1",
 		Status: Status{
 			HostName:      "Config Host",
 			WorldName:     "Config World",
@@ -232,26 +161,34 @@ func TestStatusResetsToConfigWhenQueryFailsWithConfigFallback(t *testing.T) {
 	}
 }
 
-// A timed-out status query must not leave its RakNet ping running.
-func TestQueryStatusStopsPingOnTimeout(t *testing.T) {
-	silent, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer silent.Close()
-	if _, err := queryStatus(context.Background(), silent.LocalAddr().String(), 20*time.Millisecond); err == nil {
-		t.Fatal("expected a timeout from a server that never answers")
-	}
-	deadline := time.Now().Add(time.Second)
-	for {
-		var dump bytes.Buffer
-		_ = pprof.Lookup("goroutine").WriteTo(&dump, 2)
-		if !strings.Contains(dump.String(), "go-raknet.Dialer.Ping") {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("ping still running after queryStatus returned:\n%s", dump.String())
-		}
-		time.Sleep(10 * time.Millisecond)
+// A session advertises exactly one pair: the configured override, else 1.26.60/2225, never a provider's.
+func TestStatusAdvertisesOnePair(t *testing.T) {
+	provider := room.NewStatusProvider(room.Status{HostName: "Host", Protocol: 2168, Version: "1.26.44"})
+	for name, tc := range map[string]struct {
+		conf     Config
+		version  string
+		protocol int32
+	}{
+		"default":           {Config{Status: Status{HostName: "Host"}}, "1.26.60", 2225},
+		"provider":          {Config{StatusProvider: provider}, "1.26.60", 2225},
+		"override":          {Config{Status: Status{HostName: "Host", Version: "1.26.50", Protocol: 2193}}, "1.26.50", 2193},
+		"provider override": {Config{StatusProvider: provider, Status: Status{Version: "1.26.50", Protocol: 2193}}, "1.26.50", 2193},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tc.conf.XBLTokenSource = staticTokenSource{}
+			tc.conf.XUID = "123"
+			tc.conf.JoinURL = "http://127.0.0.1:19132"
+			b, err := New(tc.conf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			status, err := b.status(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status.Version != tc.version || status.Protocol != tc.protocol {
+				t.Fatalf("advertised %s/%d, want %s/%d", status.Version, status.Protocol, tc.version, tc.protocol)
+			}
+		})
 	}
 }

@@ -5,14 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/df-mc/go-nethernet"
 	"github.com/df-mc/go-xsapi/v2"
 	"github.com/df-mc/go-xsapi/v2/mpsd"
-	"github.com/sandertv/gophertunnel/minecraft"
 	"github.com/sandertv/gophertunnel/minecraft/room"
 	"github.com/sandertv/gophertunnel/minecraft/service"
 )
@@ -31,11 +30,10 @@ type Config struct {
 	// signaling and gallery/profile image requests.
 	MinecraftTokenSource service.TokenSource
 
-	// Server is the target Bedrock server clients are transferred or relayed to.
-	Server ServerInfo
-	// Relay keeps joined clients inside the NetherNet session and relays them
-	// to the backend instead of transferring them. Nil transfers.
-	Relay *RelayConfig
+	// JoinURL is the base URL of the target server's NetherNet HTTP signaling,
+	// such as https://play.example.net:19132. Join offers are relayed to its
+	// /v1/join endpoint and status queries are sent to it.
+	JoinURL string
 
 	// SessionName is the MPSD session name. If empty, a random UUID is used.
 	SessionName string
@@ -51,15 +49,15 @@ type Config struct {
 	// SuppressSessionUpdateMessage suppresses operator-facing session update
 	// notifications.
 	SuppressSessionUpdateMessage bool
-	// FriendSync controls optional follower/friend synchronization.
+	// FriendSync controls optional friend synchronization.
 	FriendSync *FriendSyncConfig
 	// FriendHistory records player activity for friend expiry.
 	FriendHistory HistoryStore
 	// SubAccounts contains additional accounts that publish independently owned
-	// MPSD sessions for the same NetherNet listener.
+	// MPSD sessions advertising the same signaling connection.
 	SubAccounts []SubAccountConfig
 
-	// Signaling is the NetherNet signaling connection used to accept clients.
+	// Signaling is the Xbox signaling connection that receives join offers.
 	// If nil, SignalingFactory is called.
 	Signaling nethernet.Signaling
 	// SignalingFactory creates the NetherNet signaling connection.
@@ -68,20 +66,15 @@ type Config struct {
 	// WebSocket signaling.
 	SignalingMode SignalingMode
 
-	// ListenConfig customizes the gophertunnel listener.
-	ListenConfig minecraft.ListenConfig
-	// NetherNetListenConfig customizes WebRTC/NetherNet listener negotiation.
-	NetherNetListenConfig nethernet.ListenConfig
 	// PublishConfig customizes MPSD publication.
 	PublishConfig mpsd.PublishConfig
+	// HideOldSessions makes rotated-out sessions invite-only once their grace
+	// period ends, so their members stop advertising the world to friends.
+	HideOldSessions bool
 
 	// UpdateInterval controls the background session refresh interval. Values
 	// lower than 20 seconds are raised to 20 seconds to avoid Xbox rate limits.
 	UpdateInterval time.Duration
-	// TransferCloseTimeout bounds how long transferred clients are held open
-	// waiting for their disconnect. Zero uses a 15-second default; negative
-	// values disable the wait.
-	TransferCloseTimeout time.Duration
 	// HTTPClient is used by auth/signaling/session requests where supported.
 	HTTPClient *http.Client
 	// SignalingDialTimeout bounds default signaling startup. If zero, a
@@ -105,21 +98,18 @@ const (
 	SignalingModeJSONRPC SignalingMode = "jsonrpc"
 )
 
-type ServerInfo struct {
-	Host string
-	Port uint16
-}
-
-func (s ServerInfo) Address() string {
-	return net.JoinHostPort(s.Host, fmt.Sprint(s.Port))
-}
-
-func (s ServerInfo) validate() error {
-	if s.Host == "" {
-		return errors.New("server host is required")
+// validateJoinURL accepts the base URLs the endpoint client can dial: http or
+// https with an explicit port and no path.
+func validateJoinURL(raw string) error {
+	if raw == "" {
+		return errors.New("join URL is required")
 	}
-	if s.Port == 0 {
-		return errors.New("server port is required")
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("parse join URL: %w", err)
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.Port() == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" {
+		return fmt.Errorf("join URL %q must be http(s)://host:port", raw)
 	}
 	return nil
 }
@@ -138,6 +128,17 @@ type Status struct {
 	WebQueryFallback bool
 	QueryFallback    bool
 	WebQueryClient   *http.Client
+	// Version and Protocol override the advertised pair together; zero values
+	// advertise the protocol library's current pair.
+	Version  string
+	Protocol int32
+}
+
+func (s Status) validate() error {
+	if (s.Version == "") != (s.Protocol == 0) {
+		return errors.New("advertised version and protocol must be set together")
+	}
+	return nil
 }
 
 type BroadcastSetting int32
@@ -168,12 +169,12 @@ type Notifier interface {
 
 type FriendSyncConfig struct {
 	UpdateInterval time.Duration
-	AutoFollow     bool
-	AutoUnfollow   bool
-	InitialInvite  bool
-	ExpiryEnabled  bool
-	ExpiryDays     int
-	ExpiryCheck    time.Duration
+	// AutoFriend accepts incoming friend requests.
+	AutoFriend    bool
+	InitialInvite bool
+	ExpiryEnabled bool
+	ExpiryDays    int
+	ExpiryCheck   time.Duration
 }
 
 type SubAccountConfig struct {

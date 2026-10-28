@@ -19,10 +19,10 @@ type socialSubscriber interface {
 
 // reactiveFriendSyncApplicable reports whether an account with the given friend
 // sync configuration benefits from a reactive social subscription. Only
-// auto-follow and auto-unfollow act on social changes, so a subscription is
-// pointless without at least one of them.
+// accepting friend requests acts on social changes, so a subscription is
+// pointless without it.
 func reactiveFriendSyncApplicable(conf *FriendSyncConfig) bool {
-	return conf != nil && (conf.AutoFollow || conf.AutoUnfollow)
+	return conf != nil && conf.AutoFriend
 }
 
 // startSocialSubscription subscribes to the account's RTA social feed so friend

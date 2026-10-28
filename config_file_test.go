@@ -61,7 +61,7 @@ func TestExampleConfigLoads(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "config.yml")
-	data = bytes.Replace(data, []byte("ip: "+exampleServerHost), []byte("ip: bedrock.test"), 1)
+	data = bytes.Replace(data, []byte("//"+exampleServerHost), []byte("//bedrock.test"), 1)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,10 @@ accounts:
 	if cfg.Session.SessionInfo.HostName != "Example Host" || cfg.Session.SessionInfo.MaxPlayers != 32 {
 		t.Fatalf("canonical sessionInfo keys were not loaded: %#v", cfg.Session.SessionInfo)
 	}
-	if cfg.FriendSync.UpdateInterval != 75 || cfg.FriendSync.AutoFollow || !cfg.FriendSync.AutoUnfollow || cfg.FriendSync.InitialInvite {
+	if cfg.Session.JoinURL != "https://ignored.example.net:19134" {
+		t.Fatalf("sessionInfo target was not moved to joinUrl: %q", cfg.Session.JoinURL)
+	}
+	if cfg.FriendSync.UpdateInterval != 75 || cfg.FriendSync.AutoFriend || cfg.FriendSync.InitialInvite {
 		t.Fatalf("canonical friendSync keys were not loaded: %#v", cfg.FriendSync)
 	}
 	if cfg.FriendSync.Expiry.HistoryPath != "cache/upstream_history.json" || cfg.FriendSync.Expiry.Enabled {
@@ -194,9 +197,9 @@ func TestLoadConfigFileRejectsUnknownKeys(t *testing.T) {
 	for name, tc := range map[string]struct {
 		file, data, key string
 	}{
-		"yaml typo":       {"config.yml", "configVersion: 4\nsession:\n  sesionInfo:\n    ip: bedrock.test\n", "sesionInfo"},
+		"yaml typo":       {"config.yml", "configVersion: 5\nsession:\n  sesionInfo:\n    hostName: bedrock\n", "sesionInfo"},
 		"yaml legacy key": {"config.yml", "config-version: 1\nslack-webhook: https://example.net/hook\n", "config-version"},
-		"toml typo":       {"config.toml", "configVersion = 4\n[session.sesionInfo]\nip = \"bedrock.test\"\n", "session.sesionInfo"},
+		"toml typo":       {"config.toml", "configVersion = 5\n[session.sesionInfo]\nhostName = \"bedrock\"\n", "session.sesionInfo"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), tc.file)
@@ -226,8 +229,8 @@ func TestLoadConfigFileMigratesAdvertisedVersionOverride(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if cfg.ConfigVersion != CurrentConfigVersion || cfg.Session.SessionInfo.IP != "bedrock.test" {
-				t.Fatalf("migrated config = version %d ip %q", cfg.ConfigVersion, cfg.Session.SessionInfo.IP)
+			if cfg.ConfigVersion != CurrentConfigVersion || cfg.Session.JoinURL != "https://bedrock.test:19132" {
+				t.Fatalf("migrated config = version %d join URL %q", cfg.ConfigVersion, cfg.Session.JoinURL)
 			}
 			if !slices.ContainsFunc(cfg.Notes, func(n string) bool { return strings.Contains(n, "sessionInfo.protocol") }) {
 				t.Fatalf("notes = %v, want the removed override reported", cfg.Notes)
@@ -263,8 +266,9 @@ func TestConfigMigrationsCoverEveryVersion(t *testing.T) {
 func TestConfigFileToConfigMapsOperatorSettings(t *testing.T) {
 	cfg := DefaultConfigFile()
 	cfg.Session.UpdateInterval = 45
-	cfg.Session.SessionInfo.IP = "bedrock.example.net"
-	cfg.Session.SessionInfo.Port = 19133
+	cfg.Session.JoinURL = "https://bedrock.example.net:19133"
+	cfg.Session.SessionInfo.Version = "1.26.50"
+	cfg.Session.SessionInfo.Protocol = 2193
 	cfg.Session.SessionInfo.HostName = "Host"
 	cfg.Session.SessionInfo.WorldName = "World"
 	cfg.Session.BroadcastSetting = int32(BroadcastSettingFriendsOnly)
@@ -279,8 +283,11 @@ func TestConfigFileToConfigMapsOperatorSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime.Server.Host != "bedrock.example.net" || runtime.Server.Port != 19133 {
-		t.Fatalf("unexpected server %#v", runtime.Server)
+	if runtime.JoinURL != "https://bedrock.example.net:19133" || !runtime.HideOldSessions {
+		t.Fatalf("unexpected target %q hide=%v", runtime.JoinURL, runtime.HideOldSessions)
+	}
+	if runtime.Status.Version != "1.26.50" || runtime.Status.Protocol != 2193 {
+		t.Fatalf("advertised pair = %s/%d, want 1.26.50/2193", runtime.Status.Version, runtime.Status.Protocol)
 	}
 	if runtime.UpdateInterval != 45*time.Second {
 		t.Fatalf("unexpected runtime interval %s", runtime.UpdateInterval)
@@ -314,61 +321,9 @@ func TestConfigFileMapsSuppressSessionUpdateMessage(t *testing.T) {
 	}
 }
 
-func TestRuntimeConfigMapsICEUDPPortRange(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.yml")
-	if err := os.WriteFile(path, []byte(`
-session:
-  sessionInfo:
-    ip: bedrock.test
-  icePortRange:
-    min: 40000
-    max: 40010
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := LoadConfigFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{XBLTokenSource: staticTokenSource{}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runtime.NetherNetListenConfig.API == nil {
-		t.Fatal("configured ICE UDP port range did not create a WebRTC API")
-	}
-}
-
-func TestRuntimeConfigRejectsInvalidICEUDPPortRange(t *testing.T) {
-	tests := map[string]string{
-		"missing maximum": "min: 40000\n    max: 0",
-		"missing minimum": "min: 0\n    max: 40010",
-		"reversed":        "min: 40010\n    max: 40000",
-		"negative":        "min: -1\n    max: 40000",
-		"too large":       "min: 40000\n    max: 65536",
-	}
-	for name, ports := range tests {
-		t.Run(name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "config.yml")
-			data := "session:\n  sessionInfo:\n    ip: bedrock.test\n  icePortRange:\n    " + ports + "\n"
-			if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			cfg, err := LoadConfigFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := cfg.RuntimeConfig(RuntimeConfigInput{XBLTokenSource: staticTokenSource{}}); err == nil {
-				t.Fatal("expected invalid ICE UDP port range error")
-			}
-		})
-	}
-}
-
 func TestConfigFileDisablesFriendSyncWhenNoActionsConfigured(t *testing.T) {
 	cfg := DefaultConfigFile()
-	cfg.FriendSync.AutoFollow = false
-	cfg.FriendSync.AutoUnfollow = false
+	cfg.FriendSync.AutoFriend = false
 	cfg.FriendSync.Expiry.Enabled = false
 
 	runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{
@@ -446,5 +401,46 @@ ip = "bedrock.test"
 	}
 	if cfg.FriendSync.Expiry.HistoryPath != "cache/player_history.json" {
 		t.Fatalf("expected default history path, got %q", cfg.FriendSync.Expiry.HistoryPath)
+	}
+}
+
+// A v4 config moves its target to joinUrl and loses the listener, relay and follower settings.
+func TestLoadConfigFileMigratesToHTTPSignalingRelay(t *testing.T) {
+	for _, tc := range []struct{ file, data string }{
+		{"config.yml", "configVersion: 4\nsession:\n  icePortRange:\n    min: 40000\n    max: 40010\n  sessionInfo:\n    ip: bedrock.test\n    port: 19133\nfriendSync:\n  autoFollow: false\n  autoUnfollow: true\nrelay:\n  enabled: true\n"},
+		{"config.toml", "configVersion = 4\n[session.icePortRange]\nmin = 40000\nmax = 40010\n[session.sessionInfo]\nip = \"bedrock.test\"\nport = 19133\n[friendSync]\nautoFollow = false\nautoUnfollow = true\n[relay]\nenabled = true\n"},
+	} {
+		t.Run(tc.file, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), tc.file)
+			if err := os.WriteFile(path, []byte(tc.data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadConfigFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Session.JoinURL != "https://bedrock.test:19133" || cfg.FriendSync.AutoFriend || !cfg.Session.HideOldSessions {
+				t.Fatalf("migrated config = join %q autoFriend %v hide %v", cfg.Session.JoinURL, cfg.FriendSync.AutoFriend, cfg.Session.HideOldSessions)
+			}
+			if len(cfg.Notes) != 5 {
+				t.Fatalf("notes = %q, want one per migrated key", cfg.Notes)
+			}
+			if _, err := LoadConfigFile(path); err != nil {
+				t.Fatalf("migrated file does not reload: %v", err)
+			}
+		})
+	}
+}
+
+func TestRuntimeConfigRejectsHalfAdvertisedPair(t *testing.T) {
+	cfg := DefaultConfigFile()
+	cfg.Session.JoinURL = "https://bedrock.test:19132"
+	cfg.Session.SessionInfo.Version = "1.26.50"
+	runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{XBLTokenSource: staticTokenSource{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(runtime); err == nil {
+		t.Fatal("New accepted a version without a protocol")
 	}
 }
