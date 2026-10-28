@@ -24,9 +24,10 @@ import (
 )
 
 const (
-	offerGatherQuiet = 500 * time.Millisecond // wait after the last trickled candidate
-	offerGatherMax   = 3 * time.Second        // longest wait for candidates
-	relayTimeout     = 15 * time.Second       // bounds the probe, join request and answer
+	offerGatherQuiet  = 500 * time.Millisecond // wait after the last trickled candidate
+	offerGatherMax    = 3 * time.Second        // longest wait for candidates
+	relayTimeout      = 15 * time.Second       // bounds the probe and join request
+	relayReplyTimeout = 5 * time.Second        // bounds sending the answer or error, after relayTimeout
 	// relayClientPlatform is the platform the relay reports on probes, as the Java relay does.
 	relayClientPlatform = -1
 )
@@ -178,7 +179,7 @@ func (r *httpRelay) relay(o *pendingOffer, sdp string) {
 	conf.NetworkID = strconv.FormatUint(o.key.connectionID, 10)
 	client := conf.New()
 	if _, err := client.Status(ctx, r.joinURL); err != nil {
-		r.fail(ctx, o.key, relayErrorServerNotFound, err)
+		r.fail(o.key, relayErrorServerNotFound, err)
 		return
 	}
 	answers := make(chan string, 1)
@@ -190,17 +191,17 @@ func (r *httpRelay) relay(o *pendingOffer, sdp string) {
 		NetworkID:    r.joinURL,
 	})
 	if err != nil {
-		r.fail(ctx, o.key, relayErrorConnectRequest, err)
+		r.fail(o.key, relayErrorConnectRequest, err)
 		return
 	}
 	var answer string
 	select {
 	case answer = <-answers:
 	default:
-		r.fail(ctx, o.key, relayErrorConnectRequest, errors.New("join request returned no answer"))
+		r.fail(o.key, relayErrorConnectRequest, errors.New("join request returned no answer"))
 		return
 	}
-	if err := r.signaling.Signal(ctx, &nethernet.Signal{
+	if err := r.reply(&nethernet.Signal{
 		Type:         nethernet.SignalTypeAnswer,
 		ConnectionID: o.key.connectionID,
 		Data:         answer,
@@ -213,9 +214,9 @@ func (r *httpRelay) relay(o *pendingOffer, sdp string) {
 }
 
 // fail tells the client why its join failed.
-func (r *httpRelay) fail(ctx context.Context, key offerKey, code int, cause error) {
+func (r *httpRelay) fail(key offerKey, code int, cause error) {
 	r.log.Error("relay join offer", "sender", key.networkID, "target", r.joinURL, "code", code, "err", cause)
-	if err := r.signaling.Signal(ctx, &nethernet.Signal{
+	if err := r.reply(&nethernet.Signal{
 		Type:         nethernet.SignalTypeError,
 		ConnectionID: key.connectionID,
 		Data:         strconv.Itoa(code),
@@ -223,6 +224,14 @@ func (r *httpRelay) fail(ctx context.Context, key offerKey, code int, cause erro
 	}); err != nil {
 		r.log.Debug("send connect error", "sender", key.networkID, "err", err)
 	}
+}
+
+// reply sends signal to the client with its own deadline, since the relay's
+// may have expired waiting on the target.
+func (r *httpRelay) reply(signal *nethernet.Signal) error {
+	ctx, cancel := context.WithTimeout(r.ctx, relayReplyTimeout)
+	defer cancel()
+	return r.signaling.Signal(ctx, signal)
 }
 
 // recordJoin marks the offer's verified player as seen.

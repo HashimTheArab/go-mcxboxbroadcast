@@ -46,6 +46,7 @@ func (b *Broadcaster) sessionLoop() {
 				continue
 			}
 		case <-ticker.C:
+			b.closeDrainedSessions()
 			issue = b.sessionHealthIssue()
 		case <-b.healthCheck:
 			issue = b.sessionHealthIssue()

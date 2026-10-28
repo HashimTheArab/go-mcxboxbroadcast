@@ -88,7 +88,8 @@ publishes a new session on the same signaling connection and keeps the old one
 for players who are still joining. After 30 seconds the old session is made
 invite-only when `session.hideOldSessions` is true (the default), so its
 members stop showing it to their friends. Set it to false to keep the
-friends-of-friends tag on old sessions.
+friends-of-friends tag on old sessions. An old session is closed once its grace period has
+passed and every player has left it.
 
 ### Friends
 

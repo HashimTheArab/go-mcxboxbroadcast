@@ -133,6 +133,20 @@ func TestHTTPRelayMapsFailuresToConnectErrors(t *testing.T) {
 	}
 }
 
+// A target that never answers the probe uses up the relay timeout; the client still gets error 1.
+func TestHTTPRelaySendsConnectErrorAfterProbeTimeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sig, r := startTestRelay(t, &fakeJoinEndpoint{probeHangs: true}, nil, nil)
+		defer r.close()
+		sig.signal(nethernet.SignalTypeOffer, "v=0")
+		time.Sleep(offerGatherQuiet + relayTimeout)
+		synctest.Wait()
+		if sent := sig.sent(); len(sent) != 1 || sent[0].Type != nethernet.SignalTypeError || sent[0].Data != "1" {
+			t.Fatalf("signals sent = %+v, want CONNECTERROR 1", sent)
+		}
+	})
+}
+
 func TestHTTPRelayDropsOfferTheClientAbandons(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		target := &fakeJoinEndpoint{answer: "answer"}
@@ -291,7 +305,10 @@ func (s *relaySignaling) Notify(n nethernet.Notifier) func() {
 	return func() {}
 }
 
-func (s *relaySignaling) Signal(_ context.Context, signal *nethernet.Signal) error {
+func (s *relaySignaling) Signal(ctx context.Context, signal *nethernet.Signal) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.out = append(s.out, *signal)
@@ -315,6 +332,7 @@ func (s *relaySignaling) sent() []nethernet.Signal {
 // fakeJoinEndpoint serves the target's /v1/join probe and join requests.
 type fakeJoinEndpoint struct {
 	probeStatus, postStatus int
+	probeHangs              bool
 	answer                  string
 	start                   time.Time
 
@@ -329,6 +347,10 @@ type joinPost struct {
 }
 
 func (e *fakeJoinEndpoint) RoundTrip(req *http.Request) (*http.Response, error) {
+	if e.probeHangs && req.Method == http.MethodGet {
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if req.URL.Host != "bedrock.test:19132" {

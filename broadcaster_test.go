@@ -692,7 +692,7 @@ func TestRotateSessionRetiresOldSession(t *testing.T) {
 				if got := next.Status().SupportedConnections; len(got) != 1 || got[0].NetherNetID != "123456789" {
 					t.Fatalf("new session advertises %+v, want the same signaling connection", got)
 				}
-				if old.Closed() || len(b.retiredAnnouncers) != 1 {
+				if old.Closed() || len(b.retiredSessions) != 1 {
 					t.Fatal("old session was closed instead of kept for its members")
 				}
 				time.Sleep(sessionRotateGrace - time.Nanosecond)
@@ -708,7 +708,7 @@ func TestRotateSessionRetiresOldSession(t *testing.T) {
 				if err := b.cleanupPublishedSessions(true); err != nil {
 					t.Fatal(err)
 				}
-				if !old.Closed() || len(b.retiredAnnouncers) != 0 {
+				if !old.Closed() || len(b.retiredSessions) != 0 {
 					t.Fatal("shutdown left a retired session open")
 				}
 			})
@@ -716,10 +716,51 @@ func TestRotateSessionRetiresOldSession(t *testing.T) {
 	}
 }
 
+// A retired session is closed only once its grace period has passed and only the bot remains.
+func TestCloseDrainedSessionsKeepsPlayersAndGracePeriod(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		playing := &hidingAnnouncer{members: 5}
+		drained := &hidingAnnouncer{members: 1}
+		unpublished := &hidingAnnouncer{members: -1}
+		b := &Broadcaster{log: testBroadcasterLogger()}
+		for _, a := range []*hidingAnnouncer{playing, drained, unpublished} {
+			b.retire(b.wrapAnnouncer(a, b.log), b.log)
+		}
+		time.Sleep(sessionRotateGrace - time.Nanosecond)
+		b.closeDrainedSessions()
+		if drained.Closed() || len(b.retiredSessions) != 3 {
+			t.Fatal("drained session closed during its grace period")
+		}
+		time.Sleep(time.Nanosecond)
+		b.closeDrainedSessions()
+		if !drained.Closed() || playing.Closed() || unpublished.Closed() || len(b.retiredSessions) != 2 {
+			t.Fatalf("closed playing=%v drained=%v unpublished=%v, want only the drained session", playing.Closed(), drained.Closed(), unpublished.Closed())
+		}
+		playing.setMembers(1)
+		b.closeDrainedSessions()
+		if !playing.Closed() || len(b.retiredSessions) != 1 {
+			t.Fatal("session was not closed after its players left")
+		}
+	})
+}
+
 // hidingAnnouncer records when a retired session is made invite-only.
 type hidingAnnouncer struct {
 	fakeAnnouncer
-	hid bool
+	hid     bool
+	members int // negative means unpublished
+}
+
+func (a *hidingAnnouncer) memberCount() (int, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.members, a.members >= 0
+}
+
+func (a *hidingAnnouncer) setMembers(n int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.members = n
 }
 
 func (a *hidingAnnouncer) hide(context.Context) error {

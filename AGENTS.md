@@ -57,7 +57,9 @@ fingerprint signature verify.
 Players stay session members while they play. Every member counts toward the
 30-member cap, so a session rotates at 28 members: the new session reuses the
 signaling connection and the old one is kept, then hidden after 30 seconds when
-`HideOldSessions` is set. A failed primary rotation falls back to full recovery.
+`HideOldSessions` is set. The session loop closes a retired session once its
+grace period has passed and only the bot remains, so retired sessions do not
+pile up RTA subscriptions. A failed primary rotation falls back to full recovery.
 These thresholds mirror MCXboxBroadcast; keep them in sync with it.
 
 Friend sync manages friends only. Do not reintroduce follower handling.

@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,7 +34,7 @@ type Broadcaster struct {
 	log  *slog.Logger
 
 	announcer                  room.Announcer
-	retiredAnnouncers          []room.Announcer // rotated-out sessions, kept until shutdown or recreation
+	retiredSessions            []retiredSession // rotated-out sessions, closed once drained
 	relay                      *httpRelay
 	tokens                     *tokenVerifier
 	signaling                  nethernet.Signaling
@@ -1430,10 +1429,22 @@ type sessionHider interface {
 	hide(ctx context.Context) error
 }
 
+// retiredSession is a rotated-out session and when it was retired.
+type retiredSession struct {
+	announcer room.Announcer
+	at        time.Time
+}
+
+// memberCounter reports a published session's member count; ok is false
+// before the session is published.
+type memberCounter interface {
+	memberCount() (count int, ok bool)
+}
+
 // retire keeps a rotated-out session for players mid-join, then hides it if
 // configured. Its members stay so they keep playing. The caller must hold b.mu.
 func (b *Broadcaster) retire(announcer room.Announcer, log *slog.Logger) {
-	b.retiredAnnouncers = append(b.retiredAnnouncers, announcer)
+	b.retiredSessions = append(b.retiredSessions, retiredSession{announcer: announcer, at: time.Now()})
 	if !b.conf.HideOldSessions {
 		return
 	}
@@ -1460,6 +1471,37 @@ func (b *Broadcaster) retire(announcer room.Announcer, log *slog.Logger) {
 		}
 		log.Debug("hid old session")
 	}()
+}
+
+// closeDrainedSessions closes retired sessions past their grace period that
+// only the bot still belongs to, so they stop holding RTA subscriptions.
+func (b *Broadcaster) closeDrainedSessions() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	grace := b.rotationGrace
+	if grace <= 0 {
+		grace = sessionRotateGrace
+	}
+	kept := b.retiredSessions[:0]
+	for _, retired := range b.retiredSessions {
+		counter, ok := unwrapAnnouncer(retired.announcer).(memberCounter)
+		count, published := 0, false
+		if ok {
+			count, published = counter.memberCount()
+		}
+		if !published || count > 1 || time.Since(retired.at) < grace {
+			kept = append(kept, retired)
+			continue
+		}
+		if err := retired.announcer.Close(); err != nil {
+			b.warn("close drained session", "err", err)
+			kept = append(kept, retired)
+			continue
+		}
+		b.debug("closed drained session")
+	}
+	clear(b.retiredSessions[len(kept):])
+	b.retiredSessions = kept
 }
 
 // recreateSession tears down and rebuilds signaling, sessions and the relay after a drop.
@@ -1662,13 +1704,17 @@ func (b *Broadcaster) cleanupPublishedSessions(closeAnnouncer bool) error {
 			failed = append(failed, sub.announcer)
 		}
 	}
-	for _, stale := range slices.Concat(b.staleSubAnnouncers, b.retiredAnnouncers) {
+	stale := b.staleSubAnnouncers
+	for _, retired := range b.retiredSessions {
+		stale = append(stale, retired.announcer)
+	}
+	for _, stale := range stale {
 		if closeErr := stale.Close(); closeErr != nil {
 			err = errors.Join(err, closeErr)
 			failed = append(failed, stale)
 		}
 	}
-	b.retiredAnnouncers = nil
+	b.retiredSessions = nil
 	b.subAnnouncers = nil
 	b.subAnnouncersByID = nil
 	b.staleSubAnnouncers = failed

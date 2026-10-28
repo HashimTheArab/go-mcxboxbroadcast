@@ -8,7 +8,7 @@ require (
 	github.com/df-mc/go-nethernet v1.0.27-0.20261028141106-74af70df9aa6
 	github.com/df-mc/go-playfab/v2 v2.0.4-0.20261011110813-e01ef1ec605c
 	github.com/df-mc/go-xsapi/v2 v2.0.4-0.20261025033432-d43cca94551a
-	github.com/go-jose/go-jose/v4 v4.1.4
+	github.com/go-jose/go-jose/v4 v4.1.6
 	github.com/google/uuid v1.6.0
 	github.com/lmittmann/tint v1.2.0
 	github.com/pelletier/go-toml/v2 v2.2.4

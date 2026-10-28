@@ -44,6 +44,19 @@ func newSessionNonceAnnouncer(announcer *room.XBLAnnouncer, ownerXUID string, lo
 	}
 }
 
+func (a *sessionNonceAnnouncer) memberCount() (int, bool) {
+	a.Lock()
+	session := a.Session
+	a.Unlock()
+	if session == nil {
+		return 0, false
+	}
+	if session.Context().Err() != nil {
+		return 0, true
+	}
+	return sessionMemberCount(session), true
+}
+
 // hide makes the published session invite-only so its members no longer
 // advertise it to their friends. It keeps the session's restrictions, since
 // changing them would republish it.
