@@ -1,4 +1,4 @@
-configVersion: 4
+configVersion: 5
 debugMode: false
 suppressSessionUpdateMessage: false
 
@@ -6,6 +6,9 @@ http:
   proxy: ""
 
 session:
+  # Base URL of the server's NetherNet HTTP signaling. Joins are relayed to
+  # {joinUrl}/v1/join and status queries read the same endpoint.
+  joinUrl: https://play.example.net:19132
   updateInterval: 30
   signalingMode: websocket
   queryServer: true
@@ -15,26 +18,26 @@ session:
   configFallback: false
   broadcastSetting: 3
   worldType: Survival
-  # Set both to 0 to use the operating system's full ephemeral UDP range.
-  icePortRange:
-    min: 0
-    max: 0
+  # When a session fills up, a new one is published and the old one is kept.
+  # true makes the old session invite-only after 30 seconds, so its members
+  # stop showing the world to their friends.
+  hideOldSessions: true
   sessionInfo:
     hostName: Minecraft Server
     worldName: Minecraft World
     players: 0
     maxPlayers: 20
-    ip: play.example.net
-    port: 19132
+    # Set both to advertise a version/protocol pair other than 1.26.60/2225.
+    # version: 1.26.60
+    # protocol: 2225
 
 friendSync:
   updateInterval: 60
-  autoFollow: true
-  autoUnfollow: true
+  autoFriend: true
   initialInvite: true
   expiry:
     enabled: true
-    days: 8
+    days: 15
     check: 1800
     historyPath: cache/player_history.json
 
@@ -46,13 +49,6 @@ gallery:
   enabled: true
   imagePath: screenshot.jpg
   deleteOtherImages: true
-
-# Keep joined players inside the NetherNet session and relay their traffic to
-# sessionInfo.ip:port instead of transferring them. Players stay session
-# members while they play, so their friends can discover the world too. The
-# backend must trust this relay's unsigned login chain (see README).
-relay:
-  enabled: false
 
 accounts:
   primaryCachePath: cache/live_token.json

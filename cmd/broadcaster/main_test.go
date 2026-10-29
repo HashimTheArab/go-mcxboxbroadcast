@@ -91,8 +91,7 @@ func TestRunBroadcasterCommandStartsAndClosesBroadcaster(t *testing.T) {
 		Stdout: &output,
 		LoadConfig: func(string) (broadcaster.ConfigFile, error) {
 			cfg := broadcaster.DefaultConfigFile()
-			cfg.Session.SessionInfo.IP = "127.0.0.1"
-			cfg.Session.SessionInfo.Port = 19132
+			cfg.Session.JoinURL = "http://127.0.0.1:19132"
 			cfg.Accounts.PrimaryCachePath = "cache/live_token.json"
 			cfg.Accounts.SubAccounts = []broadcaster.SubAccountFile{{
 				ID:      "alt",
@@ -164,8 +163,7 @@ func TestRunBroadcasterCommandClosesXSAPIClientsWhenStartFails(t *testing.T) {
 		Stdout: io.Discard,
 		LoadConfig: func(string) (broadcaster.ConfigFile, error) {
 			cfg := broadcaster.DefaultConfigFile()
-			cfg.Session.SessionInfo.IP = "127.0.0.1"
-			cfg.Session.SessionInfo.Port = 19132
+			cfg.Session.JoinURL = "http://127.0.0.1:19132"
 			cfg.Accounts.SubAccounts = []broadcaster.SubAccountFile{{
 				ID:      "alt",
 				Enabled: true,
@@ -230,8 +228,7 @@ func TestRunBroadcasterCommandClosesAfterInternalFailure(t *testing.T) {
 					Stdout: io.Discard,
 					LoadConfig: func(string) (broadcaster.ConfigFile, error) {
 						cfg := broadcaster.DefaultConfigFile()
-						cfg.Session.SessionInfo.IP = "127.0.0.1"
-						cfg.Session.SessionInfo.Port = 19132
+						cfg.Session.JoinURL = "http://127.0.0.1:19132"
 						cfg.Accounts.SubAccounts = []broadcaster.SubAccountFile{{ID: "alt", Enabled: true}}
 						return cfg, nil
 					},
@@ -303,8 +300,7 @@ func TestRunBroadcasterCommandAppliesConfiguredHTTPProxy(t *testing.T) {
 		LoadConfig: func(string) (broadcaster.ConfigFile, error) {
 			cfg := broadcaster.DefaultConfigFile()
 			cfg.HTTP.Proxy = "http://127.0.0.1:8080"
-			cfg.Session.SessionInfo.IP = "127.0.0.1"
-			cfg.Session.SessionInfo.Port = 19132
+			cfg.Session.JoinURL = "http://127.0.0.1:19132"
 			return cfg, nil
 		},
 		LoadLiveToken: func(string) (*oauth2.Token, error) {
@@ -367,8 +363,7 @@ func TestRunBroadcasterCommandAppliesConfiguredHTTPProxyToPrimaryLiveTokenSource
 		LoadConfig: func(string) (broadcaster.ConfigFile, error) {
 			cfg := broadcaster.DefaultConfigFile()
 			cfg.HTTP.Proxy = "http://127.0.0.1:8080"
-			cfg.Session.SessionInfo.IP = "127.0.0.1"
-			cfg.Session.SessionInfo.Port = 19132
+			cfg.Session.JoinURL = "http://127.0.0.1:19132"
 			return cfg, nil
 		},
 		LoadLiveToken: func(string) (*oauth2.Token, error) {
@@ -420,8 +415,7 @@ func TestRunBroadcasterCommandAppliesConfiguredHTTPProxyToSubAccountTokenLoad(t 
 		LoadConfig: func(string) (broadcaster.ConfigFile, error) {
 			cfg := broadcaster.DefaultConfigFile()
 			cfg.HTTP.Proxy = "http://127.0.0.1:8080"
-			cfg.Session.SessionInfo.IP = "127.0.0.1"
-			cfg.Session.SessionInfo.Port = 19132
+			cfg.Session.JoinURL = "http://127.0.0.1:19132"
 			cfg.Accounts.SubAccounts = []broadcaster.SubAccountFile{{
 				ID:      "alt",
 				Enabled: true,
@@ -481,8 +475,7 @@ func TestRunBroadcasterCommandPreservesHTTPClientWithoutConfiguredProxy(t *testi
 		HTTPClient: baseClient,
 		LoadConfig: func(string) (broadcaster.ConfigFile, error) {
 			cfg := broadcaster.DefaultConfigFile()
-			cfg.Session.SessionInfo.IP = "127.0.0.1"
-			cfg.Session.SessionInfo.Port = 19132
+			cfg.Session.JoinURL = "http://127.0.0.1:19132"
 			return cfg, nil
 		},
 		LoadLiveToken: func(string) (*oauth2.Token, error) {
@@ -537,7 +530,7 @@ func TestRunBroadcasterCommandSkipsSubAccountWhoseLoginFails(t *testing.T) {
 		})},
 		LoadConfig: func(string) (broadcaster.ConfigFile, error) {
 			cfg := broadcaster.DefaultConfigFile()
-			cfg.Session.SessionInfo.IP = "127.0.0.1"
+			cfg.Session.JoinURL = "http://127.0.0.1:19132"
 			cfg.Notifications = broadcaster.NotificationConfig{Enabled: true, WebhookURL: "https://hooks.test/webhook"}
 			cfg.Accounts.SubAccounts = []broadcaster.SubAccountFile{{ID: "alt", Enabled: true}}
 			return cfg, nil
@@ -577,7 +570,7 @@ func TestRunBroadcasterCommandStopsWhenShutdownInterruptsSubAccountLogin(t *test
 		Stdout: io.Discard,
 		LoadConfig: func(string) (broadcaster.ConfigFile, error) {
 			cfg := broadcaster.DefaultConfigFile()
-			cfg.Session.SessionInfo.IP = "127.0.0.1"
+			cfg.Session.JoinURL = "http://127.0.0.1:19132"
 			cfg.Accounts.SubAccounts = []broadcaster.SubAccountFile{{ID: "alt", Enabled: true}}
 			return cfg, nil
 		},
@@ -612,7 +605,7 @@ func TestRunBroadcasterCommandBoundsSubAccountXboxLiveSignIn(t *testing.T) {
 			Stdout: io.Discard,
 			LoadConfig: func(string) (broadcaster.ConfigFile, error) {
 				cfg := broadcaster.DefaultConfigFile()
-				cfg.Session.SessionInfo.IP = "127.0.0.1"
+				cfg.Session.JoinURL = "http://127.0.0.1:19132"
 				cfg.Accounts.SubAccounts = []broadcaster.SubAccountFile{{ID: "alt", Enabled: true}}
 				return cfg, nil
 			},

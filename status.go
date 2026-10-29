@@ -7,17 +7,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
-	"github.com/sandertv/go-raknet"
+	"github.com/df-mc/go-nethernet/endpoint"
 	"github.com/sandertv/gophertunnel/minecraft"
 	"github.com/sandertv/gophertunnel/minecraft/p2p"
 	"github.com/sandertv/gophertunnel/minecraft/protocol"
-	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
 	"github.com/sandertv/gophertunnel/minecraft/room"
 )
 
@@ -29,16 +27,17 @@ func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 		return room.Status{}, err
 	}
 	if b.conf.StatusProvider != nil {
-		return normalizeStatusWithOwner(b.conf.StatusProvider.RoomStatus(), ownerID), nil
+		return b.advertise(normalizeStatusWithOwner(b.conf.StatusProvider.RoomStatus(), ownerID)), nil
 	}
 	st := b.conf.Status
 	if st.QueryTarget {
-		b.debug("querying target server status", "target", b.conf.Server.Address(), "web_fallback", st.WebQueryFallback, "query_fallback", st.QueryFallback)
+		b.debug("querying target server status", "target", b.conf.JoinURL, "web_fallback", st.WebQueryFallback, "query_fallback", st.QueryFallback)
 		if queried, err := queryStatusWithFallback(ctx, QueryOptions{
-			Address:            b.conf.Server.Address(),
+			JoinURL:            b.conf.JoinURL,
 			Timeout:            st.QueryTimeout,
 			WebFallbackEnabled: st.WebQueryFallback,
 			Client:             st.WebQueryClient,
+			ClientInfo:         endpoint.ClientInfo{Version: b.advertisedVersion(), Protocol: int(b.advertisedProtocol()), Platform: relayClientPlatform},
 		}); err == nil {
 			b.debug("queried target server status",
 				"server_name", queried.ServerName,
@@ -58,10 +57,7 @@ func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 		}
 	}
 
-	if b.conf.Relay != nil && !st.QueryTarget {
-		st.Players = max(st.Players, b.relays.count())
-	}
-	return normalizeStatus(room.Status{
+	return b.advertise(normalizeStatus(room.Status{
 		HostName:         stripColour(defaultString(st.HostName, b.hostNameFallback())),
 		WorldName:        stripColour(defaultString(st.WorldName, defaultString(st.HostName, b.hostNameFallback()))),
 		OwnerID:          ownerID,
@@ -77,7 +73,24 @@ func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 		OnlineCrossPlatformGame: true,
 		CrossPlayDisabled:       false,
 		LevelID:                 defaultString(levelID(st.LevelID), accountLevelID(ownerID)),
-	}), nil
+	})), nil
+}
+
+// advertise sets the one version/protocol pair the session advertises.
+func (b *Broadcaster) advertise(status room.Status) room.Status {
+	status.Version, status.Protocol = b.advertisedVersion(), b.advertisedProtocol()
+	return status
+}
+
+func (b *Broadcaster) advertisedVersion() string {
+	return defaultString(b.conf.Status.Version, protocol.CurrentVersion)
+}
+
+func (b *Broadcaster) advertisedProtocol() int32 {
+	if b.conf.Status.Protocol != 0 {
+		return b.conf.Status.Protocol
+	}
+	return protocol.CurrentProtocol
 }
 
 // subAccountStatus makes a sub-account's activity independently joinable
@@ -169,10 +182,6 @@ func normalizeStatus(status room.Status) room.Status {
 	if status.Joinability == "" {
 		status.Joinability = p2p.JoinabilityFriends
 	}
-	// The listener accepts only the compiled-in protocol, so advertising any
-	// other pair shows a world whose every join fails as outdated.
-	status.Protocol = protocol.CurrentProtocol
-	status.Version = protocol.CurrentVersion
 	// Minecraft friend-list sessions use TitleId=0 in MPSD custom properties.
 	// The package TitleID constant is still used for Xbox invite handles.
 	status.TitleID = 0
@@ -183,33 +192,6 @@ func normalizeStatus(status room.Status) room.Status {
 		status.LevelID = "level"
 	}
 	return status
-}
-
-type normalizedStatusProvider struct {
-	Provider room.StatusProvider
-	OwnerID  string
-}
-
-func (p normalizedStatusProvider) RoomStatus() room.Status {
-	if p.Provider == nil {
-		return normalizeStatusWithOwner(room.Status{}, p.OwnerID)
-	}
-	return normalizeStatusWithOwner(p.Provider.RoomStatus(), p.OwnerID)
-}
-
-type roomMinecraftStatusProvider struct {
-	Provider room.StatusProvider
-}
-
-func (p roomMinecraftStatusProvider) ServerStatus(int, int) minecraft.ServerStatus {
-	status := normalizeStatus(p.Provider.RoomStatus())
-	return minecraft.ServerStatus{
-		ServerName:    status.WorldName,
-		ServerSubName: status.HostName,
-		PlayerCount:   status.MemberCount,
-		MaxPlayers:    status.MaxMemberCount,
-		GameType:      packet.GameTypeCreative,
-	}
 }
 
 func levelID(id string) string {
@@ -232,14 +214,16 @@ func accountLevelID(xuid string) string {
 }
 
 type QueryOptions struct {
-	Address            string
+	JoinURL            string
 	Timeout            time.Duration
 	WebFallbackEnabled bool
 	Client             *http.Client
+	// ClientInfo is sent with the status request, as vanilla clients do.
+	ClientInfo endpoint.ClientInfo
 }
 
 func queryStatusWithFallback(ctx context.Context, options QueryOptions) (minecraft.ServerStatus, error) {
-	status, err := queryStatus(ctx, options.Address, options.Timeout)
+	status, err := queryStatus(ctx, options)
 	if err == nil || !options.WebFallbackEnabled {
 		return status, err
 	}
@@ -252,10 +236,11 @@ func webQueryStatus(ctx context.Context, options QueryOptions) (minecraft.Server
 	}
 	ctx, cancel := context.WithTimeout(ctx, options.Timeout)
 	defer cancel()
-	u := "https://checker.geysermc.org/ping?hostname=" + url.QueryEscape(hostOnly(options.Address))
-	if _, port, err := net.SplitHostPort(options.Address); err == nil {
-		u += "&port=" + url.QueryEscape(port)
+	target, err := url.Parse(options.JoinURL)
+	if err != nil {
+		return minecraft.ServerStatus{}, err
 	}
+	u := "https://checker.geysermc.org/ping?hostname=" + url.QueryEscape(target.Hostname()) + "&port=" + url.QueryEscape(target.Port())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return minecraft.ServerStatus{}, err
@@ -293,14 +278,6 @@ func webQueryStatus(ctx context.Context, options QueryOptions) (minecraft.Server
 	}, nil
 }
 
-func hostOnly(address string) string {
-	host, _, err := net.SplitHostPort(address)
-	if err == nil {
-		return host
-	}
-	return address
-}
-
 func httpClient(c *http.Client) *http.Client {
 	if c != nil {
 		return c
@@ -308,18 +285,27 @@ func httpClient(c *http.Client) *http.Client {
 	return http.DefaultClient
 }
 
-func queryStatus(ctx context.Context, address string, timeout time.Duration) (minecraft.ServerStatus, error) {
+// queryStatus reads the status document the target serves on its HTTP
+// signaling endpoint, as the Java broadcaster does.
+func queryStatus(ctx context.Context, options QueryOptions) (minecraft.ServerStatus, error) {
+	timeout := options.Timeout
 	if timeout == 0 {
 		// MCXboxBroadcast pings with a 1500 ms timeout.
 		timeout = 1500 * time.Millisecond
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	data, err := raknet.PingContext(ctx, address)
+	client := endpoint.ClientConfig{HTTPClient: options.Client, ClientInfo: options.ClientInfo}.New()
+	status, err := client.Status(ctx, options.JoinURL)
 	if err != nil {
 		return minecraft.ServerStatus{}, err
 	}
-	return minecraft.ParsePongData(data), nil
+	return minecraft.ServerStatus{
+		ServerName:    status.ServerName,
+		ServerSubName: status.LevelName,
+		PlayerCount:   status.PlayerCount,
+		MaxPlayers:    status.MaxPlayerCount,
+	}, nil
 }
 
 func stripColour(s string) string {

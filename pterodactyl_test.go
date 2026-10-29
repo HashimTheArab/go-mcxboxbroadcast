@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sandertv/gophertunnel/minecraft"
 	"github.com/sandertv/gophertunnel/minecraft/room"
 )
 
@@ -82,27 +81,19 @@ func TestPterodactylArtifacts(t *testing.T) {
 		}
 	}
 
-	var seenTargetHost, seenTargetPort, seenICEPortMin, seenICEPortMax bool
+	var seenJoinURL bool
 	for _, variable := range egg.Variables {
-		seenTargetHost = seenTargetHost || variable.EnvVariable == "TARGET_SERVER_HOST"
-		seenTargetPort = seenTargetPort || variable.EnvVariable == "TARGET_SERVER_PORT"
-		seenICEPortMin = seenICEPortMin || variable.EnvVariable == "ICE_PORT_MIN"
-		seenICEPortMax = seenICEPortMax || variable.EnvVariable == "ICE_PORT_MAX"
+		seenJoinURL = seenJoinURL || variable.EnvVariable == "JOIN_URL"
 	}
-	if !seenTargetHost || !seenTargetPort {
-		t.Fatalf("target server variables missing: host=%v port=%v", seenTargetHost, seenTargetPort)
+	if !seenJoinURL {
+		t.Fatal("JOIN_URL variable missing")
 	}
-	if !seenICEPortMin || !seenICEPortMax {
-		t.Fatalf("ICE port variables missing: min=%v max=%v", seenICEPortMin, seenICEPortMax)
+	if !strings.Contains(egg.Config.Files, `"session.joinUrl": "{{server.build.env.JOIN_URL}}"`) {
+		t.Fatal("config.files does not map session.joinUrl")
 	}
-	for _, want := range []string{"ICE_PORT_MIN", "ICE_PORT_MAX", "session.icePortRange.min", "session.icePortRange.max"} {
-		if !strings.Contains(egg.Config.Files, want) {
-			t.Fatalf("config.files does not contain %q", want)
-		}
-	}
-	for _, want := range []string{"icePortRange:", "${ICE_PORT_MIN}", "${ICE_PORT_MAX}"} {
-		if !strings.Contains(egg.Scripts.Installation.Script, want) {
-			t.Fatalf("installation script does not contain %q", want)
+	for _, removed := range []string{"ICE_PORT", "icePortRange", "TARGET_SERVER", "sessionInfo.ip"} {
+		if strings.Contains(egg.Config.Files, removed) || strings.Contains(egg.Scripts.Installation.Script, removed) {
+			t.Fatalf("egg still references removed setting %q", removed)
 		}
 	}
 	if strings.Contains(egg.Scripts.Installation.Script, "signalingMode:") {
@@ -174,10 +165,9 @@ func TestPterodactylDoneMarkerIsLoggedOnStart(t *testing.T) {
 	}
 	var logs bytes.Buffer
 	b, err := New(Config{
-		Server:         ServerInfo{Host: "127.0.0.1", Port: 19132},
+		JoinURL:        "http://127.0.0.1:19132",
 		XBLTokenSource: staticTokenSource{xuid: "123"},
 		Signaling:      &fakeSignaling{networkID: "123456789"},
-		ListenConfig:   minecraft.ListenConfig{AuthenticationDisabled: true},
 		Status:         Status{HostName: "Host", WorldName: "World"},
 		UpdateInterval: time.Hour,
 		Log:            slog.New(slog.NewTextHandler(&logs, nil)),
@@ -209,9 +199,8 @@ func TestPterodactylInstallerEscapesPanelValues(t *testing.T) {
 	cmd := exec.Command(shell, "-c", script)
 	cmd.Env = append(os.Environ(),
 		"DEBUG_MODE=false", "QUERY_SERVER=true", "CONFIG_FALLBACK=false",
-		"ICE_PORT_MIN=0", "ICE_PORT_MAX=0",
 		"HOST_NAME="+hostName, "WORLD_NAME=World: 'one'", "MAX_PLAYERS=20",
-		"TARGET_SERVER_HOST=bedrock.test", "TARGET_SERVER_PORT=19133",
+		"JOIN_URL=https://bedrock.test:19133",
 		"NOTIFICATIONS_ENABLED=false", "WEBHOOK_URL=",
 		"GALLERY_ENABLED=true", "GALLERY_IMAGE_PATH=screenshot.jpg",
 	)
@@ -234,7 +223,7 @@ func TestPterodactylInstallerEscapesPanelValues(t *testing.T) {
 		t.Fatalf("installer config needed adjustments: %v", cfg.Notes)
 	}
 	info := cfg.Session.SessionInfo
-	if info.HostName != hostName || info.WorldName != "World: 'one'" || info.IP != "bedrock.test" || info.Port != 19133 {
-		t.Fatalf("installer wrote sessionInfo %+v", info)
+	if info.HostName != hostName || info.WorldName != "World: 'one'" || cfg.Session.JoinURL != "https://bedrock.test:19133" {
+		t.Fatalf("installer wrote sessionInfo %+v join URL %q", info, cfg.Session.JoinURL)
 	}
 }

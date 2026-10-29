@@ -6,33 +6,34 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/df-mc/go-nethernet"
 	"github.com/df-mc/go-xsapi/v2"
 	"github.com/pelletier/go-toml/v2"
-	"github.com/pion/webrtc/v4"
-	"github.com/sandertv/gophertunnel/minecraft"
 	"github.com/sandertv/gophertunnel/minecraft/service"
 	"gopkg.in/yaml.v3"
 )
 
-const CurrentConfigVersion = 4
+const CurrentConfigVersion = 5
 
 // exampleServerHost is the placeholder target in generated configs; the
 // broadcaster refuses to start until an operator replaces it.
 const exampleServerHost = "play.example.net"
 
+const defaultServerPort = 19132
+
 // ErrConfigCreated reports that LoadConfigFile wrote a default config because
 // none existed; the operator must edit it before starting again.
 var ErrConfigCreated = errors.New("created a default config")
 
-var errExampleServerHost = errors.New("session.sessionInfo.ip is still the example host " + exampleServerHost)
+var errExampleServerHost = errors.New("session.joinUrl still points at the example host " + exampleServerHost)
 
 type ConfigFile struct {
 	ConfigVersion                int                `yaml:"configVersion" toml:"configVersion"`
@@ -43,7 +44,6 @@ type ConfigFile struct {
 	FriendSync                   FriendFileConfig   `yaml:"friendSync" toml:"friendSync"`
 	Notifications                NotificationConfig `yaml:"notifications" toml:"notifications"`
 	Gallery                      GalleryFileConfig  `yaml:"gallery" toml:"gallery"`
-	Relay                        RelayFileConfig    `yaml:"relay" toml:"relay"`
 	Accounts                     AccountsConfig     `yaml:"accounts" toml:"accounts"`
 
 	// Notes lists adjustments applied while loading, such as out-of-range
@@ -56,23 +56,18 @@ type HTTPFileConfig struct {
 }
 
 // SessionFileConfig mirrors MCXboxBroadcast's standalone session settings.
-// The Geyser-extension-only remoteAddress/remotePort keys are intentionally
-// absent; the broadcast target always comes from sessionInfo.
 type SessionFileConfig struct {
-	UpdateInterval   int              `yaml:"updateInterval" toml:"updateInterval"`
-	SignalingMode    string           `yaml:"signalingMode" toml:"signalingMode"`
-	QueryServer      bool             `yaml:"queryServer" toml:"queryServer"`
-	WebQueryFallback bool             `yaml:"webQueryFallback" toml:"webQueryFallback"`
-	ConfigFallback   bool             `yaml:"configFallback" toml:"configFallback"`
-	BroadcastSetting int32            `yaml:"broadcastSetting" toml:"broadcastSetting"`
-	WorldType        string           `yaml:"worldType" toml:"worldType"`
-	ICEPortRange     ICEPortRangeFile `yaml:"icePortRange" toml:"icePortRange"`
-	SessionInfo      SessionInfoFile  `yaml:"sessionInfo" toml:"sessionInfo"`
-}
-
-type ICEPortRangeFile struct {
-	Min int `yaml:"min" toml:"min"`
-	Max int `yaml:"max" toml:"max"`
+	// JoinURL is the target's NetherNet HTTP signaling base URL.
+	JoinURL          string          `yaml:"joinUrl" toml:"joinUrl"`
+	UpdateInterval   int             `yaml:"updateInterval" toml:"updateInterval"`
+	SignalingMode    string          `yaml:"signalingMode" toml:"signalingMode"`
+	QueryServer      bool            `yaml:"queryServer" toml:"queryServer"`
+	WebQueryFallback bool            `yaml:"webQueryFallback" toml:"webQueryFallback"`
+	ConfigFallback   bool            `yaml:"configFallback" toml:"configFallback"`
+	BroadcastSetting int32           `yaml:"broadcastSetting" toml:"broadcastSetting"`
+	WorldType        string          `yaml:"worldType" toml:"worldType"`
+	HideOldSessions  bool            `yaml:"hideOldSessions" toml:"hideOldSessions"`
+	SessionInfo      SessionInfoFile `yaml:"sessionInfo" toml:"sessionInfo"`
 }
 
 type SessionInfoFile struct {
@@ -80,14 +75,14 @@ type SessionInfoFile struct {
 	WorldName  string `yaml:"worldName" toml:"worldName"`
 	Players    int    `yaml:"players" toml:"players"`
 	MaxPlayers int    `yaml:"maxPlayers" toml:"maxPlayers"`
-	IP         string `yaml:"ip" toml:"ip"`
-	Port       uint16 `yaml:"port" toml:"port"`
+	// Version and Protocol override the advertised pair together.
+	Version  string `yaml:"version,omitempty" toml:"version,omitempty"`
+	Protocol int32  `yaml:"protocol,omitempty" toml:"protocol,omitempty"`
 }
 
 type FriendFileConfig struct {
 	UpdateInterval int              `yaml:"updateInterval" toml:"updateInterval"`
-	AutoFollow     bool             `yaml:"autoFollow" toml:"autoFollow"`
-	AutoUnfollow   bool             `yaml:"autoUnfollow" toml:"autoUnfollow"`
+	AutoFriend     bool             `yaml:"autoFriend" toml:"autoFriend"`
 	InitialInvite  bool             `yaml:"initialInvite" toml:"initialInvite"`
 	Expiry         FriendExpiryFile `yaml:"expiry" toml:"expiry"`
 }
@@ -102,11 +97,6 @@ type FriendExpiryFile struct {
 type NotificationConfig struct {
 	Enabled    bool   `yaml:"enabled" toml:"enabled"`
 	WebhookURL string `yaml:"webhookUrl" toml:"webhookUrl"`
-}
-
-// RelayFileConfig enables relay mode; see RelayConfig for the trust model.
-type RelayFileConfig struct {
-	Enabled bool `yaml:"enabled" toml:"enabled"`
 }
 
 type GalleryFileConfig struct {
@@ -141,6 +131,7 @@ func DefaultConfigFile() ConfigFile {
 		ConfigVersion: CurrentConfigVersion,
 		DebugMode:     false,
 		Session: SessionFileConfig{
+			JoinURL:          "https://" + exampleServerHost + ":19132",
 			UpdateInterval:   30,
 			SignalingMode:    string(SignalingModeWebSocket),
 			QueryServer:      true,
@@ -148,19 +139,17 @@ func DefaultConfigFile() ConfigFile {
 			ConfigFallback:   false,
 			BroadcastSetting: int32(BroadcastSettingFriendsOfFriends),
 			WorldType:        WorldTypeSurvival,
+			HideOldSessions:  true,
 			SessionInfo: SessionInfoFile{
 				HostName:   "Minecraft Server",
 				WorldName:  "Minecraft World",
 				Players:    0,
 				MaxPlayers: 20,
-				IP:         exampleServerHost,
-				Port:       19132,
 			},
 		},
 		FriendSync: FriendFileConfig{
 			UpdateInterval: 60,
-			AutoFollow:     true,
-			AutoUnfollow:   true,
+			AutoFriend:     true,
 			InitialInvite:  true,
 			Expiry: FriendExpiryFile{
 				Enabled:     true,
@@ -231,7 +220,7 @@ func LoadConfigFile(path string) (ConfigFile, error) {
 		if err := SaveConfigFile(path, cfg); err != nil {
 			return ConfigFile{}, fmt.Errorf("write default config: %w", err)
 		}
-		return ConfigFile{}, fmt.Errorf("%w at %s: set session.sessionInfo.ip and port to your Bedrock server, then start again", ErrConfigCreated, path)
+		return ConfigFile{}, fmt.Errorf("%w at %s: set session.joinUrl to your server's NetherNet HTTP signaling URL, then start again", ErrConfigCreated, path)
 	}
 	if err != nil {
 		return ConfigFile{}, err
@@ -248,7 +237,7 @@ func LoadConfigFile(path string) (ConfigFile, error) {
 			cfg.Notes = append(cfg.Notes, fmt.Sprintf("could not persist migrated config: %v", err))
 		}
 	}
-	if strings.EqualFold(strings.TrimSpace(cfg.Session.SessionInfo.IP), exampleServerHost) {
+	if u, err := url.Parse(cfg.Session.JoinURL); err == nil && strings.EqualFold(u.Hostname(), exampleServerHost) {
 		return ConfigFile{}, fmt.Errorf("%s: %w; set it to your Bedrock server", path, errExampleServerHost)
 	}
 	return cfg, nil
@@ -267,6 +256,7 @@ func SaveConfigFile(path string, cfg ConfigFile) error {
 // returns one operator note per change; no note means the document is unchanged.
 var configMigrations = map[int]func(doc map[string]any) []string{
 	4: migrateDropSessionOverrides,
+	5: migrateHTTPSignalingRelay,
 }
 
 // migrateDropSessionOverrides removes keys this broadcaster never honours or
@@ -281,10 +271,68 @@ func migrateDropSessionOverrides(doc map[string]any) []string {
 	}
 	for _, key := range []string{"remoteAddress", "remotePort"} {
 		if deleteConfigKey(doc, "session", key) {
-			notes = append(notes, fmt.Sprintf("removed unused session.%s: the target is session.sessionInfo.ip/port", key))
+			notes = append(notes, fmt.Sprintf("removed unused session.%s", key))
 		}
 	}
 	return notes
+}
+
+// migrateHTTPSignalingRelay moves the target to session.joinUrl, drops the
+// listener and relay settings, and keeps friend sync friends-only like Java.
+func migrateHTTPSignalingRelay(doc map[string]any) []string {
+	var notes []string
+	if session, ok := doc["session"].(map[string]any); ok {
+		if info, ok := session["sessionInfo"].(map[string]any); ok {
+			if host, ok := info["ip"].(string); ok && strings.TrimSpace(host) != "" {
+				port := defaultServerPort
+				if p, ok := configInt(info["port"]); ok && p > 0 {
+					port = p
+				}
+				// A panel may already have written joinUrl into the old file; keep it.
+				if existing, _ := session["joinUrl"].(string); strings.TrimSpace(existing) != "" {
+					notes = append(notes, "removed session.sessionInfo.ip/port: session.joinUrl is already set")
+				} else {
+					session["joinUrl"] = "https://" + net.JoinHostPort(strings.TrimSpace(host), strconv.Itoa(port))
+					notes = append(notes, fmt.Sprintf("moved session.sessionInfo.ip/port to session.joinUrl %v; change the scheme if the server only serves http", session["joinUrl"]))
+				}
+			}
+			delete(info, "ip")
+			delete(info, "port")
+		}
+	}
+	if deleteConfigKey(doc, "session", "icePortRange") {
+		notes = append(notes, "removed session.icePortRange: the broadcaster no longer accepts game connections")
+	}
+	if _, ok := doc["relay"]; ok {
+		delete(doc, "relay")
+		notes = append(notes, "removed relay: every join is relayed through HTTP signaling now")
+	}
+	if friends, ok := doc["friendSync"].(map[string]any); ok {
+		if v, ok := friends["autoFollow"]; ok {
+			friends["autoFriend"] = v
+			delete(friends, "autoFollow")
+			notes = append(notes, "renamed friendSync.autoFollow to autoFriend")
+		}
+		if deleteConfigKey(doc, "friendSync", "autoUnfollow") {
+			notes = append(notes, "removed friendSync.autoUnfollow: friend sync only manages friends now")
+		}
+	}
+	return notes
+}
+
+// configInt reads an integer decoded by either the YAML or TOML codec.
+func configInt(v any) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	case uint64:
+		return int(n), true
+	case float64:
+		return int(n), true
+	}
+	return 0, false
 }
 
 // deleteConfigKey removes the value at the nested key path and reports whether it existed.
@@ -340,12 +388,7 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 	if in.BaseDir == "" {
 		in.BaseDir = "."
 	}
-	server := ServerInfo{Host: c.Session.SessionInfo.IP, Port: c.Session.SessionInfo.Port}
 	signalingMode, err := normalizeSignalingMode(SignalingMode(c.Session.SignalingMode))
-	if err != nil {
-		return Config{}, err
-	}
-	netherNetListenConfig, err := c.Session.ICEPortRange.listenConfig()
 	if err != nil {
 		return Config{}, err
 	}
@@ -354,7 +397,8 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 		XBLTokenSource:       in.XBLTokenSource,
 		XUID:                 in.XUID,
 		MinecraftTokenSource: in.MinecraftTokenSource,
-		Server:               server,
+		JoinURL:              strings.TrimSuffix(c.Session.JoinURL, "/"),
+		HideOldSessions:      c.Session.HideOldSessions,
 		Status: Status{
 			HostName:         c.Session.SessionInfo.HostName,
 			WorldName:        c.Session.SessionInfo.WorldName,
@@ -366,12 +410,10 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 			WebQueryFallback: c.Session.WebQueryFallback,
 			QueryFallback:    c.Session.ConfigFallback,
 			WebQueryClient:   in.HTTPClient,
+			Version:          c.Session.SessionInfo.Version,
+			Protocol:         c.Session.SessionInfo.Protocol,
 		},
-		SignalingMode: signalingMode,
-		ListenConfig: minecraft.ListenConfig{
-			HTTPClient: in.HTTPClient,
-		},
-		NetherNetListenConfig:        netherNetListenConfig,
+		SignalingMode:                signalingMode,
 		UpdateInterval:               time.Duration(c.Session.UpdateInterval) * time.Second,
 		HTTPClient:                   in.HTTPClient,
 		Log:                          in.Log,
@@ -380,9 +422,6 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 	}
 	if c.FriendSync.Expiry.Enabled {
 		cfg.FriendHistory = NewFileHistoryStore(resolvePath(in.BaseDir, c.FriendSync.Expiry.HistoryPath))
-	}
-	if c.Relay.Enabled {
-		cfg.Relay = &RelayConfig{}
 	}
 	if c.Gallery.Enabled {
 		cfg.Gallery = &GalleryConfig{
@@ -402,31 +441,13 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 	return cfg, nil
 }
 
-func (r ICEPortRangeFile) listenConfig() (nethernet.ListenConfig, error) {
-	if r.Min == 0 && r.Max == 0 {
-		return nethernet.ListenConfig{}, nil
-	}
-	if r.Min < 1 || r.Max < 1 || r.Min > 65535 || r.Max > 65535 || r.Min > r.Max {
-		return nethernet.ListenConfig{}, fmt.Errorf(
-			"session.icePortRange must be disabled with min/max 0 or satisfy 1 <= min <= max <= 65535 (got min=%d max=%d)",
-			r.Min, r.Max,
-		)
-	}
-	var settingEngine webrtc.SettingEngine
-	if err := settingEngine.SetEphemeralUDPPortRange(uint16(r.Min), uint16(r.Max)); err != nil {
-		return nethernet.ListenConfig{}, fmt.Errorf("configure session.icePortRange: %w", err)
-	}
-	return nethernet.ListenConfig{API: webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine))}, nil
-}
-
 func (f FriendFileConfig) runtime() *FriendSyncConfig {
-	if !f.AutoFollow && !f.AutoUnfollow && !f.Expiry.Enabled {
+	if !f.AutoFriend && !f.Expiry.Enabled {
 		return nil
 	}
 	return &FriendSyncConfig{
 		UpdateInterval: time.Duration(f.UpdateInterval) * time.Second,
-		AutoFollow:     f.AutoFollow,
-		AutoUnfollow:   f.AutoUnfollow,
+		AutoFriend:     f.AutoFriend,
 		InitialInvite:  f.InitialInvite,
 		ExpiryEnabled:  f.Expiry.Enabled,
 		ExpiryDays:     f.Expiry.Days,

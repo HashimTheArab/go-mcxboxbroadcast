@@ -5,513 +5,253 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"strconv"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	xblsocial "github.com/df-mc/go-xsapi/v2/social"
 )
 
-func TestFriendSyncerAcceptsPendingIncomingRequests(t *testing.T) {
-	var accepted bool
+func TestFriendSyncerAcceptsPendingRequestsAndInvites(t *testing.T) {
 	var invited []string
-	client := syncFriendClient{
-		accept: func(context.Context) ([]Person, error) {
-			accepted = true
-			return []Person{{XUID: "9", Gamertag: "Pending"}}, nil
-		},
-	}
+	history := &syncHistoryStore{lastSeen: map[string]time.Time{"1": time.Now().Add(-30 * 24 * time.Hour)}}
 	syncer := FriendSyncer{
-		Client: &client,
-		Config: FriendSyncConfig{
-			AutoFollow:    true,
-			InitialInvite: true,
-		},
-		Inviter: fakeSyncInviter{invite: func(xuid string) {
-			invited = append(invited, xuid)
+		Client: &syncFriendClient{accept: func(context.Context) ([]Person, error) {
+			return []Person{{XUID: "1", Gamertag: "One"}}, nil
 		}},
+		History: history,
+		Inviter: fakeSyncInviter{invite: func(xuid string) { invited = append(invited, xuid) }},
+		Config:  FriendSyncConfig{AutoFriend: true, InitialInvite: true},
 	}
 	if err := syncer.Sync(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if !accepted {
-		t.Fatal("expected pending requests to be accepted")
+	if !slices.Equal(invited, []string{"1"}) {
+		t.Fatalf("invited = %v, want [1]", invited)
 	}
-	if len(invited) != 1 || invited[0] != "9" {
-		t.Fatalf("invited xuids = %v, want [9]", invited)
+	// Expiry counts from when the friendship started, not an older visit.
+	if seen := history.lastSeen["1"]; time.Since(seen) > time.Minute {
+		t.Fatalf("last seen = %v, want reset on add", seen)
 	}
 }
 
-func TestFriendSyncerBoundsXboxOperations(t *testing.T) {
-	client := &deadlineFriendClient{}
-	syncer := FriendSyncer{
-		Client: client,
-		Config: FriendSyncConfig{
-			AutoFollow:    true,
-			AutoUnfollow:  true,
-			InitialInvite: true,
-		},
-		Inviter: deadlineInviter{record: client.record},
-	}
-	if err := syncer.Sync(context.Background()); err != nil {
+func TestFriendSyncerSkipsPendingRequestsWithoutAutoFriend(t *testing.T) {
+	client := &syncFriendClient{accept: func(context.Context) ([]Person, error) {
+		t.Fatal("accepted requests with autoFriend off")
+		return nil, nil
+	}}
+	if err := (FriendSyncer{Client: client}).Sync(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	for _, operation := range []string{"accept", "friends", "follow", "unfollow", "force_unfollow", "invite"} {
-		if !client.called[operation] {
-			t.Fatalf("%s was not called", operation)
-		}
-		if !client.deadlined[operation] {
-			t.Fatalf("%s did not receive a bounded context", operation)
-		}
-	}
 }
 
-func TestFriendSyncerContinuesAutoFollowWhenPendingAcceptFails(t *testing.T) {
-	acceptErr := errors.New("pending requests unavailable")
-	client := syncFriendClient{
-		people: []Person{{XUID: "1", Gamertag: "Follower", IsFollowingCaller: true}},
-		accept: func(context.Context) ([]Person, error) {
-			return nil, acceptErr
-		},
-	}
-	syncer := FriendSyncer{
-		Client: &client,
-		Config: FriendSyncConfig{
-			AutoFollow: true,
-		},
-	}
-	if err := syncer.Sync(context.Background()); err != nil {
-		t.Fatalf("Sync() error = %v, want nil", err)
-	}
-	if client.followCalls != 1 {
-		t.Fatalf("follow calls = %d, want 1", client.followCalls)
-	}
-}
-
-func TestFriendSyncerDebugLogsFriendSyncProgress(t *testing.T) {
-	var log bytes.Buffer
-	client := syncFriendClient{
-		people: []Person{
-			{XUID: "1", Gamertag: "FollowerOne", IsFollowingCaller: true},
-			{XUID: "2", Gamertag: "FollowerTwo", IsFollowingCaller: true},
-			{XUID: "3", Gamertag: "Stale", IsFollowedByCaller: true},
-		},
-	}
-	syncer := FriendSyncer{
-		Client: &client,
-		Config: FriendSyncConfig{
-			AutoFollow:   true,
-			AutoUnfollow: true,
-		},
-		Log: slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelDebug})),
-	}
-	if err := syncer.Sync(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	output := log.String()
-	for _, want := range []string{
-		`msg="friend sync scan"`,
-		`followers=2`,
-		`following=1`,
-		`followers_only=2`,
-		`following_only=1`,
-		`mutual=0`,
-		`neither=0`,
-		`msg="adding friends" count=2`,
-		`msg="added friend" xuid=1`,
-		`msg="added friend" xuid=2`,
-		`msg="added friends" count=2`,
-		`msg="removing friends" count=1`,
-		`msg="removed friend" xuid=3`,
-		`msg="removed friends" count=1`,
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("debug log missing %q in:\n%s", want, output)
-		}
-	}
-}
-
-func TestFriendSyncerDebugLogsExpiryCandidates(t *testing.T) {
-	var log bytes.Buffer
-	history := &syncHistoryStore{
-		lastSeen: map[string]time.Time{
-			"stale":  time.Now().Add(-16 * 24 * time.Hour),
-			"recent": time.Now(),
-		},
-	}
+// People the bulk accept could not update are retried alone; restricted ones are declined and reported.
+func TestFriendSyncerDeclinesRestrictedRequests(t *testing.T) {
+	var notified []string
 	client := &syncFriendClient{
-		people: []Person{
-			{XUID: "stale", Gamertag: "Stale", IsFollowingCaller: true, IsFollowedByCaller: true},
-			{XUID: "recent", Gamertag: "Recent", IsFollowingCaller: true, IsFollowedByCaller: true},
+		accept: func(context.Context) ([]Person, error) {
+			return nil, &AcceptFriendRequestsError{Failed: []Person{{XUID: "2", Gamertag: "Kid"}, {XUID: "3", Gamertag: "Ok"}}}
+		},
+		add: func(_ context.Context, xuid string) error {
+			if xuid == "2" {
+				return &xblsocial.ResponseError{StatusCode: 403, Code: 1049}
+			}
+			return nil
+		},
+	}
+	syncer := FriendSyncer{
+		Client:   client,
+		Config:   FriendSyncConfig{AutoFriend: true},
+		Notifier: notifierFunc(func(_ context.Context, m string) error { notified = append(notified, m); return nil }),
+	}
+	if err := syncer.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(client.added, []string{"2", "3"}) || !slices.Equal(client.removed, []string{"2"}) {
+		t.Fatalf("added = %v removed = %v, want both retried and 2 declined", client.added, client.removed)
+	}
+	if len(notified) != 1 || !strings.Contains(notified[0], "Kid (2)") {
+		t.Fatalf("notifications = %q", notified)
+	}
+}
+
+func TestFriendSyncerStopsRetriesWhenFriendListIsFull(t *testing.T) {
+	client := &syncFriendClient{
+		accept: func(context.Context) ([]Person, error) {
+			return nil, &AcceptFriendRequestsError{Failed: []Person{{XUID: "1"}, {XUID: "2"}}}
+		},
+		add: func(context.Context, string) error {
+			return &xblsocial.ResponseError{StatusCode: 403, Code: 1028}
+		},
+	}
+	var result friendSyncResult
+	FriendSyncer{Client: client}.acceptPending(context.Background(), &result)
+	if !result.friendListFull || len(client.added) != 1 {
+		t.Fatalf("full=%v added=%v, want one attempt then stop", result.friendListFull, client.added)
+	}
+}
+
+func TestFriendSyncerExpiresInactiveFriendsOnly(t *testing.T) {
+	old := time.Now().Add(-48 * time.Hour)
+	history := &syncHistoryStore{lastSeen: map[string]time.Time{"old": old, "recent": time.Now(), "own": old}}
+	client := &syncFriendClient{people: []Person{{XUID: "old"}, {XUID: "recent"}, {XUID: "own"}, {XUID: "new"}, {XUID: "4503599627370497"}}}
+	syncer := FriendSyncer{
+		Client:   client,
+		History:  history,
+		OwnXUIDs: func() []string { return []string{"own"} },
+		Config:   FriendSyncConfig{ExpiryEnabled: true, ExpiryDays: 1},
+	}
+	if err := syncer.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(client.removed, []string{"old"}) {
+		t.Fatalf("removed = %v, want [old]", client.removed)
+	}
+	if _, ok := history.lastSeen["old"]; ok {
+		t.Fatal("expired friend's history was kept")
+	}
+	if _, ok := history.lastSeen["new"]; !ok {
+		t.Fatal("new friend's expiry clock was not started")
+	}
+}
+
+func TestFriendSyncerDefaultsExpiryDays(t *testing.T) {
+	client := &syncFriendClient{people: []Person{{XUID: "1"}}}
+	syncer := FriendSyncer{
+		Client:  client,
+		History: &syncHistoryStore{lastSeen: map[string]time.Time{"1": time.Now().Add(-24 * time.Hour)}},
+		Config:  FriendSyncConfig{ExpiryEnabled: true},
+	}
+	if err := syncer.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.removed) != 0 {
+		t.Fatal("zero expiry days should default instead of removing recent friends")
+	}
+}
+
+func TestFriendSyncerStopsExpiryWhenRemovalsAreRateLimited(t *testing.T) {
+	old := time.Now().Add(-48 * time.Hour)
+	client := &syncFriendClient{
+		people: []Person{{XUID: "1"}, {XUID: "2"}},
+		remove: func(context.Context, string) error {
+			return &xblsocial.ResponseError{StatusCode: 429, RetryAfter: time.Minute}
 		},
 	}
 	syncer := FriendSyncer{
 		Client:  client,
-		History: history,
-		Config: FriendSyncConfig{
-			AutoUnfollow:  true,
-			ExpiryEnabled: true,
-			ExpiryDays:    15,
-		},
-		Log: slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		History: &syncHistoryStore{lastSeen: map[string]time.Time{"1": old, "2": old}},
+		Config:  FriendSyncConfig{ExpiryEnabled: true, ExpiryDays: 1},
 	}
-	if err := syncer.Sync(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	output := log.String()
-	for _, want := range []string{
-		`msg="friend sync expiry scan"`,
-		`mutual_expiry_candidates=1`,
-		`expired_friends=1`,
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("debug log missing %q in:\n%s", want, output)
-		}
-	}
-	if client.removeCalls != 1 {
-		t.Fatalf("remove calls = %d, want 1", client.removeCalls)
-	}
-}
-
-func TestFriendSyncerDebugLogsPendingFriendAccepts(t *testing.T) {
-	var log bytes.Buffer
-	client := syncFriendClient{
-		accept: func(context.Context) ([]Person, error) {
-			return []Person{
-				{XUID: "9", Gamertag: "PendingOne"},
-				{XUID: "10", Gamertag: "PendingTwo"},
-			}, nil
-		},
-	}
-	syncer := FriendSyncer{
-		Client: &client,
-		Config: FriendSyncConfig{
-			AutoFollow: true,
-		},
-		Log: slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelDebug})),
-	}
-	if err := syncer.Sync(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	output := log.String()
-	for _, want := range []string{
-		`msg="accepting pending friend requests"`,
-		`msg="added friend" xuid=9 gamertag=PendingOne source=pending_requests`,
-		`msg="added friend" xuid=10 gamertag=PendingTwo source=pending_requests`,
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("log missing %q in:\n%s", want, output)
-		}
-	}
-}
-
-func TestFriendSyncerLogsInitialInviteFailure(t *testing.T) {
-	var log bytes.Buffer
-	inviteErr := errors.New("invite rejected")
-	client := syncFriendClient{
-		people: []Person{{XUID: "1", Gamertag: "Follower", IsFollowingCaller: true}},
-	}
-	syncer := FriendSyncer{
-		Client: &client,
-		Config: FriendSyncConfig{
-			AutoFollow:    true,
-			InitialInvite: true,
-		},
-		Inviter: fakeSyncInviter{err: inviteErr},
-		Log:     slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelDebug})),
-	}
-	if err := syncer.Sync(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	output := log.String()
-	if !strings.Contains(output, `msg="send initial invite"`) || !strings.Contains(output, `err="invite rejected"`) {
-		t.Fatalf("expected invite failure log, got:\n%s", output)
-	}
-	if strings.Contains(output, `msg="sent initial invite"`) {
-		t.Fatalf("should not log sent invite on failure:\n%s", output)
-	}
-}
-
-func TestFriendSyncerStopsAutoFollowPassWhenFriendListIsFull(t *testing.T) {
-	var log bytes.Buffer
-	fullErr := &xblsocial.ResponseError{Code: 1028}
-	client := &syncFriendClient{
-		people: []Person{
-			{XUID: "1", IsFollowingCaller: true},
-			{XUID: "2", IsFollowingCaller: true},
-		},
-		follow: func(context.Context, string) error {
-			return fullErr
-		},
-	}
-	syncer := FriendSyncer{
-		Client: client,
-		Config: FriendSyncConfig{
-			AutoFollow: true,
-		},
-		Log: slog.New(slog.NewTextHandler(&log, nil)),
-	}
-	result, err := syncer.syncWithOptions(context.Background(), friendSyncOptions{expire: true, autoFollow: true, autoUnfollow: true})
+	result, err := syncer.syncWithOptions(context.Background(), friendSyncOptions{expire: true, remove: true})
 	if err != nil {
-		t.Fatalf("syncWithOptions() error = %v, want nil", err)
-	}
-	if !result.friendListFull {
-		t.Fatal("expected friend-list-full result")
-	}
-	if client.followCalls != 1 {
-		t.Fatalf("follow calls = %d, want 1", client.followCalls)
-	}
-	if !strings.Contains(log.String(), "friend list full") {
-		t.Fatalf("expected friend-list-full log, got %q", log.String())
-	}
-}
-
-func TestFriendSyncerContinuesPastSingleFollowFailure(t *testing.T) {
-	client := &syncFriendClient{
-		people: []Person{
-			{XUID: "1", IsFollowingCaller: true},
-			{XUID: "2", IsFollowingCaller: true},
-			{XUID: "3", IsFollowedByCaller: true},
-		},
-		follow: func(_ context.Context, xuid string) error {
-			if xuid == "1" {
-				return errors.New("transient failure")
-			}
-			return nil
-		},
-	}
-	syncer := FriendSyncer{
-		Client: client,
-		Config: FriendSyncConfig{AutoFollow: true, AutoUnfollow: true},
-	}
-	if err := syncer.Sync(context.Background()); err != nil {
-		t.Fatalf("Sync() error = %v, want nil", err)
-	}
-	if client.followCalls != 2 {
-		t.Fatalf("follow calls = %d, want 2 (continue past failure)", client.followCalls)
-	}
-	if client.removeCalls != 1 {
-		t.Fatalf("remove calls = %d, want 1 (removals not aborted)", client.removeCalls)
-	}
-}
-
-func TestFriendSyncerContinuesRemovalsWhenAddsAreRateLimited(t *testing.T) {
-	limitErr := &xblsocial.ResponseError{StatusCode: 429, RetryAfter: 5 * time.Second}
-	client := &syncFriendClient{
-		people: []Person{
-			{XUID: "1", IsFollowingCaller: true},
-			{XUID: "2", IsFollowingCaller: true},
-			{XUID: "3", IsFollowedByCaller: true},
-		},
-		follow: func(context.Context, string) error {
-			return limitErr
-		},
-	}
-	syncer := FriendSyncer{
-		Client: client,
-		Config: FriendSyncConfig{AutoFollow: true, AutoUnfollow: true},
-	}
-	result, err := syncer.syncWithOptions(context.Background(), friendSyncOptions{autoFollow: true, autoUnfollow: true})
-	if err != nil {
-		t.Fatalf("syncWithOptions() error = %v, want nil", err)
-	}
-	if client.followCalls != 1 {
-		t.Fatalf("follow calls = %d, want 1 (stop adds after rate limit)", client.followCalls)
-	}
-	if client.removeCalls != 1 {
-		t.Fatalf("remove calls = %d, want 1 (removals use a separate limit)", client.removeCalls)
-	}
-	if result.followRetryAfter != 5*time.Second {
-		t.Fatalf("follow retry-after = %s, want 5s", result.followRetryAfter)
-	}
-	if result.unfollowRetryAfter != 0 {
-		t.Fatalf("unfollow retry-after = %s, want 0", result.unfollowRetryAfter)
-	}
-}
-
-func TestFriendSyncerForceUnfollowsRestrictedAccounts(t *testing.T) {
-	restrictedErr := &xblsocial.ResponseError{Code: 1049}
-	var notified []string
-	client := &syncFriendClient{
-		people: []Person{
-			{XUID: "1", Gamertag: "Restricted", IsFollowingCaller: true},
-			{XUID: "2", Gamertag: "Fine", IsFollowingCaller: true},
-		},
-		follow: func(_ context.Context, xuid string) error {
-			if xuid == "1" {
-				return restrictedErr
-			}
-			return nil
-		},
-	}
-	syncer := FriendSyncer{
-		Client: client,
-		Config: FriendSyncConfig{AutoFollow: true},
-		Notifier: notifierFunc(func(_ context.Context, message string) error {
-			notified = append(notified, message)
-			return nil
-		}),
-	}
-	if err := syncer.Sync(context.Background()); err != nil {
-		t.Fatalf("Sync() error = %v, want nil", err)
-	}
-	if got := strings.Join(client.forceUnfollowed, ","); got != "1" {
-		t.Fatalf("force unfollowed = %q, want 1", got)
-	}
-	if client.followCalls != 2 {
-		t.Fatalf("follow calls = %d, want 2 (continue past restricted account)", client.followCalls)
-	}
-	if len(notified) != 1 || !strings.Contains(notified[0], "Restricted") {
-		t.Fatalf("notifications = %v, want restriction notification", notified)
-	}
-}
-
-func TestFriendSyncerSkipsGuestXUIDsUnconditionally(t *testing.T) {
-	guest := strconv.FormatUint(1<<52, 10)
-	client := &syncFriendClient{
-		people: []Person{{XUID: guest, IsFollowingCaller: true}},
-	}
-	syncer := FriendSyncer{
-		Client: client,
-		Config: FriendSyncConfig{AutoFollow: true},
-	}
-	if err := syncer.Sync(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if client.followCalls != 0 {
-		t.Fatalf("follow calls = %d, want 0 (guest XUIDs always skipped)", client.followCalls)
+	if result.removeRetryAfter != time.Minute || len(client.removed) != 1 {
+		t.Fatalf("retry=%s removals=%v, want one attempt and a minute backoff", result.removeRetryAfter, client.removed)
 	}
 }
 
 func TestFriendSyncerPrunesHistoryForExFriends(t *testing.T) {
-	history := &syncHistoryStore{
-		lastSeen: map[string]time.Time{
-			"1":    time.Now(),
-			"gone": time.Now(),
-		},
-	}
-	client := &syncFriendClient{
-		people: []Person{{XUID: "1", IsFollowingCaller: true, IsFollowedByCaller: true}},
-	}
+	history := &syncHistoryStore{lastSeen: map[string]time.Time{"gone": time.Now(), "kept": time.Now()}}
 	syncer := FriendSyncer{
-		Client:       client,
-		Config:       FriendSyncConfig{ExpiryEnabled: true, ExpiryDays: 15},
+		Client:       &syncFriendClient{people: []Person{{XUID: "kept"}}},
 		History:      history,
 		PruneHistory: true,
+		Config:       FriendSyncConfig{ExpiryEnabled: true},
 	}
 	if err := syncer.Sync(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := history.lastSeen["gone"]; ok {
-		t.Fatal("expected history entry for ex-friend to be pruned")
+		t.Fatal("history for an ex-friend was not pruned")
 	}
-	if _, ok := history.lastSeen["1"]; !ok {
-		t.Fatal("expected history entry for current friend to remain")
-	}
-}
-
-func TestFriendSyncRunStateTracksSeparateFollowAndUnfollowBackoff(t *testing.T) {
-	now := time.Unix(100, 0)
-	state := friendSyncRunState{}
-	state.record(now, friendSyncResult{followRetryAfter: 2 * time.Minute})
-
-	blocked := state.options(now.Add(time.Minute), true)
-	if blocked.autoFollow {
-		t.Fatal("expected auto-follow suppressed during retry-after")
-	}
-	if !blocked.autoUnfollow {
-		t.Fatal("expected auto-unfollow to keep running (separate limit)")
-	}
-
-	allowed := state.options(now.Add(3*time.Minute), true)
-	if !allowed.autoFollow || !allowed.autoUnfollow {
-		t.Fatalf("expected mutations after retry-after, got %#v", allowed)
+	if _, ok := history.lastSeen["kept"]; !ok {
+		t.Fatal("history for a current friend was pruned")
 	}
 }
 
-func TestFriendSyncRunStateSuppressesAutoFollowWhenFriendListIsFull(t *testing.T) {
-	now := time.Unix(100, 0)
-	state := friendSyncRunState{}
+func TestFriendSyncerLogsInitialInviteFailure(t *testing.T) {
+	var log bytes.Buffer
+	syncer := FriendSyncer{
+		Client: &syncFriendClient{accept: func(context.Context) ([]Person, error) {
+			return []Person{{XUID: "1", Gamertag: "One"}}, nil
+		}},
+		Inviter: fakeSyncInviter{err: errors.New("invite failed")},
+		Config:  FriendSyncConfig{AutoFriend: true, InitialInvite: true},
+		Log:     slog.New(slog.NewTextHandler(&log, nil)),
+	}
+	if err := syncer.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(log.String(), "send initial invite") {
+		t.Fatalf("invite failure not logged: %q", log.String())
+	}
+}
+
+func TestFriendSyncRunStateTracksSeparateAddAndRemoveBackoff(t *testing.T) {
+	now := time.Now()
+	var state friendSyncRunState
+	state.record(now, friendSyncResult{addRetryAfter: time.Minute})
+	if opts := state.options(now.Add(time.Second), false); opts.add || !opts.remove {
+		t.Fatalf("options = %+v, want adds paused and removals running", opts)
+	}
 	state.record(now, friendSyncResult{friendListFull: true})
-
-	opts := state.options(now.Add(time.Minute), true)
-	if opts.autoFollow {
-		t.Fatal("expected auto-follow suppressed after friend-list-full")
+	if opts := state.options(now.Add(2*time.Minute), false); opts.add {
+		t.Fatal("adds resumed while the friend list is full")
 	}
-	if !opts.autoUnfollow {
-		t.Fatal("expected auto-unfollow to keep running after friend-list-full")
+	if opts := state.options(now.Add(friendListFullBackoff), false); !opts.add {
+		t.Fatal("adds did not resume after the full-list backoff")
 	}
 }
 
 type syncFriendClient struct {
-	people          []Person
-	accept          func(context.Context) ([]Person, error)
-	follow          func(context.Context, string) error
-	unfollow        func(context.Context, string) error
-	followCalls     int
-	removeCalls     int
-	forceUnfollowed []string
+	people []Person
+	accept func(context.Context) ([]Person, error)
+	add    func(context.Context, string) error
+	remove func(context.Context, string) error
+
+	mu      sync.Mutex
+	added   []string
+	removed []string
 }
 
-type deadlineFriendClient struct {
-	called    map[string]bool
-	deadlined map[string]bool
+func (c *syncFriendClient) removals() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.removed)
 }
 
-func (c *deadlineFriendClient) record(operation string, ctx context.Context) {
-	if c.called == nil {
-		c.called = map[string]bool{}
-		c.deadlined = map[string]bool{}
+func (c *syncFriendClient) Friends(context.Context) ([]Person, error) {
+	return c.people, nil
+}
+
+func (c *syncFriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]Person, error) {
+	if c.accept != nil {
+		return c.accept(ctx)
 	}
-	c.called[operation] = true
-	deadline, ok := ctx.Deadline()
-	c.deadlined[operation] = ok && time.Until(deadline) > 0 && time.Until(deadline) <= 20*time.Second
+	return nil, nil
 }
 
-func (c *deadlineFriendClient) Friends(ctx context.Context) ([]Person, error) {
-	c.record("friends", ctx)
-	return []Person{
-		{XUID: "follow", Gamertag: "Follow", IsFollowingCaller: true},
-		{XUID: "restricted", Gamertag: "Restricted", IsFollowingCaller: true},
-		{XUID: "unfollow", Gamertag: "Unfollow", IsFollowedByCaller: true},
-	}, nil
-}
-
-func (c *deadlineFriendClient) Follow(ctx context.Context, xuid string) error {
-	c.record("follow", ctx)
-	if xuid == "restricted" {
-		return xblsocial.ErrFriendRestricted
+func (c *syncFriendClient) AddFriend(ctx context.Context, xuid string) error {
+	c.mu.Lock()
+	c.added = append(c.added, xuid)
+	c.mu.Unlock()
+	if c.add != nil {
+		return c.add(ctx, xuid)
 	}
 	return nil
 }
 
-func (c *deadlineFriendClient) Unfollow(ctx context.Context, _ string) error {
-	c.record("unfollow", ctx)
-	return nil
-}
-
-func (c *deadlineFriendClient) ForceUnfollow(ctx context.Context, _ string) error {
-	c.record("force_unfollow", ctx)
-	return nil
-}
-
-func (c *deadlineFriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]Person, error) {
-	c.record("accept", ctx)
-	return []Person{{XUID: "pending", Gamertag: "Pending"}}, nil
-}
-
-type deadlineInviter struct {
-	record func(string, context.Context)
-}
-
-func (i deadlineInviter) Invite(ctx context.Context, _, _ string) error {
-	i.record("invite", ctx)
-	return nil
-}
-
-func (c *syncFriendClient) ForceUnfollow(_ context.Context, xuid string) error {
-	c.forceUnfollowed = append(c.forceUnfollowed, xuid)
+func (c *syncFriendClient) RemoveFriend(ctx context.Context, xuid string) error {
+	c.mu.Lock()
+	c.removed = append(c.removed, xuid)
+	c.mu.Unlock()
+	if c.remove != nil {
+		return c.remove(ctx, xuid)
+	}
 	return nil
 }
 
@@ -530,6 +270,14 @@ func (s *syncHistoryStore) LastSeen(_ context.Context, xuid string) (time.Time, 
 	return when, ok, nil
 }
 
+func (s *syncHistoryStore) Seen(_ context.Context, xuid string, when time.Time) error {
+	if s.lastSeen == nil {
+		s.lastSeen = map[string]time.Time{}
+	}
+	s.lastSeen[xuid] = when
+	return nil
+}
+
 func (s *syncHistoryStore) Clear(_ context.Context, xuid string) error {
 	delete(s.lastSeen, xuid)
 	return nil
@@ -541,33 +289,6 @@ func (s *syncHistoryStore) XUIDs(context.Context) ([]string, error) {
 		xuids = append(xuids, xuid)
 	}
 	return xuids, nil
-}
-
-func (c *syncFriendClient) Friends(context.Context) ([]Person, error) {
-	return c.people, nil
-}
-
-func (c *syncFriendClient) Follow(ctx context.Context, xuid string) error {
-	c.followCalls++
-	if c.follow != nil {
-		return c.follow(ctx, xuid)
-	}
-	return nil
-}
-
-func (c *syncFriendClient) Unfollow(ctx context.Context, xuid string) error {
-	c.removeCalls++
-	if c.unfollow != nil {
-		return c.unfollow(ctx, xuid)
-	}
-	return nil
-}
-
-func (c *syncFriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]Person, error) {
-	if c.accept != nil {
-		return c.accept(ctx)
-	}
-	return nil, nil
 }
 
 type fakeSyncInviter struct {

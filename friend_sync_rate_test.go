@@ -16,9 +16,8 @@ func TestFriendSyncReadRetryAfter(t *testing.T) {
 		initialReads     int
 	}{
 		{"pending", pendingRequestsURL, "45", 429, 45 * time.Second, 1},
-		{"followers", peopleHubFollowersURL, "45", 429, 45 * time.Second, 2},
-		{"following", peopleHubSocialURL, "45", 429, 45 * time.Second, 3},
-		{"no retry header", peopleHubFollowersURL, "", 429, 20 * time.Second, 2},
+		{"friends", peopleHubFriendsURL, "45", 429, 45 * time.Second, 2},
+		{"no retry header", peopleHubFriendsURL, "", 429, 20 * time.Second, 2},
 		{"short retry header", pendingRequestsURL, "5", 429, 20 * time.Second, 1},
 		{"service unavailable", pendingRequestsURL, "30", 503, 30 * time.Second, 1},
 	} {
@@ -38,9 +37,7 @@ func TestFriendSyncReadRetryAfter(t *testing.T) {
 				trigger := make(chan struct{}, 16)
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
-				syncer := FriendSyncer{Client: client, Trigger: trigger,
-					Config: FriendSyncConfig{AutoFollow: true, UpdateInterval: time.Hour}}
-				go syncer.Run(ctx)
+				go newRateSyncer(client, trigger).Run(ctx)
 				synctest.Wait()
 				assertFriendRateReads(t, reads, 0, friendRateReadURLs[:tc.initialReads]...)
 				for range cap(trigger) {
@@ -76,8 +73,7 @@ func TestFriendSyncReadRetryRunsWithoutAnotherTrigger(t *testing.T) {
 		})
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		go (FriendSyncer{Client: client, Config: FriendSyncConfig{
-			AutoFollow: true, UpdateInterval: time.Hour}}).Run(ctx)
+		go newRateSyncer(client, nil).Run(ctx)
 		synctest.Wait()
 		assertFriendRateReads(t, reads, 0, pendingRequestsURL)
 		time.Sleep(40 * time.Second)
@@ -91,7 +87,7 @@ func TestFriendSyncTriggerSpacingStartsAfterPassCompletes(t *testing.T) {
 		reads := make(chan timedFriendRead, 64)
 		delayed := false
 		client := newFriendRateClient(reads, func(req *http.Request) *http.Response {
-			if req.URL.String() == peopleHubSocialURL && !delayed {
+			if req.URL.String() == peopleHubFriendsURL && !delayed {
 				delayed = true
 				time.Sleep(5 * time.Second)
 			}
@@ -100,8 +96,7 @@ func TestFriendSyncTriggerSpacingStartsAfterPassCompletes(t *testing.T) {
 		trigger := make(chan struct{}, 16)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		go (FriendSyncer{Client: client, Trigger: trigger, Config: FriendSyncConfig{
-			AutoFollow: true, UpdateInterval: time.Hour}}).Run(ctx)
+		go newRateSyncer(client, trigger).Run(ctx)
 		synctest.Wait()
 		assertFriendRateReads(t, reads, 0, friendRateReadURLs...)
 		for range cap(trigger) {
@@ -114,13 +109,13 @@ func TestFriendSyncTriggerSpacingStartsAfterPassCompletes(t *testing.T) {
 		assertFriendRateReads(t, reads, 0)
 		time.Sleep(time.Nanosecond)
 		synctest.Wait()
-		assertFriendRateReads(t, reads, 25*time.Second, friendRateReadURLs...)
+		assertFriendRateReads(t, reads, 25*time.Second, pendingRequestsURL)
 		time.Sleep(20 * time.Second)
 		synctest.Wait()
 		assertFriendRateReads(t, reads, 0)
 		trigger <- struct{}{}
 		synctest.Wait()
-		assertFriendRateReads(t, reads, 45*time.Second, friendRateReadURLs...)
+		assertFriendRateReads(t, reads, 45*time.Second, pendingRequestsURL)
 		trigger <- struct{}{}
 		synctest.Wait()
 		close(trigger)
@@ -136,7 +131,7 @@ func TestFriendSyncCoalescesPollExpiryAndTrigger(t *testing.T) {
 		passes := make(chan timedFriendRead, 16)
 		expiries := make(chan timedFriendRead, 16)
 		start := time.Now()
-		client := &syncFriendClient{people: []Person{{XUID: "123", IsFollowedByCaller: true, IsFollowingCaller: true}},
+		client := &syncFriendClient{people: []Person{{XUID: "123"}},
 			accept: func(context.Context) ([]Person, error) {
 				passes <- timedFriendRead{"pass", time.Since(start)}
 				return nil, nil
@@ -145,7 +140,7 @@ func TestFriendSyncCoalescesPollExpiryAndTrigger(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		go (FriendSyncer{Client: client, Trigger: trigger, History: &friendRateHistory{start, expiries},
-			Config: FriendSyncConfig{AutoFollow: true, ExpiryEnabled: true,
+			Config: FriendSyncConfig{AutoFriend: true, ExpiryEnabled: true,
 				UpdateInterval: 20 * time.Second, ExpiryCheck: 20 * time.Second}}).Run(ctx)
 		synctest.Wait()
 		assertFriendRateReads(t, passes, 0, "pass")
@@ -165,8 +160,14 @@ func TestFriendSyncCoalescesPollExpiryAndTrigger(t *testing.T) {
 	})
 }
 
-// friendRateReadURLs lists the three reads in an empty auto-follow pass.
-var friendRateReadURLs = []string{pendingRequestsURL, peopleHubFollowersURL, peopleHubSocialURL}
+// friendRateReadURLs lists the reads in an empty pass that also checks expiry.
+var friendRateReadURLs = []string{pendingRequestsURL, peopleHubFriendsURL}
+
+// newRateSyncer starts with an expiry pass and then only accepts requests for an hour.
+func newRateSyncer(client FriendAPI, trigger <-chan struct{}) FriendSyncer {
+	return FriendSyncer{Client: client, Trigger: trigger, History: &syncHistoryStore{}, Config: FriendSyncConfig{
+		AutoFriend: true, ExpiryEnabled: true, UpdateInterval: time.Hour, ExpiryCheck: time.Hour}}
+}
 
 // timedFriendRead records the request and elapsed time at the transport boundary.
 type timedFriendRead struct {

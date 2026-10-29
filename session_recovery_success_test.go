@@ -11,7 +11,6 @@ import (
 
 	"github.com/df-mc/go-nethernet"
 	"github.com/google/uuid"
-	"github.com/sandertv/gophertunnel/minecraft"
 	"github.com/sandertv/gophertunnel/minecraft/room"
 )
 
@@ -32,10 +31,9 @@ func TestBroadcasterRecoversSuccessiveSignalingDrops(t *testing.T) {
 	b := &Broadcaster{
 		log: slog.New(recoveryLogHandler{Handler: slog.NewTextHandler(io.Discard, nil), recovered: recovered}),
 		conf: Config{
-			Server:               ServerInfo{Host: "127.0.0.1", Port: 19132},
+			JoinURL:              "http://127.0.0.1:19132",
 			XUID:                 "123",
 			MinecraftTokenSource: minecraftTokenSourceWithPMID{pmid: uuid.New()},
-			ListenConfig:         minecraft.ListenConfig{AuthenticationDisabled: true},
 			StatusProvider:       status,
 			UpdateInterval:       time.Hour,
 			SignalingFactory: func(context.Context, Config) (nethernet.Signaling, error) {
@@ -59,7 +57,7 @@ func TestBroadcasterRecoversSuccessiveSignalingDrops(t *testing.T) {
 	previousAnnouncer := <-announcers
 	for i := range 2 {
 		b.mu.Lock()
-		previousListener := b.listener
+		previousRelay := b.relay
 		b.mu.Unlock()
 		disconnects[i]()
 		select {
@@ -68,10 +66,10 @@ func TestBroadcasterRecoversSuccessiveSignalingDrops(t *testing.T) {
 			t.Fatalf("signaling drop %d did not recover", i+1)
 		}
 		b.mu.Lock()
-		listener, signaling, recovering := b.listener, b.signaling, b.recovering
+		relay, signaling, recovering := b.relay, b.signaling, b.recovering
 		b.mu.Unlock()
-		if listener == nil || listener == previousListener {
-			t.Fatalf("recovery %d did not replace the listener", i+1)
+		if relay == nil || relay == previousRelay || relay.signaling != signaling {
+			t.Fatalf("recovery %d did not move the relay to the new signaling", i+1)
 		}
 		if signaling != signals[i+1] || signaling.Context().Err() != nil || recovering {
 			t.Fatalf("recovery %d did not finish with the replacement signaling", i+1)

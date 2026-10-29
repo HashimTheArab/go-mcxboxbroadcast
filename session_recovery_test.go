@@ -3,13 +3,14 @@ package broadcaster
 import (
 	"context"
 	"errors"
-	"github.com/df-mc/go-xsapi/v2"
 	"net/http"
 	"reflect"
 	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/df-mc/go-xsapi/v2"
 
 	"github.com/df-mc/go-nethernet"
 	"github.com/sandertv/gophertunnel/minecraft/room"
@@ -29,7 +30,7 @@ func TestSessionLoopStopsAfterRepeatedPublicationFailure(t *testing.T) {
 			signaling: &cancelableSignaling{ctx: lost, networkID: "123"},
 			conf: Config{
 				XUID:           "123",
-				Server:         ServerInfo{Host: "127.0.0.1", Port: 19132},
+				JoinURL:        "http://127.0.0.1:19132",
 				Status:         Status{HostName: "Host", WorldName: "World"},
 				UpdateInterval: 30 * time.Second,
 				SignalingFactory: func(context.Context, Config) (nethernet.Signaling, error) {
@@ -62,9 +63,7 @@ func TestSessionLoopStopsAfterRepeatedPublicationFailure(t *testing.T) {
 		if len(notices) != 1 || !strings.Contains(notices[0], "403 Forbidden") {
 			t.Fatalf("notices = %v, want one recovery failure notice", notices)
 		}
-		// Failed recovery has no listener. Close must still release its announcer.
-		b.done = make(chan struct{})
-		close(b.done)
+		// Failed recovery has no relay. Close must still release its announcer.
 		if err := b.Close(); err != nil {
 			t.Fatal(err)
 		}

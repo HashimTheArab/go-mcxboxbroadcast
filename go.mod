@@ -4,15 +4,15 @@ go 1.26.2
 
 require (
 	github.com/coder/websocket v1.8.14
-	github.com/df-mc/go-nethernet v1.0.25-0.20260928201420-215e46422b58
+	github.com/coreos/go-oidc/v3 v3.17.0
+	github.com/df-mc/go-nethernet v1.0.27-0.20261029090531-f61bc9dde016
 	github.com/df-mc/go-playfab/v2 v2.0.4-0.20261011110813-e01ef1ec605c
-	github.com/df-mc/go-xsapi/v2 v2.0.4-0.20261012072832-90ce120e31cd
-	github.com/go-gl/mathgl v1.2.0
+	github.com/df-mc/go-xsapi/v2 v2.0.4-0.20261025033432-d43cca94551a
+	github.com/go-jose/go-jose/v4 v4.1.6
 	github.com/google/uuid v1.6.0
 	github.com/lmittmann/tint v1.2.0
 	github.com/pelletier/go-toml/v2 v2.2.4
-	github.com/pion/webrtc/v4 v4.2.21-0.20260920133716-91bfc6c2039f
-	github.com/sandertv/go-raknet v1.15.2-0.20260705184311-0d1fd09e2cf6
+	github.com/pion/sdp/v3 v3.0.20
 	github.com/sandertv/gophertunnel v0.0.0-00010101000000-000000000000
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/term v0.40.0
@@ -22,11 +22,10 @@ require (
 require (
 	github.com/cenkalti/backoff/v7 v7.0.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/coreos/go-oidc/v3 v3.17.0 // indirect
 	github.com/creachadair/jrpc2 v1.3.5 // indirect
 	github.com/creachadair/mds v0.26.1 // indirect
 	github.com/df-mc/jsonc v1.0.5 // indirect
-	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
+	github.com/go-gl/mathgl v1.2.0 // indirect
 	github.com/klauspost/compress v1.18.7 // indirect
 	github.com/pion/datachannel v1.6.3 // indirect
 	github.com/pion/dtls/v3 v3.1.9 // indirect
@@ -38,11 +37,12 @@ require (
 	github.com/pion/rtcp v1.2.17 // indirect
 	github.com/pion/rtp v1.10.5 // indirect
 	github.com/pion/sctp v1.11.3 // indirect
-	github.com/pion/sdp/v3 v3.0.20 // indirect
 	github.com/pion/srtp/v3 v3.1.0 // indirect
 	github.com/pion/stun/v4 v4.0.1 // indirect
 	github.com/pion/transport/v5 v5.0.1 // indirect
 	github.com/pion/turn/v5 v5.1.2 // indirect
+	github.com/pion/webrtc/v4 v4.2.21-0.20260920133716-91bfc6c2039f // indirect
+	github.com/sandertv/go-raknet v1.15.2-0.20260705184311-0d1fd09e2cf6 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/exp v0.0.0-20260611194520-c48552f49976 // indirect
@@ -55,5 +55,5 @@ require (
 
 replace (
 	github.com/sandertv/go-raknet => github.com/hashimthearab/go-raknet v1.15.1-0.20260908193618-2049463566ca
-	github.com/sandertv/gophertunnel => github.com/hashimthearab/gophertunnel v1.25.3-0.20261012092146-f12973c6db70
+	github.com/sandertv/gophertunnel => github.com/hashimthearab/gophertunnel v1.25.3-0.20261028172540-f8448d729edd
 )

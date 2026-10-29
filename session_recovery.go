@@ -46,7 +46,23 @@ func (b *Broadcaster) sessionLoop() {
 				continue
 			}
 		case <-ticker.C:
+			b.closeDrainedSessions()
 			issue = b.sessionHealthIssue()
+		case <-b.healthCheck:
+			issue = b.sessionHealthIssue()
+			if issue.reason == "" {
+				continue
+			}
+		}
+		if issue.rotate && issue.subAccountID == "" {
+			if b.rotatePrimarySession(issue) {
+				consecutiveFailures = 0
+				continue
+			}
+			if b.ctx.Err() != nil {
+				return
+			}
+			issue.reason = "session rotation failed"
 		}
 		if issue.reason != "" && issue.subAccountID == "" {
 			if issue.activity != nil && !b.canRecreateSignaling() {
@@ -87,6 +103,20 @@ func (b *Broadcaster) sessionLoop() {
 			consecutiveFailures = 0
 		}
 	}
+}
+
+// rotatePrimarySession reports whether the primary session rotated; on failure
+// the caller falls back to full recreation, as Java restarts.
+func (b *Broadcaster) rotatePrimarySession(issue sessionHealthIssue) bool {
+	b.info("rotating session", "reason", issue.reason)
+	ctx, cancel := context.WithTimeout(b.ctx, 30*time.Second)
+	defer cancel()
+	if err := b.rotateSession(ctx); err != nil {
+		b.log.Error("rotate session; re-creating instead", "err", err)
+		return false
+	}
+	b.info("rotated session")
+	return true
 }
 
 // refreshSession repairs an unhealthy sub-account, then updates metadata with
