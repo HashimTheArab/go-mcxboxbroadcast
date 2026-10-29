@@ -9,7 +9,6 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -25,6 +24,7 @@ import (
 	"github.com/df-mc/go-nethernet/endpoint"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/pion/webrtc/v4"
 )
 
 const testJoinURL = "https://bedrock.test:19132"
@@ -245,28 +245,28 @@ func testOffer(t *testing.T, issuer *rsa.PrivateKey, client *ecdsa.PrivateKey, s
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload, err := canonicalFingerprints([]string{signedFingerprint})
+	desc := &nethernet.Description{
+		ICE:  webrtc.ICEParameters{UsernameFragment: "ufrag", Password: "password"},
+		DTLS: webrtc.DTLSParameters{Role: webrtc.DTLSRoleClient, Fingerprints: []webrtc.DTLSFingerprint{testFingerprint(signedFingerprint)}},
+		SCTP: webrtc.SCTPCapabilities{MaxMessageSize: 262144},
+	}
+	identity, err := nethernet.Identity{PrivateKey: client, Token: token, Domain: "https://authorization.test"}.Sign(desc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fingerprintSigner, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES384, Key: client}, nil)
+	desc.Identity = identity
+	desc.DTLS.Fingerprints = []webrtc.DTLSFingerprint{testFingerprint(sdpFingerprint)}
+	b, err := desc.Encode()
 	if err != nil {
 		t.Fatal(err)
 	}
-	signature, err := fingerprintSigner.Sign(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	detached, err := signature.DetachedCompactSerialize()
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertion, _ := json.Marshal(map[string]string{"fingerprints": detached, "token": token})
-	identity, _ := json.Marshal(map[string]any{
-		"assertion": string(assertion),
-		"idp":       map[string]string{"domain": "https://authorization.test", "protocol": "default"},
-	})
-	return "v=0\r\na=identity:" + base64.StdEncoding.EncodeToString(identity) + "\r\na=fingerprint:" + sdpFingerprint + "\r\n"
+	return string(b)
+}
+
+// testFingerprint splits "<algorithm> <digest>" into a DTLS fingerprint.
+func testFingerprint(s string) webrtc.DTLSFingerprint {
+	algorithm, value, _ := strings.Cut(s, " ")
+	return webrtc.DTLSFingerprint{Algorithm: algorithm, Value: value}
 }
 
 // startTestRelay relays offers from connection 42 of "client" to fake target endpoints.

@@ -10,8 +10,8 @@ github.com/creachadair/jrpc2 v1.3.5 h1:onJko+1u6xoiRph3xwWmfNISR91teCRhbJwSyS9Sv
 github.com/creachadair/jrpc2 v1.3.5/go.mod h1:YXDmS53AavsiytbAwskrczJPcVHvKC9GoyWzwfSQXoE=
 github.com/creachadair/mds v0.26.1 h1:CQG8f4cueHX/c20q5Sy/Ubk8Bvy+aRzVgbpxVieMBAs=
 github.com/creachadair/mds v0.26.1/go.mod h1:dMBTCSy3iS3dwh4Rb1zxeZz2d7K8+N24GCTsayWtQRI=
-github.com/df-mc/go-nethernet v1.0.27-0.20261028141106-74af70df9aa6 h1:F7E3YjnQeKxz7NpuHHUPAMrWmj8zEiACi/H/UrM0ih0=
-github.com/df-mc/go-nethernet v1.0.27-0.20261028141106-74af70df9aa6/go.mod h1:SFH4cfiLRWUUNGMvQeaOjFfFX4eexTkIfBtp55vJNqY=
+github.com/df-mc/go-nethernet v1.0.27-0.20261029090531-f61bc9dde016 h1:tWFVwsrCsoRDtXqUx3c6haX0tJ/tX2YwC+PoKgxCD8Y=
+github.com/df-mc/go-nethernet v1.0.27-0.20261029090531-f61bc9dde016/go.mod h1:SFH4cfiLRWUUNGMvQeaOjFfFX4eexTkIfBtp55vJNqY=
 github.com/df-mc/go-playfab/v2 v2.0.4-0.20261011110813-e01ef1ec605c h1:rSIa81MbNtklMtRCMipaorIMmo3usc42wYndwOB9jhU=
 github.com/df-mc/go-playfab/v2 v2.0.4-0.20261011110813-e01ef1ec605c/go.mod h1:CS3FV3tJlohvGQiX0IJiaYKOVNfy0p778B84oEVyxlw=
 github.com/df-mc/go-xsapi/v2 v2.0.4-0.20261025033432-d43cca94551a h1:YXMw8jzZybnDJpoMesJpRJHrB02FNsMjqbKv0aKZlMM=

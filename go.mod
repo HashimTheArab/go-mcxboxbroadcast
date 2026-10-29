@@ -5,13 +5,14 @@ go 1.26.2
 require (
 	github.com/coder/websocket v1.8.14
 	github.com/coreos/go-oidc/v3 v3.17.0
-	github.com/df-mc/go-nethernet v1.0.27-0.20261028141106-74af70df9aa6
+	github.com/df-mc/go-nethernet v1.0.27-0.20261029090531-f61bc9dde016
 	github.com/df-mc/go-playfab/v2 v2.0.4-0.20261011110813-e01ef1ec605c
 	github.com/df-mc/go-xsapi/v2 v2.0.4-0.20261025033432-d43cca94551a
 	github.com/go-jose/go-jose/v4 v4.1.6
 	github.com/google/uuid v1.6.0
 	github.com/lmittmann/tint v1.2.0
 	github.com/pelletier/go-toml/v2 v2.2.4
+	github.com/pion/sdp/v3 v3.0.20
 	github.com/sandertv/gophertunnel v0.0.0-00010101000000-000000000000
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/term v0.40.0
@@ -36,7 +37,6 @@ require (
 	github.com/pion/rtcp v1.2.17 // indirect
 	github.com/pion/rtp v1.10.5 // indirect
 	github.com/pion/sctp v1.11.3 // indirect
-	github.com/pion/sdp/v3 v3.0.20 // indirect
 	github.com/pion/srtp/v3 v3.1.0 // indirect
 	github.com/pion/stun/v4 v4.0.1 // indirect
 	github.com/pion/transport/v5 v5.0.1 // indirect

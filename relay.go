@@ -2,9 +2,6 @@ package broadcaster
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -17,8 +14,7 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/df-mc/go-nethernet"
 	"github.com/df-mc/go-nethernet/endpoint"
-	"github.com/go-jose/go-jose/v4"
-	"github.com/sandertv/gophertunnel/minecraft/protocol/login"
+	"github.com/pion/sdp/v3"
 	"github.com/sandertv/gophertunnel/minecraft/service"
 	"golang.org/x/oauth2"
 )
@@ -318,49 +314,25 @@ func (v *tokenVerifier) get(ctx context.Context) (*oidc.IDTokenVerifier, error) 
 
 // verifyOfferIdentity checks that the offer's identity token was issued by
 // Minecraft's authorization service and signed the offer's DTLS fingerprints.
-func verifyOfferIdentity(ctx context.Context, sdp string, verifier *oidc.IDTokenVerifier) (offerIdentity, error) {
-	var identityAttr string
-	var fingerprints []string
-	for line := range strings.Lines(sdp) {
-		line = strings.TrimSpace(line)
-		if v, ok := strings.CutPrefix(line, "a=identity:"); ok {
-			identityAttr = v
-		} else if v, ok := strings.CutPrefix(line, "a=fingerprint:"); ok {
-			fingerprints = append(fingerprints, v)
-		}
+func verifyOfferIdentity(ctx context.Context, offer string, verifier *oidc.IDTokenVerifier) (offerIdentity, error) {
+	d := &sdp.SessionDescription{}
+	if err := d.UnmarshalString(offer); err != nil {
+		return offerIdentity{}, fmt.Errorf("decode offer: %w", err)
 	}
-	if identityAttr == "" {
+	desc, err := nethernet.ParseDescription(d)
+	if err != nil {
+		return offerIdentity{}, fmt.Errorf("parse offer: %w", err)
+	}
+	if desc.Identity == nil {
 		return offerIdentity{}, errors.New("offer has no identity")
 	}
-	if len(fingerprints) == 0 {
-		return offerIdentity{}, errors.New("offer has no fingerprints")
-	}
-	raw, err := base64.StdEncoding.DecodeString(identityAttr)
-	if err != nil {
-		return offerIdentity{}, fmt.Errorf("decode identity: %w", err)
-	}
-	var identity struct {
-		Assertion string `json:"assertion"` // JSON encoded as a string
-	}
-	var assertion struct {
-		Fingerprints string `json:"fingerprints"`
-		Token        string `json:"token"`
-	}
-	if err := json.Unmarshal(raw, &identity); err != nil {
-		return offerIdentity{}, fmt.Errorf("decode identity: %w", err)
-	}
-	if err := json.Unmarshal([]byte(identity.Assertion), &assertion); err != nil {
-		return offerIdentity{}, fmt.Errorf("decode identity assertion: %w", err)
-	}
-
-	token, err := verifier.Verify(ctx, assertion.Token)
+	token, err := verifier.Verify(ctx, desc.Identity.Assertion.Token)
 	if err != nil {
 		return offerIdentity{}, fmt.Errorf("verify token: %w", err)
 	}
 	var claims struct {
 		XUID     string `json:"xid"`
 		Gamertag string `json:"xname"`
-		Key      string `json:"cpk"`
 	}
 	if err := token.Claims(&claims); err != nil {
 		return offerIdentity{}, fmt.Errorf("decode token claims: %w", err)
@@ -368,44 +340,12 @@ func verifyOfferIdentity(ctx context.Context, sdp string, verifier *oidc.IDToken
 	if claims.XUID == "" {
 		return offerIdentity{}, errors.New("token has no xuid")
 	}
-	var key ecdsa.PublicKey
-	if err := login.ParsePublicKey(claims.Key, &key); err != nil {
-		return offerIdentity{}, fmt.Errorf("parse token key: %w", err)
-	}
-
-	payload, err := canonicalFingerprints(fingerprints)
+	key, err := desc.Identity.PublicKey(false)
 	if err != nil {
+		return offerIdentity{}, fmt.Errorf("token key: %w", err)
+	}
+	if err := desc.Identity.Verify(desc, key); err != nil {
 		return offerIdentity{}, err
 	}
-	signature, err := jose.ParseDetached(assertion.Fingerprints, payload, []jose.SignatureAlgorithm{jose.ES384})
-	if err != nil {
-		return offerIdentity{}, fmt.Errorf("parse fingerprint signature: %w", err)
-	}
-	if _, err := signature.Verify(&key); err != nil {
-		return offerIdentity{}, fmt.Errorf("verify fingerprint signature: %w", err)
-	}
 	return offerIdentity{XUID: claims.XUID, Gamertag: claims.Gamertag}, nil
-}
-
-// canonicalFingerprints builds the payload the client signs from its
-// 'a=fingerprint:<algorithm> <digest>' values.
-func canonicalFingerprints(values []string) ([]byte, error) {
-	var b strings.Builder
-	b.WriteString(`{"fingerprint":[`)
-	for i, value := range values {
-		algorithm, digest, ok := strings.Cut(value, " ")
-		if !ok || strings.Contains(digest, " ") {
-			return nil, fmt.Errorf("invalid fingerprint %q", value)
-		}
-		if i != 0 {
-			b.WriteByte(',')
-		}
-		b.WriteString(`{"algorithm":`)
-		b.WriteString(strconv.Quote(algorithm))
-		b.WriteString(`,"digest":`)
-		b.WriteString(strconv.Quote(digest))
-		b.WriteString(`}`)
-	}
-	b.WriteString(`]}`)
-	return []byte(b.String()), nil
 }
