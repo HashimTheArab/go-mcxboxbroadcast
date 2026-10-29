@@ -432,6 +432,41 @@ func TestLoadConfigFileMigratesToHTTPSignalingRelay(t *testing.T) {
 	}
 }
 
+// A panel-written joinUrl in an old file survives the migration from sessionInfo.ip.
+func TestLoadConfigFileMigrationKeepsExistingJoinURL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	data := "configVersion: 4\nsession:\n  joinUrl: https://panel.test:19140\n  sessionInfo:\n    ip: bedrock.test\n    port: 19133\n"
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfigFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Session.JoinURL != "https://panel.test:19140" {
+		t.Fatalf("join URL = %q, want the panel's", cfg.Session.JoinURL)
+	}
+}
+
+// A trailing slash is accepted in the file but never reaches the endpoint client, which rejects any path.
+func TestRuntimeConfigTrimsJoinURLSlash(t *testing.T) {
+	if err := validateJoinURL("https://bedrock.test:19132/"); err == nil {
+		t.Fatal("validateJoinURL accepted a path the endpoint client rejects")
+	}
+	cfg := DefaultConfigFile()
+	cfg.Session.JoinURL = "https://bedrock.test:19132/"
+	runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{XBLTokenSource: staticTokenSource{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.JoinURL != "https://bedrock.test:19132" {
+		t.Fatalf("runtime join URL = %q", runtime.JoinURL)
+	}
+	if err := validateJoinURL(runtime.JoinURL); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRuntimeConfigRejectsHalfAdvertisedPair(t *testing.T) {
 	cfg := DefaultConfigFile()
 	cfg.Session.JoinURL = "https://bedrock.test:19132"

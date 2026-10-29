@@ -288,8 +288,13 @@ func migrateHTTPSignalingRelay(doc map[string]any) []string {
 				if p, ok := configInt(info["port"]); ok && p > 0 {
 					port = p
 				}
-				session["joinUrl"] = "https://" + net.JoinHostPort(strings.TrimSpace(host), strconv.Itoa(port))
-				notes = append(notes, fmt.Sprintf("moved session.sessionInfo.ip/port to session.joinUrl %v; change the scheme if the server only serves http", session["joinUrl"]))
+				// A panel may already have written joinUrl into the old file; keep it.
+				if existing, _ := session["joinUrl"].(string); strings.TrimSpace(existing) != "" {
+					notes = append(notes, "removed session.sessionInfo.ip/port: session.joinUrl is already set")
+				} else {
+					session["joinUrl"] = "https://" + net.JoinHostPort(strings.TrimSpace(host), strconv.Itoa(port))
+					notes = append(notes, fmt.Sprintf("moved session.sessionInfo.ip/port to session.joinUrl %v; change the scheme if the server only serves http", session["joinUrl"]))
+				}
 			}
 			delete(info, "ip")
 			delete(info, "port")
@@ -392,7 +397,7 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 		XBLTokenSource:       in.XBLTokenSource,
 		XUID:                 in.XUID,
 		MinecraftTokenSource: in.MinecraftTokenSource,
-		JoinURL:              c.Session.JoinURL,
+		JoinURL:              strings.TrimSuffix(c.Session.JoinURL, "/"),
 		HideOldSessions:      c.Session.HideOldSessions,
 		Status: Status{
 			HostName:         c.Session.SessionInfo.HostName,

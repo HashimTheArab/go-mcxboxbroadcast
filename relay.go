@@ -20,10 +20,11 @@ import (
 )
 
 const (
-	offerGatherQuiet  = 500 * time.Millisecond // wait after the last trickled candidate
-	offerGatherMax    = 3 * time.Second        // longest wait for candidates
-	relayTimeout      = 15 * time.Second       // bounds the probe and join request
-	relayReplyTimeout = 5 * time.Second        // bounds sending the answer or error, after relayTimeout
+	offerGatherQuiet   = 500 * time.Millisecond // wait after the last trickled candidate
+	offerGatherMax     = 3 * time.Second        // longest wait for candidates
+	relayTimeout       = 15 * time.Second       // bounds the probe and join request
+	relayReplyTimeout  = 5 * time.Second        // bounds sending the answer or error, after relayTimeout
+	relayRecordTimeout = 5 * time.Second        // bounds recording the join, after the reply
 	// relayClientPlatform is the platform the relay reports on probes, as the Java relay does.
 	relayClientPlatform = -1
 )
@@ -206,7 +207,7 @@ func (r *httpRelay) relay(o *pendingOffer, sdp string) {
 		r.log.Error("send join answer", "sender", o.key.networkID, "err", err)
 		return
 	}
-	r.recordJoin(ctx, o)
+	r.recordJoin(o)
 }
 
 // fail tells the client why its join failed.
@@ -230,8 +231,11 @@ func (r *httpRelay) reply(signal *nethernet.Signal) error {
 	return r.signaling.Signal(ctx, signal)
 }
 
-// recordJoin marks the offer's verified player as seen.
-func (r *httpRelay) recordJoin(ctx context.Context, o *pendingOffer) {
+// recordJoin marks the offer's verified player as seen, with its own deadline
+// since the relay's may be nearly spent.
+func (r *httpRelay) recordJoin(o *pendingOffer) {
+	ctx, cancel := context.WithTimeout(r.ctx, relayRecordTimeout)
+	defer cancel()
 	id, err := r.verify(ctx, o.sdp)
 	if err != nil {
 		r.log.Debug("unable to record join", "sender", o.key.networkID, "err", err)

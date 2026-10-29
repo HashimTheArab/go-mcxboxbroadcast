@@ -108,7 +108,7 @@ func validateJoinURL(raw string) error {
 	if err != nil {
 		return fmt.Errorf("parse join URL: %w", err)
 	}
-	if (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.Port() == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" {
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.Port() == "" || u.Path != "" || u.RawQuery != "" {
 		return fmt.Errorf("join URL %q must be http(s)://host:port", raw)
 	}
 	return nil
