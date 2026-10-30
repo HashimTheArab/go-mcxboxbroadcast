@@ -15,8 +15,9 @@ import (
 
 func TestSubAccountStatusOwnsIndependentActivity(t *testing.T) {
 	connection := p2p.Connection{
-		Type:        p2p.ConnectionTypeSignalingOverWebSocket,
-		NetherNetID: "shared-nethernet",
+		Type:              p2p.ConnectionTypeSignalingOverJSONRPC,
+		NetherNetID:       "shared-nethernet",
+		PlayerMessagingID: fakePlayerMessagingID,
 	}
 	primary := room.Status{
 		OwnerID:              "primary",
@@ -42,8 +43,9 @@ func TestSubAccountStatusOwnsIndependentActivity(t *testing.T) {
 
 func TestBroadcasterStartSubAccountPublishesIndependentSession(t *testing.T) {
 	connection := p2p.Connection{
-		Type:        p2p.ConnectionTypeSignalingOverWebSocket,
-		NetherNetID: "shared-nethernet",
+		Type:              p2p.ConnectionTypeSignalingOverJSONRPC,
+		NetherNetID:       "shared-nethernet",
+		PlayerMessagingID: fakePlayerMessagingID,
 	}
 	sub := &fakeAnnouncer{}
 	var ref mpsd.SessionReference

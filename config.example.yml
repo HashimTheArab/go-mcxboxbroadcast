@@ -1,4 +1,4 @@
-configVersion: 5
+configVersion: 6
 debugMode: false
 suppressSessionUpdateMessage: false
 
@@ -10,7 +10,6 @@ session:
   # {joinUrl}/v1/join and status queries read the same endpoint.
   joinUrl: https://play.example.net:19132
   updateInterval: 30
-  signalingMode: websocket
   queryServer: true
   webQueryFallback: false
   # false keeps the last successful query result when a query fails;

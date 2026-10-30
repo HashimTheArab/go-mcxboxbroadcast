@@ -91,13 +91,10 @@ func TestPterodactylArtifacts(t *testing.T) {
 	if !strings.Contains(egg.Config.Files, `"session.joinUrl": "{{server.build.env.JOIN_URL}}"`) {
 		t.Fatal("config.files does not map session.joinUrl")
 	}
-	for _, removed := range []string{"ICE_PORT", "icePortRange", "TARGET_SERVER", "sessionInfo.ip"} {
+	for _, removed := range []string{"ICE_PORT", "icePortRange", "TARGET_SERVER", "sessionInfo.ip", "signalingMode"} {
 		if strings.Contains(egg.Config.Files, removed) || strings.Contains(egg.Scripts.Installation.Script, removed) {
 			t.Fatalf("egg still references removed setting %q", removed)
 		}
-	}
-	if strings.Contains(egg.Scripts.Installation.Script, "signalingMode:") {
-		t.Fatal("installation script should rely on the default signaling mode")
 	}
 
 	dockerfile, err := os.ReadFile("Dockerfile")

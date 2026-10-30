@@ -54,17 +54,15 @@ type Config struct {
 	// FriendHistory records player activity for friend expiry.
 	FriendHistory HistoryStore
 	// SubAccounts contains additional accounts that publish independently owned
-	// MPSD sessions advertising the same signaling connection.
+	// MPSD sessions advertising the same signaling connection. New rejects an
+	// enabled one: a JSON-RPC signaling identity cannot be shared across owners.
 	SubAccounts []SubAccountConfig
 
-	// Signaling is the Xbox signaling connection that receives join offers.
-	// If nil, SignalingFactory is called.
+	// Signaling is the Xbox JSON-RPC signaling connection that receives join
+	// offers; it must implement p2p.JSONRPCSignaling. If nil, SignalingFactory is called.
 	Signaling nethernet.Signaling
 	// SignalingFactory creates the NetherNet signaling connection.
 	SignalingFactory SignalingFactory
-	// SignalingMode controls the signaling transport. Empty uses direct
-	// WebSocket signaling.
-	SignalingMode SignalingMode
 
 	// PublishConfig customizes MPSD publication.
 	PublishConfig mpsd.PublishConfig
@@ -86,17 +84,6 @@ type Config struct {
 }
 
 type SignalingFactory func(ctx context.Context, conf Config) (nethernet.Signaling, error)
-
-// SignalingMode identifies the service transport used to exchange WebRTC
-// signaling messages.
-type SignalingMode string
-
-const (
-	// SignalingModeWebSocket exchanges messages through the direct signaling service.
-	SignalingModeWebSocket SignalingMode = "websocket"
-	// SignalingModeJSONRPC exchanges messages through Player Messaging JSON-RPC.
-	SignalingModeJSONRPC SignalingMode = "jsonrpc"
-)
 
 // validateJoinURL accepts the base URLs the endpoint client can dial: http or
 // https with an explicit port and no path.

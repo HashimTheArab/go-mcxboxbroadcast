@@ -62,8 +62,6 @@ The config exposes the same operator-facing areas as MCXboxBroadcast:
 - Slack/Discord-compatible webhook notifications
 - primary and sub-account token cache paths
 - optional HTTP proxy URL through `http.proxy`
-- selectable Xbox signaling through `session.signalingMode`: `websocket`
-  (default) or `jsonrpc` (only when no sub-accounts are enabled).
 
 ### Joining
 
@@ -97,8 +95,7 @@ Minecraft only lets friends join a session, so friend sync works with friends
 alone. `friendSync.autoFriend` accepts incoming friend requests, and requests
 from accounts whose restrictions prevent a friendship are declined. Expiry
 removes friends that have not joined within `friendSync.expiry.days`; the
-broadcaster's own accounts are never expired. Sub-accounts become friends with
-the primary account before publishing. An account can have at most 1000
+broadcaster's own accounts are never expired. An account can have at most 1000
 friends.
 
 ### Session recovery
@@ -106,8 +103,7 @@ friends.
 The broadcaster automatically recovers lost signaling connections, repeated
 session-update failures, and missing or closed Xbox activity advertisements.
 Activity checks allow time for Xbox to show new sessions and use a cooldown
-to avoid repeated restarts. A missing sub-account advertisement only recreates
-that sub-account's session. Recovery failures appear in the logs and are sent
+to avoid repeated restarts. Recovery failures appear in the logs and are sent
 to the configured webhook.
 
 These checks use the publishing account's credentials. They detect a missing
@@ -118,11 +114,12 @@ If recovery keeps failing, the command closes its resources and exits with an
 error. Run it under Kubernetes or another process supervisor with automatic
 restart enabled so the next process recreates authentication and client state.
 
-### Signaling modes
+### Signaling
 
-`session.signalingMode` defaults to `websocket`. Use `jsonrpc` to connect through
-Player Messaging instead. JSON-RPC does not support sub-accounts; startup fails
-if both are enabled.
+Sessions use Xbox JSON-RPC signaling, the only signaling vanilla clients join
+through. Sub-accounts are not supported with it; startup fails if one is
+enabled. Older configs that set `session.signalingMode` load with that key
+removed.
 
 ## Docker
 

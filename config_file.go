@@ -21,7 +21,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const CurrentConfigVersion = 5
+const CurrentConfigVersion = 6
 
 // exampleServerHost is the placeholder target in generated configs; the
 // broadcaster refuses to start until an operator replaces it.
@@ -60,7 +60,6 @@ type SessionFileConfig struct {
 	// JoinURL is the target's NetherNet HTTP signaling base URL.
 	JoinURL          string          `yaml:"joinUrl" toml:"joinUrl"`
 	UpdateInterval   int             `yaml:"updateInterval" toml:"updateInterval"`
-	SignalingMode    string          `yaml:"signalingMode" toml:"signalingMode"`
 	QueryServer      bool            `yaml:"queryServer" toml:"queryServer"`
 	WebQueryFallback bool            `yaml:"webQueryFallback" toml:"webQueryFallback"`
 	ConfigFallback   bool            `yaml:"configFallback" toml:"configFallback"`
@@ -133,7 +132,6 @@ func DefaultConfigFile() ConfigFile {
 		Session: SessionFileConfig{
 			JoinURL:          "https://" + exampleServerHost + ":19132",
 			UpdateInterval:   30,
-			SignalingMode:    string(SignalingModeWebSocket),
 			QueryServer:      true,
 			WebQueryFallback: false,
 			ConfigFallback:   false,
@@ -257,6 +255,7 @@ func SaveConfigFile(path string, cfg ConfigFile) error {
 var configMigrations = map[int]func(doc map[string]any) []string{
 	4: migrateDropSessionOverrides,
 	5: migrateHTTPSignalingRelay,
+	6: migrateDropSignalingMode,
 }
 
 // migrateDropSessionOverrides removes keys this broadcaster never honours or
@@ -318,6 +317,15 @@ func migrateHTTPSignalingRelay(doc map[string]any) []string {
 		}
 	}
 	return notes
+}
+
+// migrateDropSignalingMode removes session.signalingMode: JSON-RPC is the only
+// signaling vanilla clients join through.
+func migrateDropSignalingMode(doc map[string]any) []string {
+	if deleteConfigKey(doc, "session", "signalingMode") {
+		return []string{"removed session.signalingMode: sessions always use JSON-RPC signaling now"}
+	}
+	return nil
 }
 
 // configInt reads an integer decoded by either the YAML or TOML codec.
@@ -388,10 +396,6 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 	if in.BaseDir == "" {
 		in.BaseDir = "."
 	}
-	signalingMode, err := normalizeSignalingMode(SignalingMode(c.Session.SignalingMode))
-	if err != nil {
-		return Config{}, err
-	}
 	cfg := Config{
 		XBLClient:            in.XBLClient,
 		XBLTokenSource:       in.XBLTokenSource,
@@ -413,7 +417,6 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 			Version:          c.Session.SessionInfo.Version,
 			Protocol:         c.Session.SessionInfo.Protocol,
 		},
-		SignalingMode:                signalingMode,
 		UpdateInterval:               time.Duration(c.Session.UpdateInterval) * time.Second,
 		HTTPClient:                   in.HTTPClient,
 		Log:                          in.Log,

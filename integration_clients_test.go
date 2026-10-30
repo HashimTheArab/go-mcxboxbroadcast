@@ -248,13 +248,14 @@ func TestStatusUsesConfiguredProvider(t *testing.T) {
 	}
 }
 
-func TestSignalingConnectionAnnouncerPublishesWebSocketConnection(t *testing.T) {
+func TestSignalingConnectionAnnouncerReplacesConnections(t *testing.T) {
 	inner := &fakeAnnouncer{}
 	announcer := signalingConnectionAnnouncer{
 		Announcer: inner,
 		connection: p2p.Connection{
-			Type:        p2p.ConnectionTypeSignalingOverWebSocket,
-			NetherNetID: p2p.NetherNetID("123456789"),
+			Type:              p2p.ConnectionTypeSignalingOverJSONRPC,
+			NetherNetID:       p2p.NetherNetID("123456789"),
+			PlayerMessagingID: fakePlayerMessagingID,
 		},
 	}
 
@@ -271,19 +272,12 @@ func TestSignalingConnectionAnnouncerPublishesWebSocketConnection(t *testing.T) 
 	if len(status.SupportedConnections) != 1 {
 		t.Fatalf("unexpected connections: %#v", status.SupportedConnections)
 	}
-	got := status.SupportedConnections[0]
-	if got.Type != p2p.ConnectionTypeSignalingOverWebSocket {
-		t.Fatalf("connection type = %d, want %d", got.Type, p2p.ConnectionTypeSignalingOverWebSocket)
-	}
-	if got.NetherNetID != p2p.NetherNetID("123456789") {
-		t.Fatalf("nethernet id = %q", got.NetherNetID)
-	}
-	if got.PlayerMessagingID != uuid.Nil {
-		t.Fatalf("pmsg id = %s, want nil", got.PlayerMessagingID)
+	if got := status.SupportedConnections[0]; got != announcer.connection {
+		t.Fatalf("connection = %+v, want %+v", got, announcer.connection)
 	}
 }
 
-func TestStartAlwaysAdvertisesWebSocketForInjectedSignaling(t *testing.T) {
+func TestStartAdvertisesJSONRPCForInjectedSignaling(t *testing.T) {
 	sig := &fakeSignaling{networkID: "123456789"}
 	announcer := &fakeAnnouncer{}
 	b := &Broadcaster{
@@ -309,14 +303,14 @@ func TestStartAlwaysAdvertisesWebSocketForInjectedSignaling(t *testing.T) {
 		t.Fatalf("unexpected connections: %#v", status.SupportedConnections)
 	}
 	got := status.SupportedConnections[0]
-	if got.Type != p2p.ConnectionTypeSignalingOverWebSocket {
-		t.Fatalf("connection type = %d, want %d", got.Type, p2p.ConnectionTypeSignalingOverWebSocket)
+	if got.Type != p2p.ConnectionTypeSignalingOverJSONRPC {
+		t.Fatalf("connection type = %d, want %d", got.Type, p2p.ConnectionTypeSignalingOverJSONRPC)
 	}
 	if got.NetherNetID != p2p.NetherNetID("123456789") {
 		t.Fatalf("nethernet id = %q", got.NetherNetID)
 	}
-	if got.PlayerMessagingID != uuid.Nil {
-		t.Fatalf("pmsg id = %s, want nil", got.PlayerMessagingID)
+	if got.PlayerMessagingID != fakePlayerMessagingID {
+		t.Fatalf("pmsg id = %s, want %s", got.PlayerMessagingID, fakePlayerMessagingID)
 	}
 	if status.OwnerID != "123" {
 		t.Fatalf("owner id = %q", status.OwnerID)
@@ -457,8 +451,9 @@ func TestStartCleansUpWhenPrimaryAnnounceFails(t *testing.T) {
 				HostName:  "Host",
 				WorldName: "World",
 				SupportedConnections: []p2p.Connection{{
-					Type:        p2p.ConnectionTypeSignalingOverWebSocket,
-					NetherNetID: p2p.NetherNetID("123"),
+					Type:              p2p.ConnectionTypeSignalingOverJSONRPC,
+					NetherNetID:       p2p.NetherNetID("123"),
+					PlayerMessagingID: fakePlayerMessagingID,
 				}},
 			}),
 		},
@@ -475,34 +470,6 @@ func TestStartCleansUpWhenPrimaryAnnounceFails(t *testing.T) {
 	}
 	if !sig.closed {
 		t.Fatal("signaling was not closed")
-	}
-}
-
-func TestStartAdvertisesWebSocketConnectionByDefault(t *testing.T) {
-	sig := &fakeSignaling{}
-	announcer := &fakeAnnouncer{}
-	b := &Broadcaster{
-		conf: Config{
-			JoinURL:        "http://127.0.0.1:19132",
-			Signaling:      sig,
-			Status:         Status{HostName: "Host", WorldName: "World"},
-			UpdateInterval: 30 * time.Second,
-		},
-		announcerFactory: func(*Broadcaster) room.Announcer {
-			return announcer
-		},
-	}
-	if err := b.Start(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	defer b.Close()
-
-	connections := announcer.Status().SupportedConnections
-	if len(connections) != 1 {
-		t.Fatalf("supported connections = %#v, want one", connections)
-	}
-	if connections[0].Type != p2p.ConnectionTypeSignalingOverWebSocket || connections[0].NetherNetID != "123456789" {
-		t.Fatalf("supported connection = %#v, want shared websocket network", connections[0])
 	}
 }
 
@@ -589,15 +556,19 @@ func (f *fakeAnnouncer) Closed() bool {
 type fakeSignaling struct {
 	closed    bool
 	networkID string
+	pmid      uuid.UUID
 }
 
-type jsonRPCFakeSignaling struct {
-	fakeSignaling
-	pmid uuid.UUID
-}
+// fakePlayerMessagingID is the identity a fakeSignaling without pmid exposes.
+var fakePlayerMessagingID = uuid.MustParse("11111111-2222-3333-4444-555555555555")
 
 // PlayerMessagingID returns the fake transport's Player Messaging identity.
-func (f *jsonRPCFakeSignaling) PlayerMessagingID() uuid.UUID { return f.pmid }
+func (f *fakeSignaling) PlayerMessagingID() uuid.UUID {
+	if f.pmid != uuid.Nil {
+		return f.pmid
+	}
+	return fakePlayerMessagingID
+}
 
 func (f *fakeSignaling) Signal(context.Context, *nethernet.Signal) error { return nil }
 func (f *fakeSignaling) Notify(nethernet.Notifier) func() {
