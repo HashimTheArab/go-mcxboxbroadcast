@@ -95,8 +95,7 @@ Minecraft only lets friends join a session, so friend sync works with friends
 alone. `friendSync.autoFriend` accepts incoming friend requests, and requests
 from accounts whose restrictions prevent a friendship are declined. Expiry
 removes friends that have not joined within `friendSync.expiry.days`; the
-broadcaster's own accounts are never expired. Sub-accounts become friends with
-the primary account before publishing. An account can have at most 1000
+broadcaster's own accounts are never expired. An account can have at most 1000
 friends.
 
 ### Session recovery
@@ -104,8 +103,7 @@ friends.
 The broadcaster automatically recovers lost signaling connections, repeated
 session-update failures, and missing or closed Xbox activity advertisements.
 Activity checks allow time for Xbox to show new sessions and use a cooldown
-to avoid repeated restarts. A missing sub-account advertisement only recreates
-that sub-account's session. Recovery failures appear in the logs and are sent
+to avoid repeated restarts. Recovery failures appear in the logs and are sent
 to the configured webhook.
 
 These checks use the publishing account's credentials. They detect a missing
