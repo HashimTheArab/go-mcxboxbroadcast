@@ -2,6 +2,7 @@ package broadcaster
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"github.com/df-mc/go-xsapi/v2/mpsd"
@@ -108,7 +109,7 @@ func (b *Broadcaster) activityHealthIssue(observations map[string]activityObserv
 				break
 			}
 		}
-		if err == nil {
+		if err == nil && b.publicationCurrent(publication) {
 			b.health.account(publication.id).checked(found, now)
 		}
 		if err != nil || found {
@@ -125,14 +126,17 @@ func (b *Broadcaster) activityHealthIssue(observations map[string]activityObserv
 		}
 		// An external Update can replace a sub-account while the query runs.
 		// Discard its old result rather than replacing the new session again.
-		for _, current := range b.publishedActivities() {
-			if current == publication {
-				state.misses = 0
-				state.recoverAfter = now.Add(activityRecoveryCooldown)
-				observations[publication.id] = state
-				return sessionHealthIssue{reason: "published activity handle missing or closed", subAccountID: publication.id, activity: &publication}
-			}
+		if b.publicationCurrent(publication) {
+			state.misses = 0
+			state.recoverAfter = now.Add(activityRecoveryCooldown)
+			observations[publication.id] = state
+			return sessionHealthIssue{reason: "published activity handle missing or closed", subAccountID: publication.id, activity: &publication}
 		}
 	}
 	return sessionHealthIssue{}
+}
+
+// publicationCurrent reports whether publication is still published, so a slow query's result still applies.
+func (b *Broadcaster) publicationCurrent(publication publishedActivity) bool {
+	return slices.Contains(b.publishedActivities(), publication)
 }

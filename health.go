@@ -117,6 +117,16 @@ func (s *accountHealthState) setFriends(n int) {
 	s.friends, s.friendsAt = n, time.Now()
 }
 
+// needsFriends reports whether no full list has been counted yet; nil s never needs one.
+func (s *accountHealthState) needsFriends() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.friendsAt.IsZero()
+}
+
 // addFriends adjusts a known count between full lists.
 func (s *accountHealthState) addFriends(delta int) {
 	if s == nil {

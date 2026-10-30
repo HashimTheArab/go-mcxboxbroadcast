@@ -164,6 +164,9 @@ func TestActivityHealthResetsForReplacementAndDiscardsOldQuery(t *testing.T) {
 	if issue := b.activityHealthIssue(states, now.Add(4*time.Minute)); issue.reason != "" {
 		t.Fatal("old response requested recovery of replacement session")
 	}
+	if checked := b.Health().Accounts[0].CheckedAt; checked.Equal(now.Add(4 * time.Minute)) {
+		t.Fatal("old response was recorded as the replacement's health")
+	}
 	replaceDuringQuery = false
 	for i := 5; i < 9; i++ {
 		if issue := b.activityHealthIssue(states, now.Add(time.Duration(i)*time.Minute)); issue.reason != "" {

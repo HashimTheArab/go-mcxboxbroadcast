@@ -37,6 +37,26 @@ func TestFriendSyncerAcceptsPendingRequestsAndInvites(t *testing.T) {
 	}
 }
 
+// Without expiry the first pass still counts friends once; later accepts adjust that count.
+func TestFriendSyncerCountsFriendsWithoutExpiry(t *testing.T) {
+	client := &syncFriendClient{
+		people: []Person{{XUID: "1"}, {XUID: "2"}, {XUID: "3"}},
+		accept: func(context.Context) ([]Person, error) { return []Person{{XUID: "4"}}, nil },
+	}
+	count := &accountHealthState{}
+	syncer := FriendSyncer{Client: client, Config: FriendSyncConfig{AutoFriend: true}, friendCount: count}
+	for range 2 {
+		if err := syncer.Sync(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var health AccountHealth
+	count.fill(&health)
+	if client.lists != 1 || health.Friends != 4 {
+		t.Fatalf("lists = %d, friends = %d; want one list and 3 listed + 1 accepted", client.lists, health.Friends)
+	}
+}
+
 func TestFriendSyncerSkipsPendingRequestsWithoutAutoFriend(t *testing.T) {
 	client := &syncFriendClient{accept: func(context.Context) ([]Person, error) {
 		t.Fatal("accepted requests with autoFriend off")
@@ -216,6 +236,7 @@ type syncFriendClient struct {
 	mu      sync.Mutex
 	added   []string
 	removed []string
+	lists   int
 }
 
 func (c *syncFriendClient) removals() []string {
@@ -225,6 +246,9 @@ func (c *syncFriendClient) removals() []string {
 }
 
 func (c *syncFriendClient) Friends(context.Context) ([]Person, error) {
+	c.mu.Lock()
+	c.lists++
+	c.mu.Unlock()
 	return c.people, nil
 }
 

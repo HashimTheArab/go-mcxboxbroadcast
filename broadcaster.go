@@ -326,7 +326,6 @@ func (b *Broadcaster) logSocialSummary() {
 		b.debug("fetch friend list for summary", "err", err)
 		return
 	}
-	b.health.account("").setFriends(len(friends))
 	b.info("authenticated to xbox live",
 		"gamertag", b.hostNameFallback(),
 		"xuid", b.primaryXUID(),
