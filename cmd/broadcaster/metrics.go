@@ -46,10 +46,13 @@ func (c healthCollector) Collect(ch chan<- prometheus.Metric) {
 	health := c.health()
 	now := c.now()
 	protocol := strconv.Itoa(int(health.Protocol))
+	// Two configured accounts can sign in to one Xbox account; duplicate series would fail the whole scrape.
+	seen := make(map[string]struct{}, len(health.Accounts))
 	for _, account := range health.Accounts {
-		if account.XUID == "" {
+		if _, dup := seen[account.XUID]; dup || account.XUID == "" {
 			continue
 		}
+		seen[account.XUID] = struct{}{}
 		advertised := 0.0
 		if account.AdvertisedAt(now) {
 			advertised = 1

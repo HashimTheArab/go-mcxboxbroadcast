@@ -122,8 +122,10 @@ restart enabled so the next process recreates authentication and client state.
 
 ### Metrics
 
-Set `metrics.listen` (for example `:9466`) to serve Prometheus metrics on
-`/metrics`. Each account reports:
+Set `metrics.listen` (for example `127.0.0.1:9466`) to serve Prometheus
+metrics on `/metrics`. The endpoint has no authentication and exposes account
+XUIDs, gamertags and friend counts, so bind to all interfaces (`:9466`) only on
+a network where just your scraper can reach it. Each account reports:
 
 - `mcxboxbroadcast_session_advertised{xuid,gamertag,version,protocol}`: 1 when
   the account's own session was found open within the last few minutes. It is

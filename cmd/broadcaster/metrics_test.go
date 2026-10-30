@@ -9,7 +9,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
-// Unknown friend counts are omitted rather than exported as zero, and joins carry the primary account.
+// Unknown friend counts are omitted rather than exported as zero, an Xbox account is exported once, and joins carry the primary account.
 func TestHealthCollectorExportsAccounts(t *testing.T) {
 	now := time.Unix(10_000, 0)
 	collector := healthCollector{now: func() time.Time { return now }, health: func() broadcaster.Health {
@@ -20,6 +20,7 @@ func TestHealthCollectorExportsAccounts(t *testing.T) {
 			Accounts: []broadcaster.AccountHealth{
 				{XUID: "1", Gamertag: "Primary", Advertised: true, CheckedAt: now, Friends: 812, FriendsCheckedAt: now},
 				{ID: "sub", XUID: "2", Gamertag: "Sub"},
+				{ID: "same-account", XUID: "2", Gamertag: "Sub"},
 			},
 		}
 	}}
