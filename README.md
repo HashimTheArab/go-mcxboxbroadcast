@@ -129,8 +129,8 @@ Set `metrics.listen` (for example `:9466`) to serve Prometheus metrics on
   the account's own session was found open within the last few minutes. It is
   0 until the first check, a few minutes after startup.
 - `mcxboxbroadcast_friends` and `mcxboxbroadcast_friend_limit`: the friend list
-  size, counted at startup and each expiry scan and adjusted for adds and
-  removals in between.
+  size, counted on the first friend sync and each expiry scan and adjusted for
+  adds and removals in between.
 - `mcxboxbroadcast_relayed_joins_total`: join offers relayed since start,
   labelled with the primary account.
 
