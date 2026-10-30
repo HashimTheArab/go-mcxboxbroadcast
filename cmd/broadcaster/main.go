@@ -40,14 +40,10 @@ type commandDeps struct {
 	LoadLiveToken      func(string) (*oauth2.Token, error)
 	NewLiveTokenSource func(context.Context, *oauth2.Token, io.Writer, func(*oauth2.Token)) oauth2.TokenSource
 	SaveLiveToken      func(string, *oauth2.Token) error
-	LoadAccountToken   func(ctx, loginCtx context.Context, path string, out io.Writer, persist func(*oauth2.Token)) (oauth2.TokenSource, error)
-	// SubAccountLoginTimeout bounds each sub-account's startup sign-in,
-	// including Xbox Live authentication, so one account cannot hold back the primary.
-	SubAccountLoginTimeout time.Duration
-	NewXBLTokenSource      func(context.Context, oauth2.TokenSource) xsapi.TokenSource
-	NewXSAPIClient         func(context.Context, xsapi.TokenSource, *http.Client, *slog.Logger) (*xsapi.Client, error)
-	CloseXSAPIClients      func(*slog.Logger, []*xsapi.Client)
-	NewBroadcaster         func(broadcaster.Config) (commandBroadcaster, error)
+	NewXBLTokenSource  func(context.Context, oauth2.TokenSource) xsapi.TokenSource
+	NewXSAPIClient     func(context.Context, xsapi.TokenSource, *http.Client, *slog.Logger) (*xsapi.Client, error)
+	CloseXSAPIClients  func(*slog.Logger, []*xsapi.Client)
+	NewBroadcaster     func(broadcaster.Config) (commandBroadcaster, error)
 }
 
 func main() {
@@ -111,9 +107,6 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 		return fmt.Errorf("resolve config directory: %w", err)
 	}
 	cachePath := resolveConfigPath(baseDir, cfg.Accounts.PrimaryCachePath)
-	if err := validateSubAccountCachePaths(baseDir, cachePath, cfg.Accounts.SubAccounts); err != nil {
-		return err
-	}
 
 	var notifier broadcaster.Notifier
 	if cfg.Notifications.Enabled {
@@ -152,61 +145,6 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 	})
 	if err != nil {
 		return fmt.Errorf("configure: %w", err)
-	}
-	// A sub-account that cannot sign in is skipped so the primary still starts;
-	// shutdown during its sign-in stops startup instead.
-	skipSubAccount := func(id string, err error) error {
-		if ctx.Err() != nil {
-			return fmt.Errorf("sub-account %q: %w", id, err)
-		}
-		log.Warn("skipping sub-account", "sub_account", id, "err", err)
-		if notifier != nil {
-			notifyCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-			if err := notifier.Notify(notifyCtx, fmt.Sprintf("Sub-account %q was skipped: %v", id, err)); err != nil {
-				log.Warn("send sub-account notification", "err", err)
-			}
-			cancel()
-		}
-		return nil
-	}
-	for _, account := range cfg.Accounts.SubAccounts {
-		if !account.Enabled {
-			continue
-		}
-		subCachePath, err := subAccountCachePath(baseDir, account)
-		if err != nil {
-			return fmt.Errorf("configure sub-account %q: %w", account.ID, err)
-		}
-		// One deadline covers the whole startup sign-in; the token sources
-		// stay on authCtx so later refreshes outlive it.
-		subXBLSource, subXBLClient, err := func() (xsapi.TokenSource, *xsapi.Client, error) {
-			loginCtx, cancel := context.WithTimeout(authCtx, deps.SubAccountLoginTimeout)
-			defer cancel()
-			subLive, err := deps.LoadAccountToken(authCtx, loginCtx, subCachePath, authOut, savePersistedToken(log, deps.SaveLiveToken, subCachePath))
-			if err != nil {
-				return nil, nil, fmt.Errorf("authenticate: %w", err)
-			}
-			src := deps.NewXBLTokenSource(authCtx, subLive)
-			client, err := deps.NewXSAPIClient(loginCtx, src, httpClient, log.With("sub_account", account.ID))
-			if err != nil {
-				return nil, nil, fmt.Errorf("authenticate xbox live: %w", err)
-			}
-			return src, client, nil
-		}()
-		if err != nil {
-			if err := skipSubAccount(account.ID, err); err != nil {
-				return err
-			}
-			continue
-		}
-		xblClients = append(xblClients, subXBLClient)
-		runtime.SubAccounts = append(runtime.SubAccounts, broadcaster.SubAccountConfig{
-			ID:             account.ID,
-			Enabled:        true,
-			XBLClient:      subXBLClient,
-			XBLTokenSource: subXBLSource,
-			XUID:           subXBLClient.UserInfo().XUID,
-		})
 	}
 
 	b, err := deps.NewBroadcaster(runtime)
@@ -250,12 +188,6 @@ func (d commandDeps) withDefaults() commandDeps {
 	if d.SaveLiveToken == nil {
 		d.SaveLiveToken = broadcaster.SaveLiveToken
 	}
-	if d.LoadAccountToken == nil {
-		d.LoadAccountToken = loadAccountToken
-	}
-	if d.SubAccountLoginTimeout <= 0 {
-		d.SubAccountLoginTimeout = 5 * time.Minute
-	}
 	if d.NewXBLTokenSource == nil {
 		d.NewXBLTokenSource = broadcaster.NewXBLTokenSource
 	}
@@ -289,47 +221,12 @@ func closeXSAPIClients(log *slog.Logger, clients []*xsapi.Client) {
 	}
 }
 
-func validateSubAccountCachePaths(base, primaryCachePath string, accounts []broadcaster.SubAccountFile) error {
-	owners := map[string]string{primaryCachePath: "primary"}
-	for _, account := range accounts {
-		if !account.Enabled {
-			continue
-		}
-		subCachePath, err := subAccountCachePath(base, account)
-		if err != nil {
-			return fmt.Errorf("configure sub-account %q: %w", account.ID, err)
-		}
-		if owner, ok := owners[subCachePath]; ok {
-			return fmt.Errorf("duplicate account cache path for %q and %q: %s", owner, account.ID, subCachePath)
-		}
-		owners[subCachePath] = account.ID
-	}
-	return nil
-}
-
 func defaultCachePath() string {
 	dir, err := os.UserCacheDir()
 	if err != nil {
 		return "cache/live_token.json"
 	}
 	return filepath.Join(dir, "mcxboxbroadcast-go", "live_token.json")
-}
-
-// loadAccountToken signs in under loginCtx, then returns a source bound to ctx
-// for later refreshes. Cache write failures are only logged by persist.
-func loadAccountToken(ctx, loginCtx context.Context, path string, out io.Writer, persist func(*oauth2.Token)) (oauth2.TokenSource, error) {
-	tok, err := broadcaster.LoadLiveToken(path)
-	if err != nil {
-		tok = nil
-	}
-	tok, err = broadcaster.NewLiveTokenSourceWithPersist(loginCtx, tok, out, nil).Token()
-	if err != nil {
-		return nil, err
-	}
-	if persist != nil {
-		persist(tok)
-	}
-	return broadcaster.NewLiveTokenSourceWithPersist(ctx, tok, out, persist), nil
 }
 
 // savePersistedToken saves rotated tokens to the cache path, logging failures.
@@ -369,16 +266,6 @@ func (w *notifyingWriter) Write(p []byte) (int, error) {
 		cancel()
 	}
 	return w.out.Write(p)
-}
-
-func subAccountCachePath(base string, account broadcaster.SubAccountFile) (string, error) {
-	if account.CachePath != "" {
-		return resolveConfigPath(base, account.CachePath), nil
-	}
-	if account.ID == "" {
-		return "", errors.New("sub-account id or cachePath is required")
-	}
-	return filepath.Join(base, "cache", "sub_accounts", account.ID, "live_token.json"), nil
 }
 
 // resolveConfigPath returns a clean path so equivalent spellings compare equal.

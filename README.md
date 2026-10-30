@@ -60,7 +60,7 @@ The config exposes the same operator-facing areas as MCXboxBroadcast:
   database — operators migrating from MCXboxBroadcast start with a fresh
   expiry history)
 - Slack/Discord-compatible webhook notifications
-- primary and sub-account token cache paths
+- the Xbox account token cache path
 - optional HTTP proxy URL through `http.proxy`
 
 ### Joining
@@ -117,9 +117,9 @@ restart enabled so the next process recreates authentication and client state.
 ### Signaling
 
 Sessions use Xbox JSON-RPC signaling, the only signaling vanilla clients join
-through. Sub-accounts are not supported with it; startup fails if one is
-enabled. Older configs that set `session.signalingMode` load with that key
-removed.
+through. Older configs that set `session.signalingMode` or list
+`accounts.subAccounts` load with those keys removed; only the primary account
+broadcasts.
 
 ## Docker
 

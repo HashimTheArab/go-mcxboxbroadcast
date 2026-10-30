@@ -20,8 +20,8 @@ func (b *Broadcaster) sessionLoop() {
 	defer ticker.Stop()
 	activityTicker := time.NewTicker(activityCheckInterval)
 	defer activityTicker.Stop()
-	activities := make(map[string]activityObservation)
-	b.activityHealthIssue(activities, time.Now())
+	var activity activityObservation
+	b.activityHealthIssue(&activity, time.Now())
 	consecutiveFailures := 0
 	for {
 		b.mu.Lock()
@@ -41,7 +41,7 @@ func (b *Broadcaster) sessionLoop() {
 			consecutiveFailures = 0
 			continue
 		case <-activityTicker.C:
-			issue = b.activityHealthIssue(activities, time.Now())
+			issue = b.activityHealthIssue(&activity, time.Now())
 			if issue.reason == "" {
 				continue
 			}
@@ -54,7 +54,7 @@ func (b *Broadcaster) sessionLoop() {
 				continue
 			}
 		}
-		if issue.rotate && issue.subAccountID == "" {
+		if issue.rotate {
 			if b.rotatePrimarySession(issue) {
 				consecutiveFailures = 0
 				continue
@@ -64,7 +64,7 @@ func (b *Broadcaster) sessionLoop() {
 			}
 			issue.reason = "session rotation failed"
 		}
-		if issue.reason != "" && issue.subAccountID == "" {
+		if issue.reason != "" {
 			if issue.activity != nil && !b.canRecreateSignaling() {
 				b.reportStaticActivityRecoveryFailure(issue)
 				continue
@@ -78,18 +78,13 @@ func (b *Broadcaster) sessionLoop() {
 			}
 			b.warn("session is unhealthy but signaling is statically configured; cannot re-create", "reason", issue.reason)
 		}
-		err := b.refreshSession(issue)
+		err := b.refreshSession()
 		if err == nil {
 			consecutiveFailures = 0
 			continue
 		}
 		if b.ctx.Err() != nil {
 			return
-		}
-		if !countsAsPrimaryUpdateFailure(err) {
-			consecutiveFailures = 0
-			b.log.Error("update sub-account sessions", "err", err)
-			continue
 		}
 		consecutiveFailures++
 		b.log.Error("update session", "err", err)
@@ -119,20 +114,8 @@ func (b *Broadcaster) rotatePrimarySession(issue sessionHealthIssue) bool {
 	return true
 }
 
-// refreshSession repairs an unhealthy sub-account, then updates metadata with
-// its own request budget so an optional account cannot consume the primary's time.
-func (b *Broadcaster) refreshSession(issue sessionHealthIssue) error {
-	if issue.subAccountID != "" {
-		ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
-		err := b.recoverSessionHealthIssue(ctx, issue)
-		cancel()
-		if err != nil {
-			b.log.Error("recover sub-account session health", "sub_account", issue.subAccountID, "reason", issue.reason, "err", err)
-		} else {
-			b.info("sub-account session recovered", "sub_account", issue.subAccountID, "reason", issue.reason)
-			return nil
-		}
-	}
+// refreshSession updates the session metadata under its own request budget.
+func (b *Broadcaster) refreshSession() error {
 	ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
 	defer cancel()
 	return b.Update(ctx)

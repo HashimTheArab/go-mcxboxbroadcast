@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/df-mc/go-nethernet"
-	"github.com/df-mc/go-xsapi/v2"
 	"github.com/df-mc/go-xsapi/v2/mpsd"
 	"github.com/df-mc/go-xsapi/v2/xal/xsts"
 	"github.com/sandertv/gophertunnel/minecraft/room"
@@ -96,36 +95,36 @@ func TestActivityHealthRequiresConsecutiveConfirmedMisses(t *testing.T) {
 			return broadcasterResponse(http.StatusOK, `{"results":[]}`), nil
 		}
 	})
-	states := make(map[string]activityObservation)
+	var state activityObservation
 	now := time.Now()
-	b.activityHealthIssue(states, now)
-	b.activityHealthIssue(states, now.Add(time.Minute))
+	b.activityHealthIssue(&state, now)
+	b.activityHealthIssue(&state, now.Add(time.Minute))
 	if calls != 0 {
 		t.Fatal("queried directory during startup grace period")
 	}
 	// Errors and healthy handles break the run; stale or another owner's handles do not satisfy it.
 	for i, response := range []string{"missing", "missing", "error", "missing", "healthy", "wrong owner", "healthy", "closed", "stale", "wrong owner"} {
 		result = response
-		issue := b.activityHealthIssue(states, now.Add(time.Duration(i+2)*time.Minute))
+		issue := b.activityHealthIssue(&state, now.Add(time.Duration(i+2)*time.Minute))
 		if (issue.reason != "") != (i == 9) {
 			t.Fatalf("response %d (%s) gave issue %+v", i, response, issue)
 		}
 	}
 	queries := calls
-	b.activityHealthIssue(states, now.Add(12*time.Minute))
+	b.activityHealthIssue(&state, now.Add(12*time.Minute))
 	if calls != queries {
 		t.Fatal("queried again during recovery cooldown")
 	}
 	old := b.announcer.(*room.XBLAnnouncer)
 	b.announcer = &room.XBLAnnouncer{Client: old.Client, SessionReference: old.SessionReference}
 	for minute := 13; minute <= 20; minute++ {
-		b.activityHealthIssue(states, now.Add(time.Duration(minute)*time.Minute))
+		b.activityHealthIssue(&state, now.Add(time.Duration(minute)*time.Minute))
 	}
 	if calls != queries {
 		t.Fatal("replacing the announcer bypassed the recovery cooldown")
 	}
 	for minute := 21; minute <= 23; minute++ {
-		issue := b.activityHealthIssue(states, now.Add(time.Duration(minute)*time.Minute))
+		issue := b.activityHealthIssue(&state, now.Add(time.Duration(minute)*time.Minute))
 		if (issue.reason != "") != (minute == 23) {
 			t.Fatalf("minute %d after cooldown gave issue %+v", minute, issue)
 		}
@@ -144,22 +143,22 @@ func TestActivityHealthResetsForReplacementAndDiscardsOldQuery(t *testing.T) {
 		}
 		return broadcasterResponse(http.StatusOK, `{"results":[]}`), nil
 	})
-	states := make(map[string]activityObservation)
+	var state activityObservation
 	now := time.Now()
 	for i := range 4 {
-		b.activityHealthIssue(states, now.Add(time.Duration(i)*time.Minute))
+		b.activityHealthIssue(&state, now.Add(time.Duration(i)*time.Minute))
 	}
 	replaceDuringQuery = true
-	if issue := b.activityHealthIssue(states, now.Add(4*time.Minute)); issue.reason != "" {
+	if issue := b.activityHealthIssue(&state, now.Add(4*time.Minute)); issue.reason != "" {
 		t.Fatal("old response requested recovery of replacement session")
 	}
 	replaceDuringQuery = false
 	for i := 5; i < 9; i++ {
-		if issue := b.activityHealthIssue(states, now.Add(time.Duration(i)*time.Minute)); issue.reason != "" {
+		if issue := b.activityHealthIssue(&state, now.Add(time.Duration(i)*time.Minute)); issue.reason != "" {
 			t.Fatalf("replacement recovered before grace and three misses at minute %d", i)
 		}
 	}
-	if issue := b.activityHealthIssue(states, now.Add(9*time.Minute)); issue.reason == "" {
+	if issue := b.activityHealthIssue(&state, now.Add(9*time.Minute)); issue.reason == "" {
 		t.Fatal("missing replacement did not recover after fresh observations")
 	}
 }
@@ -221,14 +220,12 @@ func TestActivityProbeTimeoutBreaksMissStreak(t *testing.T) {
 			<-req.Context().Done()
 			return nil, req.Context().Err()
 		})
-		states := make(map[string]activityObservation)
-		b.activityHealthIssue(states, time.Now())
-		state := states[""]
+		var state activityObservation
+		b.activityHealthIssue(&state, time.Now())
 		state.misses = 2
 		state.checkAfter = time.Now()
-		states[""] = state
 		start := time.Now()
-		if issue := b.activityHealthIssue(states, start); issue.reason != "" || states[""].misses != 0 {
+		if issue := b.activityHealthIssue(&state, start); issue.reason != "" || state.misses != 0 {
 			t.Fatal("timeout counted as a confirmed missing handle")
 		}
 		if elapsed := time.Since(start); elapsed != 15*time.Second {
@@ -237,19 +234,9 @@ func TestActivityProbeTimeoutBreaksMissStreak(t *testing.T) {
 	})
 }
 
-func TestActivityRecoveryIgnoresReplacedSubAccount(t *testing.T) {
-	b := activityTestBroadcaster(t, nil)
-	old := b.announcer.(*room.XBLAnnouncer)
-	b.subAnnouncers = []publishedSubAccount{{id: "sub", xuid: "123", announcer: &room.XBLAnnouncer{Client: old.Client, SessionReference: old.SessionReference}}}
-	issue := sessionHealthIssue{reason: "published activity handle missing", subAccountID: "sub", activity: &publishedActivity{announcer: old, ref: old.SessionReference}}
-	if err := b.recoverSessionHealthIssue(context.Background(), issue); err != nil {
-		t.Fatalf("attempted recovery of already replaced sub-account: %v", err)
-	}
-}
-
 func TestActivityRecoveryIgnoresReplacedPrimaryAccount(t *testing.T) {
 	b := activityTestBroadcaster(t, nil)
-	publication := b.publishedActivities()[0]
+	publication, _ := b.publishedActivity()
 	rebuilds := 0
 	b.conf.SignalingFactory = func(context.Context, Config) (nethernet.Signaling, error) {
 		rebuilds++
@@ -267,7 +254,7 @@ func TestActivityRecoveryIgnoresReplacedPrimaryAccount(t *testing.T) {
 
 func TestStaticActivityFailureIgnoresReplacedPrimaryAccount(t *testing.T) {
 	b := activityTestBroadcaster(t, nil)
-	publication := b.publishedActivities()[0]
+	publication, _ := b.publishedActivity()
 	b.conf.Signaling = &fakeSignaling{}
 	notices := 0
 	b.conf.Notifier = fakeNotifier{notify: func(context.Context, string) { notices++ }}
@@ -275,43 +262,5 @@ func TestStaticActivityFailureIgnoresReplacedPrimaryAccount(t *testing.T) {
 	b.reportStaticActivityRecoveryFailure(sessionHealthIssue{reason: "published activity handle missing", activity: &publication})
 	if notices != 0 {
 		t.Fatalf("stale activity issue sent %d recovery failure notifications", notices)
-	}
-}
-
-func TestActivityRecoveryReplacesOnlyMissingSubAccount(t *testing.T) {
-	b := activityTestBroadcaster(t, func(*http.Request) (*http.Response, error) {
-		return broadcasterResponse(http.StatusOK, `{"results":[]}`), nil
-	})
-	old := b.announcer
-	primary := &fakeAnnouncer{}
-	replacement := &fakeAnnouncer{}
-	b.announcer = primary
-	b.conf.XUID = "primary"
-	b.conf.SubAccounts = []SubAccountConfig{{ID: "sub", Enabled: true, XUID: "123", XBLClient: &xsapi.Client{}}}
-	b.conf.HTTPClient = &http.Client{Transport: broadcasterRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if req.URL.Host != "peoplehub.xboxlive.com" {
-			t.Fatalf("unexpected social request: %s", req.URL)
-		}
-		return broadcasterResponse(http.StatusOK, `{"people":[{"xuid":"primary","isFollowingCaller":true,"isFollowedByCaller":true}]}`), nil
-	})}
-	b.subAnnouncers = []publishedSubAccount{{id: "sub", xuid: "123", announcer: old}}
-	b.subAnnouncersByID = map[string]room.Announcer{"sub": old}
-	b.subAccountAnnouncerFactory = func(context.Context, SubAccountConfig, mpsd.SessionReference) (room.Announcer, error) {
-		return replacement, nil
-	}
-	states := make(map[string]activityObservation)
-	now := time.Now()
-	var issue sessionHealthIssue
-	for i := range 5 {
-		issue = b.activityHealthIssue(states, now.Add(time.Duration(i)*time.Minute))
-	}
-	if issue.subAccountID != "sub" || issue.reason == "" {
-		t.Fatalf("missing sub-account yielded %+v", issue)
-	}
-	if err := b.recoverSessionHealthIssue(context.Background(), issue); err != nil {
-		t.Fatal(err)
-	}
-	if b.announcer != primary || primary.Closed() || len(b.subAnnouncers) != 1 || b.subAnnouncersByID["sub"] == old {
-		t.Fatal("activity recovery did not isolate the affected sub-account")
 	}
 }

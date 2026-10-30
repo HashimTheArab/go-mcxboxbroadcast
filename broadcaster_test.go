@@ -79,272 +79,16 @@ func newTestXSAPIClient(t *testing.T, client *http.Client, xuid string) *xsapi.C
 	return xbl
 }
 
-func TestSubAccountFriendshipSkipsMissingSocialClients(t *testing.T) {
-	xbl := newTestXSAPIClient(t, &http.Client{Transport: broadcasterRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		t.Fatalf("unexpected friendship request: %s %s", req.Method, req.URL)
-		return nil, errors.New("unexpected request")
-	})}, "100")
-	for _, tc := range []struct {
-		name    string
-		primary *xsapi.Client
-		sub     *xsapi.Client
-	}{
-		{name: "nil primary", sub: xbl},
-		{name: "nil sub", primary: xbl},
-		{name: "missing primary social", primary: &xsapi.Client{}, sub: xbl},
-		{name: "missing sub social", primary: xbl, sub: &xsapi.Client{}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			b := &Broadcaster{conf: Config{XBLClient: tc.primary, XUID: "100"}}
-			if err := b.ensureSubAccountFriendship(t.Context(), SubAccountConfig{XBLClient: tc.sub, XUID: "200"}); err != nil {
-				t.Fatal(err)
-			}
-		})
-	}
-}
-
-func TestBroadcasterStartSubAccountsBefriendsPrimaryBeforePublish(t *testing.T) {
-	var calls []string
-	client := &http.Client{Transport: broadcasterRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		calls = append(calls, fmt.Sprintf("%s %s auth=%s", req.Method, req.URL.String(), req.Header.Get("Authorization")))
-		if req.Method == http.MethodGet {
-			return broadcasterResponse(http.StatusNoContent, ""), nil
-		}
-		return broadcasterResponse(http.StatusOK, ""), nil
-	})}
-	primary := newTestXSAPIClient(t, client, "100")
-	sub := newTestXSAPIClient(t, client, "200")
-	b := &Broadcaster{log: testBroadcasterLogger(), conf: Config{
-		XBLClient:  primary,
-		XUID:       "100",
-		HTTPClient: client,
-		SubAccounts: []SubAccountConfig{{
-			ID:        "sub",
-			Enabled:   true,
-			XBLClient: sub,
-			XUID:      "200",
-		}},
-	}}
-	b.subAccountAnnouncerFactory = func(context.Context, SubAccountConfig, mpsd.SessionReference) (room.Announcer, error) {
-		calls = append(calls, "publish")
-		return &fakeAnnouncer{}, nil
-	}
-
-	if err := b.startSubAccounts(context.Background(), room.Status{}); err != nil {
-		t.Fatal(err)
-	}
-	want := []string{
-		// The friend list is checked first so restarts do not re-PUT an
-		// existing friendship; the 204 here fails decoding, so both adds
-		// proceed: the sub-account requests, then the primary accepts.
-		"GET https://peoplehub.xboxlive.com/users/me/people/friends auth=XBL3.0 x=uhs;token",
-		"PUT https://social.xboxlive.com/users/me/people/friends/v2/xuid(100) auth=XBL3.0 x=uhs;token",
-		"PUT https://social.xboxlive.com/users/me/people/friends/v2/xuid(200) auth=XBL3.0 x=uhs;token",
-		"publish",
-	}
-	if fmt.Sprint(calls) != fmt.Sprint(want) {
-		t.Fatalf("unexpected call order\n got: %v\nwant: %v", calls, want)
-	}
-}
-
-func TestBroadcasterStartSubAccountsSkipsExistingFriendship(t *testing.T) {
-	var calls []string
-	client := &http.Client{Transport: broadcasterRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		calls = append(calls, req.Method+" "+req.URL.Path)
-		switch req.URL.Host {
-		case "peoplehub.xboxlive.com":
-			return broadcasterResponse(http.StatusOK, `{"people":[{"xuid":"100","isFriend":true}]}`), nil
-		default:
-			t.Fatalf("unexpected request %s %s", req.Method, req.URL)
-			return nil, nil
-		}
-	})}
-	primary := newTestXSAPIClient(t, client, "100")
-	sub := newTestXSAPIClient(t, client, "200")
-	b := &Broadcaster{log: testBroadcasterLogger(), conf: Config{
-		XBLClient:  primary,
-		XUID:       "100",
-		HTTPClient: client,
-		SubAccounts: []SubAccountConfig{{
-			ID:        "sub",
-			Enabled:   true,
-			XBLClient: sub,
-			XUID:      "200",
-		}},
-	}}
-	b.subAccountAnnouncerFactory = func(context.Context, SubAccountConfig, mpsd.SessionReference) (room.Announcer, error) {
-		calls = append(calls, "publish")
-		return &fakeAnnouncer{}, nil
-	}
-
-	if err := b.startSubAccounts(context.Background(), room.Status{}); err != nil {
-		t.Fatal(err)
-	}
-	for _, call := range calls {
-		if strings.HasPrefix(call, "PUT ") {
-			t.Fatalf("existing friendship should not be re-PUT, got calls %v", calls)
-		}
-	}
-	if calls[len(calls)-1] != "publish" {
-		t.Fatalf("expected publish after friendship check, got %v", calls)
-	}
-}
-
-func TestBroadcasterStartSubAccountsStopsQuietlyOnContextCancel(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	var notified []string
-	var started []string
-	b := &Broadcaster{log: testBroadcasterLogger(), conf: Config{
-		XBLClient: &xsapi.Client{},
-		XUID:      "100",
-		Notifier: fakeNotifier{notify: func(_ context.Context, message string) {
-			notified = append(notified, message)
-		}},
-		SubAccounts: []SubAccountConfig{
-			{ID: "first", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "100"},
-			{ID: "second", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "100"},
-		},
-	}}
-	b.subAccountAnnouncerFactory = func(_ context.Context, account SubAccountConfig, _ mpsd.SessionReference) (room.Announcer, error) {
-		started = append(started, account.ID)
-		cancel()
-		return nil, ctx.Err()
-	}
-
-	err := b.startSubAccounts(ctx, room.Status{})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("startSubAccounts() error = %v, want context.Canceled", err)
-	}
-	if fmt.Sprint(started) != "[first]" {
-		t.Fatalf("started = %v, want [first] (stop after cancellation)", started)
-	}
-	if len(notified) != 0 {
-		t.Fatalf("notifications = %v, want none during shutdown", notified)
-	}
-}
-
-func TestBroadcasterPrimarySyncerDisablesPruningWithSubAccountSyncers(t *testing.T) {
-	conf := Config{
-		XBLClient:  &xsapi.Client{},
-		XUID:       "100",
-		FriendSync: &FriendSyncConfig{AutoFriend: true, ExpiryEnabled: true},
-	}
-
-	solo := &Broadcaster{log: testBroadcasterLogger(), conf: conf}
-	if !solo.friendSyncer().PruneHistory {
-		t.Fatal("primary syncer should prune when it owns the history store alone")
-	}
-
-	conf.SubAccounts = []SubAccountConfig{{ID: "sub", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "200"}}
-	shared := &Broadcaster{log: testBroadcasterLogger(), conf: conf}
-	if shared.friendSyncer().PruneHistory {
-		t.Fatal("primary syncer must not prune a history store shared with sub-account syncers")
-	}
-}
-
-func TestBroadcasterStartSubAccountsContinuesPastFailingAccount(t *testing.T) {
-	var published []string
-	b := &Broadcaster{log: testBroadcasterLogger(), conf: Config{
-		XBLClient: &xsapi.Client{},
-		XUID:      "100",
-		SubAccounts: []SubAccountConfig{
-			{ID: "bad", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "100"},
-			{ID: "good", Enabled: true, XBLClient: &xsapi.Client{}, XUID: "100"},
-		},
-	}}
-	b.subAccountAnnouncerFactory = func(_ context.Context, account SubAccountConfig, _ mpsd.SessionReference) (room.Announcer, error) {
-		if account.ID == "bad" {
-			return nil, errors.New("boom")
-		}
-		published = append(published, account.ID)
-		return &fakeAnnouncer{}, nil
-	}
-
-	if err := b.startSubAccounts(context.Background(), room.Status{}); err != nil {
-		t.Fatalf("startSubAccounts() error = %v, want nil (bad account skipped)", err)
-	}
-	if fmt.Sprint(published) != "[good]" {
-		t.Fatalf("published = %v, want [good]", published)
-	}
-}
-
-func TestBroadcasterStartSubAccountsSkipsFriendshipWithoutXUIDs(t *testing.T) {
-	var httpCalls, publishCalls int
-	b := &Broadcaster{log: testBroadcasterLogger(), conf: Config{
-		XBLClient: &xsapi.Client{},
-		HTTPClient: &http.Client{Transport: broadcasterRoundTripFunc(func(*http.Request) (*http.Response, error) {
-			httpCalls++
-			return broadcasterResponse(http.StatusNoContent, ""), nil
-		})},
-		SubAccounts: []SubAccountConfig{{
-			ID:        "sub",
-			Enabled:   true,
-			XBLClient: &xsapi.Client{},
-			XUID:      "200",
-		}},
-	}}
-	b.subAccountAnnouncerFactory = func(context.Context, SubAccountConfig, mpsd.SessionReference) (room.Announcer, error) {
-		publishCalls++
-		return &fakeAnnouncer{}, nil
-	}
-
-	if err := b.startSubAccounts(context.Background(), room.Status{}); err != nil {
-		t.Fatal(err)
-	}
-	if httpCalls != 0 {
-		t.Fatalf("expected no friend requests without both XUIDs, got %d", httpCalls)
-	}
-	if publishCalls != 1 {
-		t.Fatalf("expected sub-account publish to continue, got %d calls", publishCalls)
-	}
-}
-
-func TestBroadcasterStartSubAccountsSkipsEnabledAccountWithoutCredentials(t *testing.T) {
-	var httpCalls, publishCalls int
-	b := &Broadcaster{log: testBroadcasterLogger(), conf: Config{
-		XBLClient: &xsapi.Client{},
-		XUID:      "100",
-		HTTPClient: &http.Client{Transport: broadcasterRoundTripFunc(func(*http.Request) (*http.Response, error) {
-			httpCalls++
-			return broadcasterResponse(http.StatusNoContent, ""), nil
-		})},
-		SubAccounts: []SubAccountConfig{{
-			ID:      "missing",
-			Enabled: true,
-		}},
-	}}
-	b.subAccountAnnouncerFactory = func(context.Context, SubAccountConfig, mpsd.SessionReference) (room.Announcer, error) {
-		publishCalls++
-		return &fakeAnnouncer{}, nil
-	}
-
-	if err := b.startSubAccounts(context.Background(), room.Status{}); err != nil {
-		t.Fatal(err)
-	}
-	if httpCalls != 0 {
-		t.Fatalf("expected no friend requests for uncredentialed sub-account, got %d", httpCalls)
-	}
-	if publishCalls != 0 {
-		t.Fatalf("expected no publish for uncredentialed sub-account, got %d calls", publishCalls)
-	}
-}
-
 func TestBroadcasterClearCreatedXBLClientReferences(t *testing.T) {
 	primary := &xsapi.Client{}
-	createdSub := &xsapi.Client{}
-	externalSub := &xsapi.Client{}
 	tokens := staticMinecraftTokenSource{}
 	b := &Broadcaster{
 		xblClient:         primary,
 		minecraftTokens:   tokens,
-		createdXBLClients: []*xsapi.Client{primary, createdSub},
+		createdXBLClients: []*xsapi.Client{primary},
 		conf: Config{
 			XBLClient:            primary,
 			MinecraftTokenSource: tokens,
-			SubAccounts: []SubAccountConfig{
-				{ID: "created", XBLClient: createdSub},
-				{ID: "external", XBLClient: externalSub},
-			},
 		},
 	}
 
@@ -358,12 +102,6 @@ func TestBroadcasterClearCreatedXBLClientReferences(t *testing.T) {
 	}
 	if b.minecraftTokens != nil || b.conf.MinecraftTokenSource != nil {
 		t.Fatal("minecraft token source derived from created primary client was not cleared")
-	}
-	if b.conf.SubAccounts[0].XBLClient != nil {
-		t.Fatal("created sub-account client was not cleared")
-	}
-	if b.conf.SubAccounts[1].XBLClient != externalSub {
-		t.Fatal("external sub-account client should not be cleared")
 	}
 }
 
@@ -395,19 +133,6 @@ func TestBroadcasterInviteRequiresActiveBroadcaster(t *testing.T) {
 	err := invite(b, context.Background(), "456")
 	if err == nil || !strings.Contains(err.Error(), "broadcaster not started") {
 		t.Fatalf("Invite error = %v, want broadcaster-not-started error", err)
-	}
-}
-
-func TestNewRejectsEnabledSubAccounts(t *testing.T) {
-	_, err := New(Config{
-		JoinURL: "http://127.0.0.1:19132",
-		SubAccounts: []SubAccountConfig{{
-			ID:      "sub",
-			Enabled: true,
-		}},
-	})
-	if err == nil || !strings.Contains(err.Error(), "sub-accounts are not supported") {
-		t.Fatalf("New() error = %v, want sub-account rejection", err)
 	}
 }
 
@@ -547,61 +272,6 @@ func broadcasterResponse(code int, body string) *http.Response {
 
 func testBroadcasterLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
-
-func TestSubAccountInviterRequiresPublishedSession(t *testing.T) {
-	b, err := New(Config{
-		XBLTokenSource: staticTokenSource{},
-		XUID:           "123",
-		JoinURL:        "http://127.0.0.1:19132",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	inviter := &subAccountInviter{b: b, id: "sub1"}
-	if err := inviter.Invite(context.Background(), "456", "1739947436"); err == nil {
-		t.Fatal("expected error inviting before the sub-account published a session")
-	}
-}
-
-func TestStartSubAccountsTimeoutDoesNotBlockStartup(t *testing.T) {
-	b, err := New(Config{
-		XBLTokenSource: staticTokenSource{},
-		XUID:           "123",
-		JoinURL:        "http://127.0.0.1:19132",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	b.conf.SubAccounts = []SubAccountConfig{{
-		ID:             "sub1",
-		Enabled:        true,
-		XBLTokenSource: staticTokenSource{},
-		XUID:           "456",
-	}}
-	b.ctx, b.cancel = context.WithCancel(context.Background())
-	defer b.cancel()
-	b.subAccountStartTimeout = 50 * time.Millisecond
-	b.subAccountAnnouncerFactory = func(ctx context.Context, _ SubAccountConfig, _ mpsd.SessionReference) (room.Announcer, error) {
-		<-ctx.Done() // a hung publish must be bounded by the per-account timeout
-		return nil, ctx.Err()
-	}
-	done := make(chan error, 1)
-	go func() {
-		// Start holds b.mu for the whole startup sequence; mirror that so
-		// re-locking inside the sub-account path deadlocks the test too.
-		b.mu.Lock()
-		defer b.mu.Unlock()
-		done <- b.startSubAccounts(b.ctx, room.Status{})
-	}()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("hung sub-account should be skipped, not fail startup: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("startSubAccounts blocked on a hung sub-account publish")
-	}
 }
 
 // Thresholds match MCXboxBroadcast: rotate at 28 of 30 members, retire after 30 s.
