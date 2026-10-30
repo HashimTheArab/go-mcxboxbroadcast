@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -50,6 +51,7 @@ type httpRelay struct {
 	client    endpoint.ClientConfig // NetworkID is set per offer
 	verify    func(ctx context.Context, sdp string) (offerIdentity, error)
 	history   HistoryRecorder // nil skips history
+	joins     *atomic.Uint64  // counts answered offers; nil skips counting
 	log       *slog.Logger
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -206,6 +208,9 @@ func (r *httpRelay) relay(o *pendingOffer, sdp string) {
 	}); err != nil {
 		r.log.Error("send join answer", "sender", o.key.networkID, "err", err)
 		return
+	}
+	if r.joins != nil {
+		r.joins.Add(1)
 	}
 	r.recordJoin(o)
 }

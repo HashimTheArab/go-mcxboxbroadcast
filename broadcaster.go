@@ -64,6 +64,8 @@ type Broadcaster struct {
 	// when a session nears its member cap.
 	healthCheck chan struct{}
 
+	health healthState
+
 	// lastQuery is the most recent successful target-server query, kept so
 	// query failures fall back to real data instead of failing the update.
 	lastQuery *minecraft.ServerStatus
@@ -298,6 +300,8 @@ func (b *Broadcaster) startSubAccountFriendSync() {
 			OwnXUIDs: b.ownXUIDs,
 			Trigger:  b.startSocialSubscription(account.XBLClient, conf, syncLog),
 			Log:      syncLog,
+
+			friendCount: b.health.account(account.ID),
 		}
 		if conf.InitialInvite {
 			syncer.Inviter = &subAccountInviter{b: b, id: account.ID}
@@ -322,10 +326,11 @@ func (b *Broadcaster) logSocialSummary() {
 		b.debug("fetch friend list for summary", "err", err)
 		return
 	}
+	b.health.account("").setFriends(len(friends))
 	b.info("authenticated to xbox live",
 		"gamertag", b.hostNameFallback(),
 		"xuid", b.primaryXUID(),
-		"friends", fmt.Sprintf("%d/2000", len(friends)),
+		"friends", fmt.Sprintf("%d/%d", len(friends), MaxFriends),
 	)
 }
 
@@ -385,6 +390,7 @@ func (b *Broadcaster) friendSyncer() FriendSyncer {
 		PruneHistory: !b.subAccountFriendSyncActive(),
 		OwnXUIDs:     b.ownXUIDs,
 		Log:          b.log,
+		friendCount:  b.health.account(""),
 	}
 	if b.conf.FriendSync.InitialInvite {
 		syncer.Inviter = &broadcasterInviter{b: b}
@@ -410,6 +416,7 @@ func (b *Broadcaster) startRelay(sig nethernet.Signaling) *httpRelay {
 			return verifyOfferIdentity(ctx, sdp, verifier)
 		},
 		history: recorder,
+		joins:   &b.health.joins,
 		log:     b.log,
 	})
 }

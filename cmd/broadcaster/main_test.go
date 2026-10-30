@@ -757,6 +757,10 @@ type fakeCommandBroadcaster struct {
 	close func() error
 }
 
+func (fakeCommandBroadcaster) Health() broadcaster.Health {
+	return broadcaster.Health{}
+}
+
 func (f fakeCommandBroadcaster) Start(ctx context.Context) error {
 	return f.start(ctx)
 }

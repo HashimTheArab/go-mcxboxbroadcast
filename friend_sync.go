@@ -60,6 +60,8 @@ type FriendSyncer struct {
 	// A nil Trigger leaves the syncer purely periodic.
 	Trigger <-chan struct{}
 	Log     *slog.Logger
+
+	friendCount *accountHealthState // nil outside a Broadcaster
 }
 
 const (
@@ -141,6 +143,7 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 		result.readRetryAfter = retryDelay(err)
 		return result, err
 	}
+	s.friendCount.setFriends(len(friends))
 	s.debug(ctx, "friend expiry scan", "friends", fmt.Sprintf("%d/%d", len(friends), MaxFriends))
 	own := make(map[string]struct{})
 	if s.OwnXUIDs != nil {
@@ -234,6 +237,7 @@ func (s FriendSyncer) addFriend(ctx context.Context, p Person, result *friendSyn
 
 // added starts p's expiry clock and sends the initial invite.
 func (s FriendSyncer) added(ctx context.Context, p Person, source string) {
+	s.friendCount.addFriends(1)
 	s.info(ctx, "added friend", "xuid", p.XUID, "gamertag", p.Gamertag, "source", source)
 	if recorder, ok := s.History.(HistoryRecorder); ok {
 		if err := recorder.Seen(ctx, p.XUID, time.Now()); err != nil && s.Log != nil {
@@ -291,6 +295,7 @@ func (s FriendSyncer) expire(ctx context.Context, p Person, result *friendSyncRe
 		}
 		return false
 	}
+	s.friendCount.addFriends(-1)
 	s.info(ctx, "removed friend due to inactivity", "xuid", p.XUID, "gamertag", p.Gamertag, "last_seen", lastSeen)
 	if err := s.History.Clear(ctx, p.XUID); err != nil && s.Log != nil {
 		s.Log.Error("clear player history", "xuid", p.XUID, "err", err)

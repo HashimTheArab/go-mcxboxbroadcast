@@ -62,6 +62,7 @@ The config exposes the same operator-facing areas as MCXboxBroadcast:
 - Slack/Discord-compatible webhook notifications
 - primary and sub-account token cache paths
 - optional HTTP proxy URL through `http.proxy`
+- optional Prometheus metrics through `metrics.listen`
 - selectable Xbox signaling through `session.signalingMode`: `websocket`
   (default) or `jsonrpc` (only when no sub-accounts are enabled).
 
@@ -112,11 +113,26 @@ to the configured webhook.
 
 These checks use the publishing account's credentials. They detect a missing
 directory advertisement, but do not verify friendship permissions or prove that
-another player can join. Keep an independent friend-account monitor for that.
+another player can join. Relayed joins are the end-to-end evidence: alert when
+a busy account's joins stop (see [Metrics](#metrics)).
 
 If recovery keeps failing, the command closes its resources and exits with an
 error. Run it under Kubernetes or another process supervisor with automatic
 restart enabled so the next process recreates authentication and client state.
+
+### Metrics
+
+Set `metrics.listen` (for example `:9466`) to serve Prometheus metrics on
+`/metrics`. Each account reports:
+
+- `mcxboxbroadcast_session_advertised{xuid,gamertag,version,protocol}`: 1 when
+  the account's own session was found open within the last few minutes. It is
+  0 until the first check, a few minutes after startup.
+- `mcxboxbroadcast_friends` and `mcxboxbroadcast_friend_limit`: the friend list
+  size, counted at startup and each expiry scan and adjusted for adds and
+  removals in between.
+- `mcxboxbroadcast_relayed_joins_total`: join offers relayed since start,
+  labelled with the primary account.
 
 ### Signaling modes
 

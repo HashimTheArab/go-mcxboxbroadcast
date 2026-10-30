@@ -31,6 +31,7 @@ type commandBroadcaster interface {
 	Start(context.Context) error
 	Wait() error
 	Close() error
+	Health() broadcaster.Health
 }
 
 type commandDeps struct {
@@ -212,6 +213,13 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 	b, err := deps.NewBroadcaster(runtime)
 	if err != nil {
 		return fmt.Errorf("configure broadcaster: %w", err)
+	}
+	if listen := strings.TrimSpace(cfg.Metrics.Listen); listen != "" {
+		stopMetrics, err := serveMetrics(ctx, listen, b.Health, log)
+		if err != nil {
+			return fmt.Errorf("serve metrics: %w", err)
+		}
+		defer stopMetrics()
 	}
 	if err := b.Start(ctx); err != nil {
 		return fmt.Errorf("start: %w", err)

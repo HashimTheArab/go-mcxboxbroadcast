@@ -106,9 +106,20 @@ func TestActivityHealthRequiresConsecutiveConfirmedMisses(t *testing.T) {
 	// Errors and healthy handles break the run; stale or another owner's handles do not satisfy it.
 	for i, response := range []string{"missing", "missing", "error", "missing", "healthy", "wrong owner", "healthy", "closed", "stale", "wrong owner"} {
 		result = response
-		issue := b.activityHealthIssue(states, now.Add(time.Duration(i+2)*time.Minute))
+		at := now.Add(time.Duration(i+2) * time.Minute)
+		before := b.Health().Accounts[0]
+		issue := b.activityHealthIssue(states, at)
 		if (issue.reason != "") != (i == 9) {
 			t.Fatalf("response %d (%s) gave issue %+v", i, response, issue)
+		}
+		// Health reports each answered check; a failed request keeps the previous result.
+		health := b.Health().Accounts[0]
+		if response == "error" {
+			if health.CheckedAt != before.CheckedAt {
+				t.Fatalf("response %d (error) changed health %+v", i, health)
+			}
+		} else if health.CheckedAt != at || health.Advertised != (response == "healthy") {
+			t.Fatalf("response %d (%s) gave health %+v", i, response, health)
 		}
 	}
 	queries := calls

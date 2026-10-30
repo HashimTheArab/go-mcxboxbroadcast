@@ -108,6 +108,9 @@ func (b *Broadcaster) activityHealthIssue(observations map[string]activityObserv
 				break
 			}
 		}
+		if err == nil {
+			b.health.account(publication.id).checked(found, now)
+		}
 		if err != nil || found {
 			state.misses = 0
 			if err != nil && b.ctx.Err() == nil {
