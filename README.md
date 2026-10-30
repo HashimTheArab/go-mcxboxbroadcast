@@ -62,8 +62,6 @@ The config exposes the same operator-facing areas as MCXboxBroadcast:
 - Slack/Discord-compatible webhook notifications
 - primary and sub-account token cache paths
 - optional HTTP proxy URL through `http.proxy`
-- selectable Xbox signaling through `session.signalingMode`: `websocket`
-  (default) or `jsonrpc` (only when no sub-accounts are enabled).
 
 ### Joining
 
@@ -118,11 +116,12 @@ If recovery keeps failing, the command closes its resources and exits with an
 error. Run it under Kubernetes or another process supervisor with automatic
 restart enabled so the next process recreates authentication and client state.
 
-### Signaling modes
+### Signaling
 
-`session.signalingMode` defaults to `websocket`. Use `jsonrpc` to connect through
-Player Messaging instead. JSON-RPC does not support sub-accounts; startup fails
-if both are enabled.
+Sessions use Xbox JSON-RPC signaling, the only signaling vanilla clients join
+through. Sub-accounts are not supported with it; startup fails if one is
+enabled. Older configs that set `session.signalingMode` load with that key
+removed.
 
 ## Docker
 

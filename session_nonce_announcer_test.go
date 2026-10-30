@@ -26,8 +26,9 @@ func TestMarshalStatusWithNoncesIncludesJavaSessionFields(t *testing.T) {
 		LevelID:        "level",
 		TransportLayer: p2p.TransportLayerNetherNet,
 		SupportedConnections: []p2p.Connection{{
-			Type:        p2p.ConnectionTypeSignalingOverWebSocket,
-			NetherNetID: p2p.NetherNetID("123456789"),
+			Type:              p2p.ConnectionTypeSignalingOverJSONRPC,
+			NetherNetID:       p2p.NetherNetID("123456789"),
+			PlayerMessagingID: uuid.MustParse("11111111-2222-3333-4444-555555555555"),
 		}},
 	}, map[string]string{"200": "0102030405060708"})
 	if err != nil {
@@ -50,18 +51,14 @@ func TestMarshalStatusWithNoncesIncludesJavaSessionFields(t *testing.T) {
 	}
 	connections := got["SupportedConnections"].([]any)
 	connection := connections[0].(map[string]any)
-	if connection["ConnectionType"] != float64(p2p.ConnectionTypeSignalingOverWebSocket) {
+	if connection["ConnectionType"] != float64(p2p.ConnectionTypeSignalingOverJSONRPC) {
 		t.Fatalf("unexpected connection type: %#v", connection)
 	}
-	if _, ok := connection["PmsgId"]; ok {
-		t.Fatalf("websocket connection unexpectedly contains PmsgId: %#v", connection)
+	if connection["NetherNetId"] != float64(123456789) || connection["PmsgId"] != "11111111-2222-3333-4444-555555555555" {
+		t.Fatalf("connection does not carry the JSON-RPC identity: %#v", connection)
 	}
-	// Vanilla stores direct WebSocket network IDs in the legacy RakNetGUID field.
-	if connection["RakNetGUID"] != "123456789" {
-		t.Fatalf("RakNetGUID should contain the WebSocket network ID: %#v", connection)
-	}
-	if _, ok := connection["NetherNetId"]; ok {
-		t.Fatalf("websocket connection unexpectedly contains NetherNetId: %#v", connection)
+	if _, ok := connection["RakNetGUID"]; ok {
+		t.Fatalf("JSON-RPC connection unexpectedly contains RakNetGUID: %#v", connection)
 	}
 	hardcore, ok := got["isHardcore"].(bool)
 	if !ok || hardcore {
