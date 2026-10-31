@@ -8,7 +8,7 @@ import (
 	"github.com/df-mc/go-xsapi/v2"
 )
 
-// friendCountRefresh re-lists friends when expiry scans do not, so removals by other players are seen.
+// friendCountRefresh re-lists friends when expiry is off, so removals by other players are seen.
 const friendCountRefresh = 30 * time.Minute
 
 // advertisedFreshness spans a new publication's unchecked grace period and a
@@ -23,16 +23,17 @@ type Health struct {
 	Gamertag         string
 	Version          string
 	Protocol         int32
-	Advertised       bool // whether the last own-handle check found the session open
-	CheckedAt        time.Time
+	Advertised       bool      // whether the last answered own-handle check found the session open
+	CheckedAt        time.Time // last answered check
+	AttemptedAt      time.Time // last check, answered or not; Xbox errors keep the last answer
 	Friends          int
 	FriendsCheckedAt time.Time
 	RelayedJoins     uint64 // join offers answered since start
 }
 
-// AdvertisedAt reports whether the session was found open recently enough to trust at now.
+// AdvertisedAt reports whether the last answer found the session open and checks were still running at now.
 func (h Health) AdvertisedAt(now time.Time) bool {
-	return h.Advertised && !h.CheckedAt.IsZero() && now.Sub(h.CheckedAt) <= advertisedFreshness
+	return h.Advertised && !h.CheckedAt.IsZero() && now.Sub(h.AttemptedAt) <= advertisedFreshness
 }
 
 // Health returns a snapshot of the broadcaster's account. It never waits on the lifecycle
@@ -45,14 +46,26 @@ func (b *Broadcaster) Health() Health {
 	return health
 }
 
-// recordHealthIdentity publishes the account identity Health reports.
+// recordHealthIdentity fills in the account identity once. A recorded XUID or gamertag is never
+// replaced, so the identity labels on exported series stay stable.
 func (b *Broadcaster) recordHealthIdentity() {
+	b.health.mu.Lock()
+	known := b.health.xuid != "" && b.health.gamertag != ""
+	b.health.mu.Unlock()
+	if known {
+		return
+	}
 	b.mu.Lock()
 	xuid, gamertag := b.primaryXUID(), clientGamertag(b.conf.XBLClient, b.xblClient)
 	b.mu.Unlock()
 	b.health.mu.Lock()
 	defer b.health.mu.Unlock()
-	b.health.xuid, b.health.gamertag = xuid, gamertag
+	if b.health.xuid == "" {
+		b.health.xuid = xuid
+	}
+	if b.health.gamertag == "" {
+		b.health.gamertag = gamertag
+	}
 }
 
 func clientGamertag(clients ...*xsapi.Client) string {
@@ -71,23 +84,28 @@ type healthState struct {
 	joins   atomic.Uint64
 	friends friendCount
 
-	mu         sync.Mutex
-	xuid       string
-	gamertag   string
-	advertised bool
-	checkedAt  time.Time
+	mu          sync.Mutex
+	xuid        string
+	gamertag    string
+	advertised  bool
+	checkedAt   time.Time
+	attemptedAt time.Time
 }
 
-func (h *healthState) checked(advertised bool, at time.Time) {
+// checked records a check at at; answered is false when Xbox returned an error.
+func (h *healthState) checked(answered, advertised bool, at time.Time) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.advertised, h.checkedAt = advertised, at
+	h.attemptedAt = at
+	if answered {
+		h.advertised, h.checkedAt = advertised, at
+	}
 }
 
 func (h *healthState) snapshot() Health {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return Health{XUID: h.xuid, Gamertag: h.gamertag, Advertised: h.advertised, CheckedAt: h.checkedAt}
+	return Health{XUID: h.xuid, Gamertag: h.gamertag, Advertised: h.advertised, CheckedAt: h.checkedAt, AttemptedAt: h.attemptedAt}
 }
 
 // friendCount is the friend list size: exact at each full list, adjusted by adds and removals between lists.
@@ -98,7 +116,6 @@ type friendCount struct {
 	countedAt time.Time
 }
 
-// set records a full friend list.
 func (c *friendCount) set(n int) {
 	if c == nil {
 		return
@@ -108,17 +125,18 @@ func (c *friendCount) set(n int) {
 	c.friends, c.countedAt = n, time.Now()
 }
 
-// stale reports whether the count is missing or older than friendCountRefresh.
-func (c *friendCount) stale() bool {
+// needsList reports whether the syncer must list friends for the count alone; expiry
+// scans already re-count, so a known count is only refreshed when expiry is off.
+func (c *friendCount) needsList(expiryOn bool) bool {
 	if c == nil {
 		return false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.countedAt.IsZero() || time.Since(c.countedAt) > friendCountRefresh
+	return c.countedAt.IsZero() || (!expiryOn && time.Since(c.countedAt) > friendCountRefresh)
 }
 
-// add adjusts a known count between full lists.
+// add ignores a count no full list has established yet.
 func (c *friendCount) add(delta int) {
 	if c == nil {
 		return

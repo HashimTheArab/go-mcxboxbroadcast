@@ -51,7 +51,7 @@ type httpRelay struct {
 	client    endpoint.ClientConfig // NetworkID is set per offer
 	verify    func(ctx context.Context, sdp string) (offerIdentity, error)
 	history   HistoryRecorder // nil skips history
-	joins     *atomic.Uint64  // counts answered offers; nil skips counting
+	joins     *atomic.Uint64  // counts answered offers
 	log       *slog.Logger
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -209,9 +209,7 @@ func (r *httpRelay) relay(o *pendingOffer, sdp string) {
 		r.log.Error("send join answer", "sender", o.key.networkID, "err", err)
 		return
 	}
-	if r.joins != nil {
-		r.joins.Add(1)
-	}
+	r.joins.Add(1)
 	r.recordJoin(o)
 }
 

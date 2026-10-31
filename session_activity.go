@@ -107,8 +107,8 @@ func (b *Broadcaster) activityHealthIssue(state *activityObservation, now time.T
 		published, ok := b.publishedActivity()
 		return ok && published == publication
 	}
-	if err == nil && current() {
-		b.health.checked(found, now)
+	if current() {
+		b.health.checked(err == nil, found, now)
 	}
 	switch {
 	case err != nil || found:

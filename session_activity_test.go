@@ -111,11 +111,11 @@ func TestActivityHealthRequiresConsecutiveConfirmedMisses(t *testing.T) {
 		if (issue.reason != "") != (i == 9) {
 			t.Fatalf("response %d (%s) gave issue %+v", i, response, issue)
 		}
-		// Health reports each answered check; a failed request keeps the previous result.
+		// Health reports each answered check; an Xbox error keeps the previous answer.
 		health := b.Health()
 		if response == "error" {
-			if health.CheckedAt != before.CheckedAt {
-				t.Fatalf("response %d (error) changed health %+v", i, health)
+			if health.CheckedAt != before.CheckedAt || health.Advertised != before.Advertised || !health.AttemptedAt.Equal(at) {
+				t.Fatalf("response %d (error) gave health %+v, want the previous answer at a new attempt", i, health)
 			}
 		} else if health.CheckedAt != at || health.Advertised != (response == "healthy") {
 			t.Fatalf("response %d (%s) gave health %+v", i, response, health)

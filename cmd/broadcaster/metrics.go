@@ -59,7 +59,7 @@ func (c healthCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(joinsDesc, prometheus.CounterValue, float64(health.RelayedJoins), health.XUID, health.Gamertag)
 }
 
-// serveMetrics serves /metrics on listen until ctx ends. A bind failure is returned immediately.
+// serveMetrics serves /metrics on listen until the returned stop func runs. A bind failure is returned immediately.
 func serveMetrics(ctx context.Context, listen string, health func() broadcaster.Health, log *slog.Logger) (func(), error) {
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(healthCollector{health: health, now: time.Now})

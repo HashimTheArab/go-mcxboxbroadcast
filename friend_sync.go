@@ -128,7 +128,7 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 	}
 	expire := opts.expire && s.Config.ExpiryEnabled && s.History != nil
 	// Lists friends for the count even without expiry, inside this serialized loop.
-	if !expire && !s.friendCount.stale() {
+	if !expire && !s.friendCount.needsList(s.Config.ExpiryEnabled && s.History != nil) {
 		return result, nil
 	}
 	operationCtx, cancel := xboxOperationContext(ctx)

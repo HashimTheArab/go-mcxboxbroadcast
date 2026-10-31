@@ -12,7 +12,7 @@ import (
 // An unknown friend count is omitted rather than exported as zero.
 func TestHealthCollectorExportsAccount(t *testing.T) {
 	now := time.Unix(10_000, 0)
-	health := broadcaster.Health{XUID: "1", Gamertag: "Bot", Version: "1.26.60", Protocol: 2225, Advertised: true, CheckedAt: now, RelayedJoins: 7}
+	health := broadcaster.Health{XUID: "1", Gamertag: "Bot", Version: "1.26.60", Protocol: 2225, Advertised: true, CheckedAt: now, AttemptedAt: now, RelayedJoins: 7}
 	collector := healthCollector{now: func() time.Time { return now }, health: func() broadcaster.Health { return health }}
 	header := `
 # HELP mcxboxbroadcast_friend_limit Xbox friend list limit.

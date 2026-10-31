@@ -124,11 +124,13 @@ account's XUID, gamertag and friend count, so bind to all interfaces (`:9466`)
 only on a network where just your scraper can reach it. It reports:
 
 - `mcxboxbroadcast_session_advertised{xuid,gamertag,version,protocol}`: 1 when
-  the account's own session was found open within the last few minutes. It is
-  0 until the first check, a few minutes after startup.
+  the last answered check found the account's own session open and checks are
+  still running. Xbox errors keep the last answer. It is 0 until the first
+  check, a few minutes after startup.
 - `mcxboxbroadcast_friends` and `mcxboxbroadcast_friend_limit`: the friend list
-  size, listed at least every 30 minutes and adjusted for adds and removals in
-  between.
+  size, counted on the first friend sync and each expiry scan (or, with expiry
+  off, on the next friend sync once the count is 30 minutes old), and adjusted
+  for adds and removals in between. It is missing until friend sync first runs.
 - `mcxboxbroadcast_relayed_joins_total`: join offers relayed since start.
 
 ### Signaling
