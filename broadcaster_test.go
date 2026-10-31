@@ -305,3 +305,23 @@ func TestCleanupKeepsSessionWhoseCloseFailed(t *testing.T) {
 		t.Fatal("retry did not close the stale session")
 	}
 }
+
+// Close waits for goroutines that still use XBLClient, because the caller closes it right after.
+func TestCloseWaitsForWorkers(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		b := &Broadcaster{started: true, ctx: ctx, cancel: cancel, log: testBroadcasterLogger()}
+		var finished atomic.Bool
+		b.spawn(func() {
+			<-ctx.Done()
+			time.Sleep(time.Second)
+			finished.Store(true)
+		})
+		if err := b.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if !finished.Load() {
+			t.Fatal("Close returned while a worker was still using the client")
+		}
+	})
+}

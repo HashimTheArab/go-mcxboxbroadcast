@@ -307,7 +307,7 @@ func (b *Broadcaster) retire(announcer room.Announcer) {
 		return
 	}
 	ctx, log := b.ctx, b.log
-	go func() {
+	b.spawn(func() {
 		select {
 		case <-time.After(sessionRotateGrace):
 		case <-ctx.Done():
@@ -320,7 +320,7 @@ func (b *Broadcaster) retire(announcer room.Announcer) {
 			return
 		}
 		log.Debug("hid old session")
-	}()
+	})
 }
 
 // closeDrainedSessions closes retired sessions past their grace period that
@@ -382,6 +382,6 @@ func (b *Broadcaster) recreateSession() error {
 
 	// Re-showcase the gallery image so a swapped file does not require a
 	// process restart; the upload no-ops when the image is already set.
-	go b.uploadGallery()
+	b.spawn(b.uploadGallery)
 	return nil
 }

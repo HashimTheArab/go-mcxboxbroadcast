@@ -41,7 +41,9 @@ type Broadcaster struct {
 	cancel context.CancelFunc
 
 	mu         sync.Mutex
-	galleryMu  sync.Mutex // serializes uploads, since recovery starts one too
+	galleryMu  sync.Mutex     // serializes uploads, since recovery starts one too
+	tokensMu   sync.Mutex     // guards conf.MinecraftTokenSource, which gallery uploads share with signaling dials
+	workers    sync.WaitGroup // goroutines using XBLClient, which the caller closes after Close
 	started    bool
 	failure    error
 	recovering bool
@@ -119,13 +121,13 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	b.health.setIdentity(b.xuid(), b.conf.XBLClient.UserInfo().GamerTag)
 	b.log.Info("nethernet broadcaster started", "network_id", sig.NetworkID(), "target", b.conf.JoinURL)
 
-	go b.sessionLoop()
-	go runPresence(b.ctx, b.conf.XBLClient.Presence(), b.log)
-	go b.uploadGallery()
+	b.spawn(b.sessionLoop)
+	b.spawn(func() { runPresence(b.ctx, b.conf.XBLClient.Presence(), b.log) })
+	b.spawn(b.uploadGallery)
 	if b.conf.FriendSync != nil {
 		b.startFriendSync()
 	}
-	go b.logSocialSummary()
+	b.spawn(b.logSocialSummary)
 	return nil
 }
 
@@ -171,7 +173,7 @@ func (b *Broadcaster) startFriendSync() {
 	if conf.AutoFriend {
 		syncer.Trigger = b.subscribeSocial(b.conf.XBLClient.Social())
 	}
-	go syncer.Run(b.ctx)
+	b.spawn(func() { syncer.Run(b.ctx) })
 }
 
 // startRelay relays offers received on sig until the next recreation or Close.
@@ -197,26 +199,32 @@ func (b *Broadcaster) startRelay(sig nethernet.Signaling) *httpRelay {
 	})
 }
 
-// minecraftTokenSource returns conf.MinecraftTokenSource, creating it from XBLClient on first use.
-// It takes b.mu only around the field, since the signaling dial sets it under b.mu during
-// Start and recovery while gallery uploads run concurrently.
+// minecraftTokenSource returns the shared Minecraft token source, creating it from XBLClient on first use.
 func (b *Broadcaster) minecraftTokenSource(ctx context.Context) (service.TokenSource, error) {
-	b.mu.Lock()
-	tokens := b.conf.MinecraftTokenSource
-	b.mu.Unlock()
-	if tokens != nil {
+	if tokens := b.cachedMinecraftTokens(); tokens != nil {
 		return tokens, nil
 	}
 	tokens, err := NewMinecraftTokenSource(ctx, b.conf.XBLClient, b.conf.HTTPClient, b.log)
 	if err != nil {
 		return nil, err
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	return b.storeMinecraftTokens(tokens), nil
+}
+
+func (b *Broadcaster) cachedMinecraftTokens() service.TokenSource {
+	b.tokensMu.Lock()
+	defer b.tokensMu.Unlock()
+	return b.conf.MinecraftTokenSource
+}
+
+// storeMinecraftTokens keeps the first token source created and returns the one to use.
+func (b *Broadcaster) storeMinecraftTokens(tokens service.TokenSource) service.TokenSource {
+	b.tokensMu.Lock()
+	defer b.tokensMu.Unlock()
 	if b.conf.MinecraftTokenSource == nil {
 		b.conf.MinecraftTokenSource = tokens
 	}
-	return b.conf.MinecraftTokenSource, nil
+	return b.conf.MinecraftTokenSource
 }
 
 func (b *Broadcaster) xuid() string {
@@ -279,17 +287,20 @@ func (b *Broadcaster) dialSignaling(ctx context.Context) (nethernet.Signaling, e
 	defer cancel()
 	b.log.Debug("dialing nethernet signaling", "timeout", timeout)
 	httpClient := signalingStartupHTTPClient(b.conf.HTTPClient, timeout)
-	xbl, tokens, log := b.conf.XBLClient, b.conf.MinecraftTokenSource, b.log
+	xbl, tokens, log := b.conf.XBLClient, b.cachedMinecraftTokens(), b.log
 	type dialed struct {
 		sig    nethernet.Signaling
 		tokens service.TokenSource
 		err    error
 	}
 	results := make(chan dialed)
-	go func() {
+	b.spawn(func() {
 		r := dialed{tokens: tokens}
 		if r.tokens == nil {
-			r.tokens, r.err = NewMinecraftTokenSource(ctx, xbl, httpClient, log)
+			// Kept even if the dial fails, so recovery attempts do not log in to PlayFab again.
+			if r.tokens, r.err = NewMinecraftTokenSource(ctx, xbl, httpClient, log); r.err == nil {
+				r.tokens = b.storeMinecraftTokens(r.tokens)
+			}
 		}
 		if r.err == nil {
 			// Keep r.sig an untyped nil on failure so closeSignaling skips it.
@@ -303,7 +314,7 @@ func (b *Broadcaster) dialSignaling(ctx context.Context) (nethernet.Signaling, e
 		case <-ctx.Done():
 			_ = closeSignaling(r.sig)
 		}
-	}()
+	})
 	select {
 	case r := <-results:
 		if ctx.Err() != nil {
@@ -312,9 +323,6 @@ func (b *Broadcaster) dialSignaling(ctx context.Context) (nethernet.Signaling, e
 		}
 		if r.err != nil {
 			return nil, r.err
-		}
-		if b.conf.MinecraftTokenSource == nil {
-			b.conf.MinecraftTokenSource = r.tokens
 		}
 		return r.sig, nil
 	case <-ctx.Done():
@@ -466,8 +474,8 @@ func (b *Broadcaster) releaseSessions() error {
 // Close stops the relay and removes the Xbox sessions.
 func (b *Broadcaster) Close() error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if !b.started {
+		b.mu.Unlock()
 		return nil
 	}
 	b.cancel()
@@ -475,7 +483,19 @@ func (b *Broadcaster) Close() error {
 	b.socialWg.Wait()
 	err := b.releaseSessions()
 	b.started = false
+	b.mu.Unlock()
+	// Workers may need b.mu to notice cancellation, so wait after releasing it.
+	b.workers.Wait()
 	return err
+}
+
+// spawn runs fn in a goroutine that Close waits for.
+func (b *Broadcaster) spawn(fn func()) {
+	b.workers.Add(1)
+	go func() {
+		defer b.workers.Done()
+		fn()
+	}()
 }
 
 // Wait blocks until shutdown is requested and returns any terminal recovery error.

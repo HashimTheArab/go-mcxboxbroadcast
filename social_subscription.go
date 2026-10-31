@@ -18,7 +18,6 @@ type socialSubscriber interface {
 
 // subscribeSocial returns a trigger that fires on each social RTA event. Close waits on socialWg
 // until the registration is released, so a caller's shared client keeps no stale handler.
-// Polling covers a failed or lost subscription.
 func (b *Broadcaster) subscribeSocial(sub socialSubscriber) <-chan struct{} {
 	// Buffered by one so bursts of events collapse into a single pending pass.
 	trigger := make(chan struct{}, 1)

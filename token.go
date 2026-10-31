@@ -30,11 +30,8 @@ const liveAuthScope = "service::user.auth.xboxlive.com::MBI_SSL"
 
 var minecraftServiceErrorPattern = regexp.MustCompile(`minecraft/service:\s*([^:]+):\s*"([^"]*)"`)
 
-// NewLiveTokenSource returns a Microsoft Live token source that prints device-code prompts to
-// out and calls persist, if non-nil, with every newly issued token. Requests use ctx's
-// oauth2.HTTPClient when set. A rejected refresh token falls back to device-code login: blocking
-// before the first token is handed out, in the background afterwards, with Token failing fast
-// until the operator completes it.
+// NewLiveTokenSource returns a Microsoft Live token source that calls persist, if non-nil, with each new token.
+// A rejected refresh token falls back to device-code login on out; after the first token, Token fails fast until it completes.
 func NewLiveTokenSource(ctx context.Context, tok *oauth2.Token, out io.Writer, persist func(*oauth2.Token)) oauth2.TokenSource {
 	return oauth2.ReuseTokenSource(tok, newLiveTokenSource(ctx, tok, out, persist))
 }
