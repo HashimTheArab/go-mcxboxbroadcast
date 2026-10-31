@@ -1,7 +1,6 @@
 package broadcaster
 
 import (
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,58 +15,44 @@ const friendCountRefresh = 30 * time.Minute
 // few check intervals, so a session rotation does not read as a lost advertisement.
 const advertisedFreshness = activityGracePeriod + 3*activityCheckInterval
 
-// Health is the broadcaster's own view of what it publishes. It cannot prove
-// that another account can see or join a session; Xbox decides that per viewer.
+// Health is the broadcaster's own view of its published account. It cannot prove
+// that another account can see or join the session; Xbox decides that per viewer.
+// Zero times mean not yet known.
 type Health struct {
-	Version  string
-	Protocol int32
-	// RelayedJoins counts join offers answered since start. Sub-accounts share
-	// the primary's signaling, so joins are not attributed per account.
-	RelayedJoins uint64
-	Accounts     []AccountHealth
-}
-
-// AccountHealth describes one published account. Zero times mean not yet known.
-type AccountHealth struct {
-	ID               string // empty for the primary account
 	XUID             string
 	Gamertag         string
+	Version          string
+	Protocol         int32
 	Advertised       bool // whether the last own-handle check found the session open
 	CheckedAt        time.Time
 	Friends          int
 	FriendsCheckedAt time.Time
+	RelayedJoins     uint64 // join offers answered since start
 }
 
-// AdvertisedAt reports whether the account's session was found open recently enough to trust at now.
-func (a AccountHealth) AdvertisedAt(now time.Time) bool {
-	return a.Advertised && !a.CheckedAt.IsZero() && now.Sub(a.CheckedAt) <= advertisedFreshness
+// AdvertisedAt reports whether the session was found open recently enough to trust at now.
+func (h Health) AdvertisedAt(now time.Time) bool {
+	return h.Advertised && !h.CheckedAt.IsZero() && now.Sub(h.CheckedAt) <= advertisedFreshness
 }
 
-// Health returns a snapshot of the broadcaster's published accounts. It never waits on the
-// lifecycle lock, which Update holds across Xbox calls; accounts appear once the session loop runs.
+// Health returns a snapshot of the broadcaster's account. It never waits on the lifecycle
+// lock, which Update holds across Xbox calls; the identity appears once the session loop runs.
 func (b *Broadcaster) Health() Health {
-	accounts := b.health.identities()
-	for i := range accounts {
-		b.health.account(accounts[i].ID).fill(&accounts[i])
-	}
-	return Health{
-		Version:      b.advertisedVersion(),
-		Protocol:     b.advertisedProtocol(),
-		RelayedJoins: b.health.joins.Load(),
-		Accounts:     accounts,
-	}
+	health := b.health.snapshot()
+	health.Friends, health.FriendsCheckedAt = b.health.friends.snapshot()
+	health.Version, health.Protocol = b.advertisedVersion(), b.advertisedProtocol()
+	health.RelayedJoins = b.health.joins.Load()
+	return health
 }
 
-// recordHealthAccounts publishes the account identities Health reports, primary first.
-func (b *Broadcaster) recordHealthAccounts() {
+// recordHealthIdentity publishes the account identity Health reports.
+func (b *Broadcaster) recordHealthIdentity() {
 	b.mu.Lock()
-	accounts := []AccountHealth{{XUID: b.primaryXUID(), Gamertag: clientGamertag(b.conf.XBLClient, b.xblClient)}}
-	subs, _ := b.enabledSubAccounts()
-	for _, account := range subs {
-		accounts = append(accounts, AccountHealth{ID: account.ID, XUID: accountXUID(*account), Gamertag: clientGamertag(account.XBLClient)})
-	}
+	xuid, gamertag := b.primaryXUID(), clientGamertag(b.conf.XBLClient, b.xblClient)
 	b.mu.Unlock()
-	b.health.setIdentities(accounts)
+	b.health.mu.Lock()
+	defer b.health.mu.Unlock()
+	b.health.xuid, b.health.gamertag = xuid, gamertag
 }
 
 func clientGamertag(clients ...*xsapi.Client) string {
@@ -81,91 +66,72 @@ func clientGamertag(clients ...*xsapi.Client) string {
 	return ""
 }
 
-// healthState collects what Health reports, keyed by account ID.
+// healthState collects what Health reports, apart from config-derived fields.
 type healthState struct {
-	joins    atomic.Uint64
-	mu       sync.Mutex
-	accounts map[string]*accountHealthState
-	ids      []AccountHealth // identity fields only, primary first
-}
+	joins   atomic.Uint64
+	friends friendCount
 
-func (h *healthState) setIdentities(ids []AccountHealth) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.ids = ids
-}
-
-func (h *healthState) identities() []AccountHealth {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return slices.Clone(h.ids)
-}
-
-func (h *healthState) account(id string) *accountHealthState {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.accounts == nil {
-		h.accounts = make(map[string]*accountHealthState)
-	}
-	state, ok := h.accounts[id]
-	if !ok {
-		state = &accountHealthState{}
-		h.accounts[id] = state
-	}
-	return state
-}
-
-// accountHealthState is one account's latest advertisement check and friend count.
-// Friend counts are exact at each full list and adjusted by adds and removals between lists.
-type accountHealthState struct {
 	mu         sync.Mutex
+	xuid       string
+	gamertag   string
 	advertised bool
 	checkedAt  time.Time
-	friends    int
-	friendsAt  time.Time
 }
 
-func (s *accountHealthState) checked(advertised bool, at time.Time) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.advertised, s.checkedAt = advertised, at
+func (h *healthState) checked(advertised bool, at time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.advertised, h.checkedAt = advertised, at
 }
 
-// setFriends records a full friend list; nil s is a no-op for standalone syncers.
-func (s *accountHealthState) setFriends(n int) {
-	if s == nil {
+func (h *healthState) snapshot() Health {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return Health{XUID: h.xuid, Gamertag: h.gamertag, Advertised: h.advertised, CheckedAt: h.checkedAt}
+}
+
+// friendCount is the friend list size: exact at each full list, adjusted by adds and removals between lists.
+// A nil friendCount, as in a standalone FriendSyncer, ignores every call.
+type friendCount struct {
+	mu        sync.Mutex
+	friends   int
+	countedAt time.Time
+}
+
+// set records a full friend list.
+func (c *friendCount) set(n int) {
+	if c == nil {
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.friends, s.friendsAt = n, time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.friends, c.countedAt = n, time.Now()
 }
 
-// needsFriends reports whether the count is missing or older than friendCountRefresh; nil s never needs one.
-func (s *accountHealthState) needsFriends() bool {
-	if s == nil {
+// stale reports whether the count is missing or older than friendCountRefresh.
+func (c *friendCount) stale() bool {
+	if c == nil {
 		return false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.friendsAt.IsZero() || time.Since(s.friendsAt) > friendCountRefresh
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.countedAt.IsZero() || time.Since(c.countedAt) > friendCountRefresh
 }
 
-// addFriends adjusts a known count between full lists.
-func (s *accountHealthState) addFriends(delta int) {
-	if s == nil {
+// add adjusts a known count between full lists.
+func (c *friendCount) add(delta int) {
+	if c == nil {
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.friendsAt.IsZero() {
-		s.friends = max(s.friends+delta, 0)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.countedAt.IsZero() {
+		c.friends = max(c.friends+delta, 0)
 	}
 }
 
-func (s *accountHealthState) fill(a *AccountHealth) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	a.Advertised, a.CheckedAt = s.advertised, s.checkedAt
-	a.Friends, a.FriendsCheckedAt = s.friends, s.friendsAt
+func (c *friendCount) snapshot() (int, time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.friends, c.countedAt
 }

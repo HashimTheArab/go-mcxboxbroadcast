@@ -60,7 +60,7 @@ The config exposes the same operator-facing areas as MCXboxBroadcast:
   database — operators migrating from MCXboxBroadcast start with a fresh
   expiry history)
 - Slack/Discord-compatible webhook notifications
-- primary and sub-account token cache paths
+- the Xbox account token cache path
 - optional HTTP proxy URL through `http.proxy`
 - optional Prometheus metrics through `metrics.listen`
 
@@ -119,25 +119,24 @@ restart enabled so the next process recreates authentication and client state.
 ### Metrics
 
 Set `metrics.listen` (for example `127.0.0.1:9466`) to serve Prometheus
-metrics on `/metrics`. The endpoint has no authentication and exposes account
-XUIDs, gamertags and friend counts, so bind to all interfaces (`:9466`) only on
-a network where just your scraper can reach it. Each account reports:
+metrics on `/metrics`. The endpoint has no authentication and exposes the
+account's XUID, gamertag and friend count, so bind to all interfaces (`:9466`)
+only on a network where just your scraper can reach it. It reports:
 
 - `mcxboxbroadcast_session_advertised{xuid,gamertag,version,protocol}`: 1 when
   the account's own session was found open within the last few minutes. It is
   0 until the first check, a few minutes after startup.
 - `mcxboxbroadcast_friends` and `mcxboxbroadcast_friend_limit`: the friend list
-  size, counted on the first friend sync and each expiry scan and adjusted for
-  adds and removals in between.
-- `mcxboxbroadcast_relayed_joins_total`: join offers relayed since start,
-  labelled with the primary account.
+  size, listed at least every 30 minutes and adjusted for adds and removals in
+  between.
+- `mcxboxbroadcast_relayed_joins_total`: join offers relayed since start.
 
 ### Signaling
 
 Sessions use Xbox JSON-RPC signaling, the only signaling vanilla clients join
-through. Sub-accounts are not supported with it; startup fails if one is
-enabled. Older configs that set `session.signalingMode` load with that key
-removed.
+through. Older configs that set `session.signalingMode` or list
+`accounts.subAccounts` load with those keys removed; only the primary account
+broadcasts.
 
 ## Docker
 

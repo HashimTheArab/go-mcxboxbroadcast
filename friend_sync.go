@@ -49,19 +49,12 @@ type FriendSyncer struct {
 	// Notifier receives operator-facing notifications such as friend
 	// restriction removals. It may be nil.
 	Notifier Notifier
-	// PruneHistory removes history entries for people missing from this
-	// syncer's friend list. Enable it on exactly one syncer per shared
-	// HistoryStore, or entries maintained by other accounts get dropped.
-	PruneHistory bool
-	// OwnXUIDs returns the broadcaster's own accounts, which never join and
-	// so are never expired.
-	OwnXUIDs func() []string
 	// Trigger requests an early sync, subject to scan spacing and Retry-After.
 	// A nil Trigger leaves the syncer purely periodic.
 	Trigger <-chan struct{}
 	Log     *slog.Logger
 
-	friendCount *accountHealthState // nil outside a Broadcaster
+	friendCount *friendCount // nil outside a Broadcaster
 }
 
 const (
@@ -135,7 +128,7 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 	}
 	expire := opts.expire && s.Config.ExpiryEnabled && s.History != nil
 	// Lists friends for the count even without expiry, inside this serialized loop.
-	if !expire && !s.friendCount.needsFriends() {
+	if !expire && !s.friendCount.stale() {
 		return result, nil
 	}
 	operationCtx, cancel := xboxOperationContext(ctx)
@@ -145,23 +138,17 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 		result.readRetryAfter = retryDelay(err)
 		return result, err
 	}
-	s.friendCount.setFriends(len(friends))
+	s.friendCount.set(len(friends))
 	if !expire {
 		return result, nil
 	}
 	s.debug(ctx, "friend expiry scan", "friends", fmt.Sprintf("%d/%d", len(friends), MaxFriends))
-	own := make(map[string]struct{})
-	if s.OwnXUIDs != nil {
-		for _, xuid := range s.OwnXUIDs() {
-			own[xuid] = struct{}{}
-		}
-	}
 	expired := 0
 	for _, p := range friends {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
-		if _, ok := own[p.XUID]; ok || isGuestXUID(p.XUID) {
+		if isGuestXUID(p.XUID) {
 			continue
 		}
 		if !opts.remove || result.removeRetryAfter > 0 {
@@ -171,9 +158,7 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 			expired++
 		}
 	}
-	if s.PruneHistory {
-		s.pruneHistory(ctx, friends)
-	}
+	s.pruneHistory(ctx, friends)
 	s.debug(ctx, "friend expiry scan done", "expired", expired)
 	return result, nil
 }
@@ -242,7 +227,7 @@ func (s FriendSyncer) addFriend(ctx context.Context, p Person, result *friendSyn
 
 // added starts p's expiry clock and sends the initial invite.
 func (s FriendSyncer) added(ctx context.Context, p Person, source string) {
-	s.friendCount.addFriends(1)
+	s.friendCount.add(1)
 	s.info(ctx, "added friend", "xuid", p.XUID, "gamertag", p.Gamertag, "source", source)
 	if recorder, ok := s.History.(HistoryRecorder); ok {
 		if err := recorder.Seen(ctx, p.XUID, time.Now()); err != nil && s.Log != nil {
@@ -300,7 +285,7 @@ func (s FriendSyncer) expire(ctx context.Context, p Person, result *friendSyncRe
 		}
 		return false
 	}
-	s.friendCount.addFriends(-1)
+	s.friendCount.add(-1)
 	s.info(ctx, "removed friend due to inactivity", "xuid", p.XUID, "gamertag", p.Gamertag, "last_seen", lastSeen)
 	if err := s.History.Clear(ctx, p.XUID); err != nil && s.Log != nil {
 		s.Log.Error("clear player history", "xuid", p.XUID, "err", err)

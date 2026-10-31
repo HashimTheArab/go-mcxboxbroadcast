@@ -21,7 +21,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const CurrentConfigVersion = 6
+const CurrentConfigVersion = 7
 
 // exampleServerHost is the placeholder target in generated configs; the
 // broadcaster refuses to start until an operator replaces it.
@@ -111,14 +111,7 @@ type GalleryFileConfig struct {
 }
 
 type AccountsConfig struct {
-	PrimaryCachePath string           `yaml:"primaryCachePath" toml:"primaryCachePath"`
-	SubAccounts      []SubAccountFile `yaml:"subAccounts" toml:"subAccounts"`
-}
-
-type SubAccountFile struct {
-	ID        string `yaml:"id" toml:"id"`
-	Enabled   bool   `yaml:"enabled" toml:"enabled"`
-	CachePath string `yaml:"cachePath" toml:"cachePath"`
+	PrimaryCachePath string `yaml:"primaryCachePath" toml:"primaryCachePath"`
 }
 
 type RuntimeConfigInput struct {
@@ -262,6 +255,7 @@ var configMigrations = map[int]func(doc map[string]any) []string{
 	4: migrateDropSessionOverrides,
 	5: migrateHTTPSignalingRelay,
 	6: migrateDropSignalingMode,
+	7: migrateDropSubAccounts,
 }
 
 // migrateDropSessionOverrides removes keys this broadcaster never honours or
@@ -332,6 +326,33 @@ func migrateDropSignalingMode(doc map[string]any) []string {
 		return []string{"removed session.signalingMode: sessions always use JSON-RPC signaling now"}
 	}
 	return nil
+}
+
+// migrateDropSubAccounts removes accounts.subAccounts. Configs saved at
+// version 6 still carry the key, so this cannot be part of that step.
+func migrateDropSubAccounts(doc map[string]any) []string {
+	accounts, ok := doc["accounts"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	subAccounts, ok := accounts["subAccounts"]
+	if !ok {
+		return nil
+	}
+	delete(accounts, "subAccounts")
+	var enabled []string
+	if list, ok := subAccounts.([]any); ok {
+		for _, entry := range list {
+			if account, ok := entry.(map[string]any); ok && account["enabled"] == true {
+				id, _ := account["id"].(string)
+				enabled = append(enabled, strconv.Quote(id))
+			}
+		}
+	}
+	if len(enabled) == 0 {
+		return []string{"removed accounts.subAccounts: sub-accounts are no longer supported"}
+	}
+	return []string{fmt.Sprintf("removed accounts.subAccounts: sub-accounts are no longer supported, so enabled sub-accounts %s are not broadcast; only the primary account is", strings.Join(enabled, ", "))}
 }
 
 // configInt reads an integer decoded by either the YAML or TOML codec.

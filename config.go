@@ -53,11 +53,6 @@ type Config struct {
 	FriendSync *FriendSyncConfig
 	// FriendHistory records player activity for friend expiry.
 	FriendHistory HistoryStore
-	// SubAccounts contains additional accounts that publish independently owned
-	// MPSD sessions advertising the same signaling connection. New rejects an
-	// enabled one: a JSON-RPC signaling identity cannot be shared across owners.
-	SubAccounts []SubAccountConfig
-
 	// Signaling is the Xbox JSON-RPC signaling connection that receives join
 	// offers; it must implement p2p.JSONRPCSignaling. If nil, SignalingFactory is called.
 	Signaling nethernet.Signaling
@@ -162,17 +157,4 @@ type FriendSyncConfig struct {
 	ExpiryEnabled bool
 	ExpiryDays    int
 	ExpiryCheck   time.Duration
-}
-
-type SubAccountConfig struct {
-	ID                   string
-	Enabled              bool
-	XBLClient            *xsapi.Client
-	XBLTokenSource       xsapi.TokenSource
-	MinecraftTokenSource service.TokenSource
-	XUID                 string
-	PublishConfig        mpsd.PublishConfig
-	// FriendSync overrides the primary account's friend sync configuration for
-	// this sub-account. If nil, the primary configuration is used.
-	FriendSync *FriendSyncConfig
 }

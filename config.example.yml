@@ -1,4 +1,4 @@
-configVersion: 6
+configVersion: 7
 debugMode: false
 suppressSessionUpdateMessage: false
 
@@ -51,7 +51,6 @@ gallery:
 
 accounts:
   primaryCachePath: cache/live_token.json
-  subAccounts: []
 
 metrics:
   listen: ""

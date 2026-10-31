@@ -2,7 +2,6 @@ package broadcaster
 
 import (
 	"context"
-	"slices"
 	"time"
 
 	"github.com/df-mc/go-xsapi/v2/mpsd"
@@ -18,7 +17,6 @@ const (
 
 // publishedActivity identifies the account and session whose handle should exist.
 type publishedActivity struct {
-	id        string
 	xuid      string
 	ref       mpsd.SessionReference
 	announcer *room.XBLAnnouncer
@@ -26,7 +24,7 @@ type publishedActivity struct {
 	client    *mpsd.Client
 }
 
-// activityObservation keeps consecutive misses and recovery timing for one account.
+// activityObservation keeps consecutive misses and recovery timing for the published session.
 type activityObservation struct {
 	publication  publishedActivity
 	checkAfter   time.Time
@@ -34,30 +32,24 @@ type activityObservation struct {
 	misses       int
 }
 
-// publishedActivities snapshots publication identities without holding locks during HTTP calls.
-func (b *Broadcaster) publishedActivities() []publishedActivity {
+// publishedActivity snapshots the publication identity without holding locks during HTTP calls.
+func (b *Broadcaster) publishedActivity() (publishedActivity, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !b.started || b.recovering {
-		return nil
+		return publishedActivity{}, false
 	}
-	var publications []publishedActivity
-	add := func(id, xuid string, announcer room.Announcer) {
-		xbl, ok := xblAnnouncer(announcer)
-		if !ok || xuid == "" {
-			return
-		}
-		xbl.Lock()
-		defer xbl.Unlock()
-		if xbl.Client != nil && xbl.SessionReference.Name != "" {
-			publications = append(publications, publishedActivity{id: id, xuid: xuid, ref: xbl.SessionReference, announcer: xbl, session: xbl.Session, client: xbl.Client})
-		}
+	xuid := b.primaryXUID()
+	xbl, ok := xblAnnouncer(b.announcer)
+	if !ok || xuid == "" {
+		return publishedActivity{}, false
 	}
-	add("", b.primaryXUID(), b.announcer)
-	for _, sub := range b.subAnnouncers {
-		add(sub.id, sub.xuid, sub.announcer)
+	xbl.Lock()
+	defer xbl.Unlock()
+	if xbl.Client == nil || xbl.SessionReference.Name == "" {
+		return publishedActivity{}, false
 	}
-	return publications
+	return publishedActivity{xuid: xuid, ref: xbl.SessionReference, announcer: xbl, session: xbl.Session, client: xbl.Client}, true
 }
 
 // primaryActivityCurrentLocked reports whether activity still identifies the
@@ -83,64 +75,60 @@ func (b *Broadcaster) primaryActivityCurrent(activity *publishedActivity) bool {
 	return b.primaryActivityCurrentLocked(activity)
 }
 
-// activityHealthIssue checks each account's own directory handle. This detects lost
+// activityHealthIssue checks the account's own directory handle. This detects lost
 // publication, but cannot prove that another account can see or join the session.
-// The session loop owns observations and serializes any resulting recovery.
-func (b *Broadcaster) activityHealthIssue(observations map[string]activityObservation, now time.Time) sessionHealthIssue {
-	b.recordHealthAccounts()
-	publications := b.publishedActivities()
+// The session loop owns state and serializes any resulting recovery.
+func (b *Broadcaster) activityHealthIssue(state *activityObservation, now time.Time) sessionHealthIssue {
+	b.recordHealthIdentity()
+	publication, ok := b.publishedActivity()
+	if !ok {
+		return sessionHealthIssue{}
+	}
+	if state.publication != publication {
+		state.publication = publication
+		state.misses = 0
+		state.checkAfter = now.Add(activityGracePeriod)
+	}
+	if now.Before(state.checkAfter) {
+		return sessionHealthIssue{}
+	}
 	ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
 	defer cancel()
-	for _, publication := range publications {
-		state := observations[publication.id]
-		if state.publication != publication {
-			state.publication = publication
-			state.misses = 0
-			state.checkAfter = now.Add(activityGracePeriod)
-		}
-		if now.Before(state.checkAfter) {
-			observations[publication.id] = state
-			continue
-		}
-		activities, err := publication.client.ActivitiesForUsers(ctx, publication.ref.ServiceConfigID, []string{publication.xuid})
-		found := false
-		for _, activity := range activities {
-			if activity.OwnerXUID == publication.xuid && activity.SessionReference.Equal(publication.ref) && (activity.RelatedInfo == nil || !activity.RelatedInfo.Closed) {
-				found = true
-				break
-			}
-		}
-		if err == nil && b.publicationCurrent(publication) {
-			b.health.account(publication.id).checked(found, now)
-		}
-		switch {
-		case err != nil || found:
-			state.misses = 0
-			if err != nil && b.ctx.Err() == nil {
-				b.debug("check published activity", "sub_account", publication.id, "err", err)
-			}
-		case now.Before(state.recoverAfter):
-			// The cooldown only delays recovery; checks still update health, and misses count after it.
-		default:
-			state.misses++
-		}
-		observations[publication.id] = state
-		if state.misses < activityMissingLimit {
-			continue
-		}
-		// An external Update can replace a sub-account while the query runs.
-		// Discard its old result rather than replacing the new session again.
-		if b.publicationCurrent(publication) {
-			state.misses = 0
-			state.recoverAfter = now.Add(activityRecoveryCooldown)
-			observations[publication.id] = state
-			return sessionHealthIssue{reason: "published activity handle missing or closed", subAccountID: publication.id, activity: &publication}
+	activities, err := publication.client.ActivitiesForUsers(ctx, publication.ref.ServiceConfigID, []string{publication.xuid})
+	found := false
+	for _, activity := range activities {
+		if activity.OwnerXUID == publication.xuid && activity.SessionReference.Equal(publication.ref) && (activity.RelatedInfo == nil || !activity.RelatedInfo.Closed) {
+			found = true
+			break
 		}
 	}
-	return sessionHealthIssue{}
-}
-
-// publicationCurrent reports whether publication is still published, so a slow query's result still applies.
-func (b *Broadcaster) publicationCurrent(publication publishedActivity) bool {
-	return slices.Contains(b.publishedActivities(), publication)
+	// An external Update can replace the session while the query runs; its old result no longer applies.
+	current := func() bool {
+		published, ok := b.publishedActivity()
+		return ok && published == publication
+	}
+	if err == nil && current() {
+		b.health.checked(found, now)
+	}
+	switch {
+	case err != nil || found:
+		state.misses = 0
+		if err != nil && b.ctx.Err() == nil {
+			b.debug("check published activity", "err", err)
+		}
+	case now.Before(state.recoverAfter):
+		// The cooldown only delays recovery; checks still update health, and misses count after it.
+	default:
+		state.misses++
+	}
+	if state.misses < activityMissingLimit {
+		return sessionHealthIssue{}
+	}
+	// Discard a replaced session's result rather than replacing the new session again.
+	if !current() {
+		return sessionHealthIssue{}
+	}
+	state.misses = 0
+	state.recoverAfter = now.Add(activityRecoveryCooldown)
+	return sessionHealthIssue{reason: "published activity handle missing or closed", activity: &publication}
 }

@@ -25,7 +25,7 @@ var (
 		"Xbox friend list limit.",
 		[]string{"xuid", "gamertag"}, nil)
 	joinsDesc = prometheus.NewDesc("mcxboxbroadcast_relayed_joins_total",
-		"Join offers relayed to the target since start, labelled with the primary account.",
+		"Join offers relayed to the target since start.",
 		[]string{"xuid", "gamertag"}, nil)
 )
 
@@ -44,29 +44,19 @@ func (c healthCollector) Describe(ch chan<- *prometheus.Desc) {
 
 func (c healthCollector) Collect(ch chan<- prometheus.Metric) {
 	health := c.health()
-	now := c.now()
-	protocol := strconv.Itoa(int(health.Protocol))
-	// Two configured accounts can sign in to one Xbox account; duplicate series would fail the whole scrape.
-	seen := make(map[string]struct{}, len(health.Accounts))
-	for _, account := range health.Accounts {
-		if _, dup := seen[account.XUID]; dup || account.XUID == "" {
-			continue
-		}
-		seen[account.XUID] = struct{}{}
-		advertised := 0.0
-		if account.AdvertisedAt(now) {
-			advertised = 1
-		}
-		ch <- prometheus.MustNewConstMetric(advertisedDesc, prometheus.GaugeValue, advertised, account.XUID, account.Gamertag, health.Version, protocol)
-		ch <- prometheus.MustNewConstMetric(friendLimitDesc, prometheus.GaugeValue, broadcaster.MaxFriends, account.XUID, account.Gamertag)
-		if !account.FriendsCheckedAt.IsZero() {
-			ch <- prometheus.MustNewConstMetric(friendsDesc, prometheus.GaugeValue, float64(account.Friends), account.XUID, account.Gamertag)
-		}
+	if health.XUID == "" {
+		return
 	}
-	if len(health.Accounts) > 0 && health.Accounts[0].XUID != "" {
-		primary := health.Accounts[0]
-		ch <- prometheus.MustNewConstMetric(joinsDesc, prometheus.CounterValue, float64(health.RelayedJoins), primary.XUID, primary.Gamertag)
+	advertised := 0.0
+	if health.AdvertisedAt(c.now()) {
+		advertised = 1
 	}
+	ch <- prometheus.MustNewConstMetric(advertisedDesc, prometheus.GaugeValue, advertised, health.XUID, health.Gamertag, health.Version, strconv.Itoa(int(health.Protocol)))
+	ch <- prometheus.MustNewConstMetric(friendLimitDesc, prometheus.GaugeValue, broadcaster.MaxFriends, health.XUID, health.Gamertag)
+	if !health.FriendsCheckedAt.IsZero() {
+		ch <- prometheus.MustNewConstMetric(friendsDesc, prometheus.GaugeValue, float64(health.Friends), health.XUID, health.Gamertag)
+	}
+	ch <- prometheus.MustNewConstMetric(joinsDesc, prometheus.CounterValue, float64(health.RelayedJoins), health.XUID, health.Gamertag)
 }
 
 // serveMetrics serves /metrics on listen until ctx ends. A bind failure is returned immediately.

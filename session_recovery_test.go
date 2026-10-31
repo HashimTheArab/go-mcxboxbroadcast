@@ -3,14 +3,11 @@ package broadcaster
 import (
 	"context"
 	"errors"
-	"net/http"
 	"reflect"
 	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
-
-	"github.com/df-mc/go-xsapi/v2"
 
 	"github.com/df-mc/go-nethernet"
 	"github.com/sandertv/gophertunnel/minecraft/room"
@@ -133,47 +130,3 @@ func TestSessionLoopDoesNotRebuildStaticSignaling(t *testing.T) {
 		}
 	})
 }
-
-func TestSlowSubAccountRecoveryDoesNotExpirePrimaryUpdate(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		primary := &contextCheckingAnnouncer{}
-		b := &Broadcaster{
-			log:           testBroadcasterLogger(),
-			ctx:           context.Background(),
-			started:       true,
-			announcer:     primary,
-			subAnnouncers: []publishedSubAccount{{id: "sub", announcer: &fakeAnnouncer{announceErr: errors.New("sub-account unavailable")}}},
-			conf: Config{
-				XUID:        "primary",
-				SubAccounts: []SubAccountConfig{{ID: "sub", Enabled: true, XUID: "sub", XBLClient: &xsapi.Client{}}},
-				HTTPClient: &http.Client{Transport: broadcasterRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-					<-req.Context().Done()
-					return nil, req.Context().Err()
-				})},
-			},
-		}
-		err := b.refreshSession(sessionHealthIssue{reason: "sub-account session lost", subAccountID: "sub"})
-		if err == nil || countsAsPrimaryUpdateFailure(err) {
-			t.Fatalf("refreshSession() = %v, want a sub-account-only failure", err)
-		}
-		if primary.updates != 1 || primary.contextErr != nil {
-			t.Fatalf("primary updates=%d context error=%v, want one update with a fresh context", primary.updates, primary.contextErr)
-		}
-	})
-}
-
-// contextCheckingAnnouncer checks the request context just as an HTTP write would.
-type contextCheckingAnnouncer struct {
-	updates    int
-	contextErr error
-}
-
-// Announce records whether the primary had a usable request context.
-func (a *contextCheckingAnnouncer) Announce(ctx context.Context, _ room.Status) error {
-	a.updates++
-	a.contextErr = ctx.Err()
-	return a.contextErr
-}
-
-// Close has no resources to release for this test announcer.
-func (*contextCheckingAnnouncer) Close() error { return nil }
