@@ -5,7 +5,7 @@ go 1.26.2
 require (
 	github.com/coder/websocket v1.8.14
 	github.com/coreos/go-oidc/v3 v3.17.0
-	github.com/df-mc/go-nethernet v1.0.27-0.20261029090531-f61bc9dde016
+	github.com/df-mc/go-nethernet v1.0.27-0.20261029102919-56197fc153b0
 	github.com/df-mc/go-playfab/v2 v2.0.4-0.20261011110813-e01ef1ec605c
 	github.com/df-mc/go-xsapi/v2 v2.0.4-0.20261025033432-d43cca94551a
 	github.com/go-jose/go-jose/v4 v4.1.6
@@ -13,7 +13,7 @@ require (
 	github.com/lmittmann/tint v1.2.0
 	github.com/pelletier/go-toml/v2 v2.2.4
 	github.com/pion/sdp/v3 v3.0.20
-	github.com/pion/webrtc/v4 v4.2.21-0.20260920133716-91bfc6c2039f
+	github.com/pion/webrtc/v4 v4.2.26
 	github.com/prometheus/client_golang v1.23.2
 	github.com/sandertv/gophertunnel v0.0.0-00010101000000-000000000000
 	golang.org/x/oauth2 v0.36.0
@@ -34,19 +34,19 @@ require (
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pion/datachannel v1.6.3 // indirect
-	github.com/pion/dtls/v3 v3.1.9 // indirect
-	github.com/pion/ice/v4 v4.4.4 // indirect
-	github.com/pion/interceptor v0.1.49 // indirect
+	github.com/pion/dtls/v3 v3.1.15 // indirect
+	github.com/pion/ice/v4 v4.4.8 // indirect
+	github.com/pion/interceptor v0.1.51 // indirect
 	github.com/pion/logging v0.2.4 // indirect
-	github.com/pion/mdns/v2 v2.2.1 // indirect
+	github.com/pion/mdns/v2 v2.2.2 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
-	github.com/pion/rtcp v1.2.17 // indirect
-	github.com/pion/rtp v1.10.5 // indirect
-	github.com/pion/sctp v1.11.3 // indirect
-	github.com/pion/srtp/v3 v3.1.0 // indirect
+	github.com/pion/rtcp v1.2.20 // indirect
+	github.com/pion/rtp v1.10.6 // indirect
+	github.com/pion/sctp v1.12.0 // indirect
+	github.com/pion/srtp/v3 v3.1.3 // indirect
 	github.com/pion/stun/v4 v4.0.1 // indirect
-	github.com/pion/transport/v5 v5.0.1 // indirect
-	github.com/pion/turn/v5 v5.1.2 // indirect
+	github.com/pion/transport/v5 v5.1.4 // indirect
+	github.com/pion/turn/v5 v5.1.3 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
@@ -65,5 +65,5 @@ require (
 
 replace (
 	github.com/sandertv/go-raknet => github.com/hashimthearab/go-raknet v1.15.1-0.20260908193618-2049463566ca
-	github.com/sandertv/gophertunnel => github.com/hashimthearab/gophertunnel v1.25.3-0.20261028172540-f8448d729edd
+	github.com/sandertv/gophertunnel => github.com/hashimthearab/gophertunnel v1.25.3-0.20261030224434-9331d09aae90
 )

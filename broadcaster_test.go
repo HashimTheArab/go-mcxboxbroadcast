@@ -372,7 +372,7 @@ func TestXBLAnnouncerUnwrapsDiagnosticsWrappers(t *testing.T) {
 	wrapped := signalingConnectionAnnouncer{
 		Announcer: loggingAnnouncer{Announcer: inner},
 		connection: p2p.Connection{
-			Type: p2p.ConnectionTypeSignalingOverWebSocket,
+			Type: p2p.ConnectionTypeSignalingOverJSONRPC,
 		},
 	}
 	got, ok := xblAnnouncer(wrapped)
@@ -398,61 +398,23 @@ func TestBroadcasterInviteRequiresActiveBroadcaster(t *testing.T) {
 	}
 }
 
-func TestBroadcasterBuildsWebSocketSignalingConnection(t *testing.T) {
-	b := &Broadcaster{}
-	connection, err := b.signalingConnection(&fakeSignaling{networkID: "123456789"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if connection == nil {
-		t.Fatal("websocket signaling connection is nil")
-	}
-	if connection.Type != p2p.ConnectionTypeSignalingOverWebSocket {
-		t.Fatalf("connection type = %d, want websocket", connection.Type)
-	}
-	if connection.NetherNetID != "123456789" {
-		t.Fatalf("nethernet id = %q, want shared signaling id", connection.NetherNetID)
-	}
-	if connection.PlayerMessagingID != uuid.Nil {
-		t.Fatalf("pmsg id = %s, want nil for websocket signaling", connection.PlayerMessagingID)
-	}
-}
-
-func TestNewRejectsJSONRPCWithEnabledSubAccounts(t *testing.T) {
+func TestNewRejectsEnabledSubAccounts(t *testing.T) {
 	_, err := New(Config{
-		JoinURL:       "http://127.0.0.1:19132",
-		SignalingMode: SignalingModeJSONRPC,
+		JoinURL: "http://127.0.0.1:19132",
 		SubAccounts: []SubAccountConfig{{
 			ID:      "sub",
 			Enabled: true,
 		}},
 	})
-	if err == nil || !strings.Contains(err.Error(), "jsonrpc signaling does not support sub-accounts") {
-		t.Fatalf("New() error = %v, want JSON-RPC sub-account rejection", err)
-	}
-}
-
-func TestNewAllowsWebSocketWithEnabledSubAccounts(t *testing.T) {
-	if _, err := New(Config{
-		JoinURL:        "http://127.0.0.1:19132",
-		XBLTokenSource: staticTokenSource{},
-		SignalingMode:  SignalingModeWebSocket,
-		SubAccounts: []SubAccountConfig{{
-			ID:      "sub",
-			Enabled: true,
-		}},
-	}); err != nil {
-		t.Fatalf("New() error = %v, want WebSocket sub-accounts accepted", err)
+	if err == nil || !strings.Contains(err.Error(), "sub-accounts are not supported") {
+		t.Fatalf("New() error = %v, want sub-account rejection", err)
 	}
 }
 
 func TestBroadcasterBuildsJSONRPCSignalingConnection(t *testing.T) {
 	pmid := uuid.MustParse("11111111-2222-3333-4444-555555555555")
-	b := &Broadcaster{conf: Config{SignalingMode: SignalingModeJSONRPC}}
-	connection, err := b.signalingConnection(&jsonRPCFakeSignaling{
-		fakeSignaling: fakeSignaling{networkID: "123456789"},
-		pmid:          pmid,
-	})
+	b := &Broadcaster{}
+	connection, err := b.signalingConnection(&fakeSignaling{networkID: "123456789", pmid: pmid})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -461,7 +423,7 @@ func TestBroadcasterBuildsJSONRPCSignalingConnection(t *testing.T) {
 	}
 }
 
-func TestBroadcasterRejectsInvalidWebSocketNetworkID(t *testing.T) {
+func TestBroadcasterRejectsInvalidNetworkID(t *testing.T) {
 	t.Parallel()
 
 	for _, networkID := range []string{"0", "01"} {
@@ -565,6 +527,9 @@ func (s *cancelableSignaling) Credentials(context.Context) (*nethernet.Credentia
 func (s *cancelableSignaling) NetworkID() string { return s.networkID }
 func (s *cancelableSignaling) PongData([]byte)   {}
 
+// PlayerMessagingID returns the shared fake Player Messaging identity.
+func (s *cancelableSignaling) PlayerMessagingID() uuid.UUID { return fakePlayerMessagingID }
+
 type broadcasterRoundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f broadcasterRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -604,16 +569,16 @@ func TestStartSubAccountsTimeoutDoesNotBlockStartup(t *testing.T) {
 		XBLTokenSource: staticTokenSource{},
 		XUID:           "123",
 		JoinURL:        "http://127.0.0.1:19132",
-		SubAccounts: []SubAccountConfig{{
-			ID:             "sub1",
-			Enabled:        true,
-			XBLTokenSource: staticTokenSource{},
-			XUID:           "456",
-		}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	b.conf.SubAccounts = []SubAccountConfig{{
+		ID:             "sub1",
+		Enabled:        true,
+		XBLTokenSource: staticTokenSource{},
+		XUID:           "456",
+	}}
 	b.ctx, b.cancel = context.WithCancel(context.Background())
 	defer b.cancel()
 	b.subAccountStartTimeout = 50 * time.Millisecond
@@ -680,7 +645,7 @@ func TestRotateSessionRetiresOldSession(t *testing.T) {
 				}
 				b.ctx, b.cancel = context.WithCancel(t.Context())
 				defer b.cancel()
-				b.sessionConnection = &p2p.Connection{Type: p2p.ConnectionTypeSignalingOverWebSocket, NetherNetID: "123456789"}
+				b.sessionConnection = &p2p.Connection{Type: p2p.ConnectionTypeSignalingOverJSONRPC, NetherNetID: "123456789", PlayerMessagingID: fakePlayerMessagingID}
 				b.announcer = b.wrapAnnouncer(old, b.log)
 
 				if err := b.rotateSession(t.Context()); err != nil {

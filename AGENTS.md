@@ -68,11 +68,10 @@ Friend sync manages friends only. Do not reintroduce follower handling.
 
 Joinability is `joinable_by_friends`, matching MCXboxBroadcast.
 
-Direct WebSocket signaling advertises connection type `3`, with its numeric
-network ID in `RakNetGUID`. JSON-RPC Player Messaging advertises type `7` with
-`PmsgId` and `NetherNetId`. JSON-RPC cannot share its Player Messaging identity
-across independently owned sub-account sessions, so reject that combination
-at startup.
+Sessions advertise JSON-RPC signaling, connection type `7` with `PmsgId` and
+`NetherNetId`; vanilla clients join through no other signaling. JSON-RPC cannot
+share its Player Messaging identity across independently owned sub-account
+sessions, so enabled sub-accounts are rejected at startup.
 
 ## Validation
 

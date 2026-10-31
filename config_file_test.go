@@ -40,9 +40,6 @@ func TestLoadConfigFileCreatesDefaultsAndRefusesToRun(t *testing.T) {
 	if cfg.Session.UpdateInterval != 30 {
 		t.Fatalf("unexpected update interval %d", cfg.Session.UpdateInterval)
 	}
-	if cfg.Session.SignalingMode != string(SignalingModeWebSocket) {
-		t.Fatalf("default signaling mode = %q, want websocket", cfg.Session.SignalingMode)
-	}
 	if cfg.Gallery.ImagePath != "screenshot.jpg" {
 		t.Fatalf("unexpected image path %q", cfg.Gallery.ImagePath)
 	}
@@ -86,15 +83,36 @@ func TestExampleConfigLoads(t *testing.T) {
 	}
 }
 
-func TestConfigFileMapsJSONRPCSignalingMode(t *testing.T) {
-	cfg := DefaultConfigFile()
-	cfg.Session.SignalingMode = "jsonrpc"
-	runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{XBLTokenSource: staticTokenSource{}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runtime.SignalingMode != SignalingModeJSONRPC {
-		t.Fatalf("signaling mode = %q, want jsonrpc", runtime.SignalingMode)
+// Configs that still choose a signaling mode keep loading, minus that key, whichever mode they named.
+func TestLoadConfigFileDropsSignalingMode(t *testing.T) {
+	for name, tc := range map[string]struct{ file, data string }{
+		"v3 jsonrpc":   {"config.yml", "configVersion: 3\nsession:\n  signalingMode: jsonrpc\n  sessionInfo:\n    ip: bedrock.test\n    port: 19132\nfriendSync:\n  autoFollow: true\n  autoUnfollow: true\n"},
+		"v5 websocket": {"config.yml", "configVersion: 5\nsession:\n  joinUrl: https://bedrock.test:19132\n  signalingMode: websocket\n"},
+		"v5 toml":      {"config.toml", "configVersion = 5\n[session]\njoinUrl = \"https://bedrock.test:19132\"\nsignalingMode = \"websocket\"\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), tc.file)
+			if err := os.WriteFile(path, []byte(tc.data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadConfigFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.ContainsFunc(cfg.Notes, func(n string) bool { return strings.Contains(n, "session.signalingMode") }) {
+				t.Fatalf("notes = %v, want the removed signaling mode reported", cfg.Notes)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(data, []byte("signalingMode")) {
+				t.Fatalf("migrated file still carries signalingMode:\n%s", data)
+			}
+			if _, err := LoadConfigFile(path); err != nil {
+				t.Fatalf("migrated file does not reload: %v", err)
+			}
+		})
 	}
 }
 
