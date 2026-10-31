@@ -88,9 +88,6 @@ func (b *Broadcaster) activityHealthIssue(state *activityObservation, now time.T
 		state.misses = 0
 		state.checkAfter = now.Add(activityGracePeriod)
 	}
-	if now.Before(state.checkAfter) || now.Before(state.recoverAfter) {
-		return sessionHealthIssue{}
-	}
 	ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
 	defer cancel()
 	activities, err := publication.client.ActivitiesForUsers(ctx, publication.ref.ServiceConfigID, []string{publication.xuid})
@@ -101,20 +98,31 @@ func (b *Broadcaster) activityHealthIssue(state *activityObservation, now time.T
 			break
 		}
 	}
-	if err != nil || found {
+	// Xbox may not show a new session during its grace period, so only a found handle counts then.
+	// Checks run through grace and the recovery cooldown so a rotating or recovered session reads as advertised.
+	settling := now.Before(state.checkAfter)
+	// An external Update can replace the session while the query runs; its old result no longer applies.
+	published, ok := b.publishedActivity()
+	current := ok && published == publication
+	if current {
+		b.health.checked(err == nil && (found || !settling), found, now)
+	}
+	switch {
+	case err != nil || found:
 		state.misses = 0
 		if err != nil && b.ctx.Err() == nil {
 			b.debug("check published activity", "err", err)
 		}
-	} else {
+	case settling || now.Before(state.recoverAfter):
+		// Misses count only after the grace period and the recovery cooldown.
+	default:
 		state.misses++
 	}
 	if state.misses < activityMissingLimit {
 		return sessionHealthIssue{}
 	}
-	// An external Update can replace the session while the query runs.
-	// Discard the old result rather than replacing the new session again.
-	if current, ok := b.publishedActivity(); !ok || current != publication {
+	// Discard a replaced session's result rather than replacing the new session again.
+	if !current {
 		return sessionHealthIssue{}
 	}
 	state.misses = 0

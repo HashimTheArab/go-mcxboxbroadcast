@@ -97,37 +97,86 @@ func TestActivityHealthRequiresConsecutiveConfirmedMisses(t *testing.T) {
 	})
 	var state activityObservation
 	now := time.Now()
-	b.activityHealthIssue(&state, now)
-	b.activityHealthIssue(&state, now.Add(time.Minute))
-	if calls != 0 {
-		t.Fatal("queried directory during startup grace period")
+	// Misses during the grace period do not count toward recovery.
+	for minute := range 2 {
+		if issue := b.activityHealthIssue(&state, now.Add(time.Duration(minute)*time.Minute)); issue.reason != "" || state.misses != 0 {
+			t.Fatalf("grace-period miss counted: issue %+v, misses %d", issue, state.misses)
+		}
 	}
 	// Errors and healthy handles break the run; stale or another owner's handles do not satisfy it.
 	for i, response := range []string{"missing", "missing", "error", "missing", "healthy", "wrong owner", "healthy", "closed", "stale", "wrong owner"} {
 		result = response
-		issue := b.activityHealthIssue(&state, now.Add(time.Duration(i+2)*time.Minute))
+		at := now.Add(time.Duration(i+2) * time.Minute)
+		before := b.Health()
+		issue := b.activityHealthIssue(&state, at)
 		if (issue.reason != "") != (i == 9) {
 			t.Fatalf("response %d (%s) gave issue %+v", i, response, issue)
 		}
+		// Health reports each answered check; an Xbox error keeps the previous answer.
+		health := b.Health()
+		if response == "error" {
+			if health.CheckedAt != before.CheckedAt || health.Advertised != before.Advertised || !health.AttemptedAt.Equal(at) {
+				t.Fatalf("response %d (error) gave health %+v, want the previous answer at a new attempt", i, health)
+			}
+		} else if health.CheckedAt != at || health.Advertised != (response == "healthy") {
+			t.Fatalf("response %d (%s) gave health %+v", i, response, health)
+		}
 	}
-	queries := calls
-	b.activityHealthIssue(&state, now.Add(12*time.Minute))
-	if calls != queries {
-		t.Fatal("queried again during recovery cooldown")
+	// During the cooldown checks keep updating health, so a recovered session reads as advertised.
+	result = "healthy"
+	if issue := b.activityHealthIssue(&state, now.Add(12*time.Minute)); issue.reason != "" {
+		t.Fatalf("issue during recovery cooldown: %+v", issue)
 	}
+	if health := b.Health(); !health.Advertised || !health.CheckedAt.Equal(now.Add(12*time.Minute)) {
+		t.Fatalf("health during cooldown = %+v, want the healthy check", health)
+	}
+	// Misses during the cooldown, even for a replacement session, do not count toward recovery.
+	result = "missing"
 	old := b.announcer.(*room.XBLAnnouncer)
 	b.announcer = &room.XBLAnnouncer{Client: old.Client, SessionReference: old.SessionReference}
 	for minute := 13; minute <= 20; minute++ {
-		b.activityHealthIssue(&state, now.Add(time.Duration(minute)*time.Minute))
-	}
-	if calls != queries {
-		t.Fatal("replacing the announcer bypassed the recovery cooldown")
+		if issue := b.activityHealthIssue(&state, now.Add(time.Duration(minute)*time.Minute)); issue.reason != "" {
+			t.Fatalf("replacing the announcer bypassed the recovery cooldown at minute %d", minute)
+		}
 	}
 	for minute := 21; minute <= 23; minute++ {
 		issue := b.activityHealthIssue(&state, now.Add(time.Duration(minute)*time.Minute))
 		if (issue.reason != "") != (minute == 23) {
 			t.Fatalf("minute %d after cooldown gave issue %+v", minute, issue)
 		}
+	}
+}
+
+// A busy bot rotates sessions faster than the grace period, so a handle found during grace counts as advertised.
+func TestActivityHealthRecordsFoundHandleDuringGrace(t *testing.T) {
+	var b *Broadcaster
+	b = activityTestBroadcaster(t, func(*http.Request) (*http.Response, error) {
+		return activityResponse(t, "123", b.announcer.(*room.XBLAnnouncer).SessionReference), nil
+	})
+	now := time.Now()
+	b.activityHealthIssue(&activityObservation{}, now)
+	if health := b.Health(); !health.Advertised || !health.CheckedAt.Equal(now) {
+		t.Fatalf("health = %+v, want the found handle recorded during grace", health)
+	}
+}
+
+// A metrics scrape must not wait for Update, which holds the lifecycle lock across Xbox calls.
+func TestHealthDoesNotWaitForLifecycleLock(t *testing.T) {
+	b := activityTestBroadcaster(t, func(*http.Request) (*http.Response, error) {
+		return broadcasterResponse(http.StatusOK, `{"results":[]}`), nil
+	})
+	b.health.setIdentity("123", "Bot")
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	done := make(chan Health, 1)
+	go func() { done <- b.Health() }()
+	select {
+	case health := <-done:
+		if health.XUID == "" {
+			t.Fatalf("health = %+v, want the account identity", health)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Health blocked on the lifecycle lock")
 	}
 }
 
@@ -151,6 +200,9 @@ func TestActivityHealthResetsForReplacementAndDiscardsOldQuery(t *testing.T) {
 	replaceDuringQuery = true
 	if issue := b.activityHealthIssue(&state, now.Add(4*time.Minute)); issue.reason != "" {
 		t.Fatal("old response requested recovery of replacement session")
+	}
+	if checked := b.Health().CheckedAt; checked.Equal(now.Add(4 * time.Minute)) {
+		t.Fatal("old response was recorded as the replacement's health")
 	}
 	replaceDuringQuery = false
 	for i := 5; i < 9; i++ {

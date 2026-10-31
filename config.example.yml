@@ -51,3 +51,6 @@ gallery:
 
 accounts:
   primaryCachePath: cache/live_token.json
+
+metrics:
+  listen: ""

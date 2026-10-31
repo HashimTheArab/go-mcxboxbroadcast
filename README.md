@@ -62,6 +62,7 @@ The config exposes the same operator-facing areas as MCXboxBroadcast:
 - Slack/Discord-compatible webhook notifications
 - the Xbox account token cache path
 - optional HTTP proxy URL through `http.proxy`
+- optional Prometheus metrics through `metrics.listen`
 
 ### Joining
 
@@ -108,11 +109,30 @@ to the configured webhook.
 
 These checks use the publishing account's credentials. They detect a missing
 directory advertisement, but do not verify friendship permissions or prove that
-another player can join. Keep an independent friend-account monitor for that.
+another player can join. Relayed joins are the end-to-end evidence: alert when
+a busy account's joins stop (see [Metrics](#metrics)).
 
 If recovery keeps failing, the command closes its resources and exits with an
 error. Run it under Kubernetes or another process supervisor with automatic
 restart enabled so the next process recreates authentication and client state.
+
+### Metrics
+
+Set `metrics.listen` (for example `127.0.0.1:9466`) to serve Prometheus
+metrics on `/metrics`. The listener starts before sign-in and exports nothing
+until the broadcaster has started. The endpoint has no authentication and exposes the
+account's XUID, gamertag and friend count, so bind to all interfaces (`:9466`)
+only on a network where just your scraper can reach it. It reports:
+
+- `mcxboxbroadcast_session_advertised{xuid,gamertag,version,protocol}`: 1 when
+  the last answered check found the account's own session open and checks are
+  still running. Xbox errors keep the last answer for up to 15 minutes. It is 0
+  until a check first finds the session.
+- `mcxboxbroadcast_friends` and `mcxboxbroadcast_friend_limit`: the friend list
+  size, counted on the first friend sync and each expiry scan (or, with expiry
+  off, on the next friend sync once the count is 30 minutes old), and adjusted
+  for adds and removals in between. It is missing until friend sync first runs.
+- `mcxboxbroadcast_relayed_joins_total`: join offers relayed since start.
 
 ### Signaling
 

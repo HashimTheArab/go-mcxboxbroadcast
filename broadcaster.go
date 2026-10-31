@@ -59,6 +59,8 @@ type Broadcaster struct {
 	// when a session nears its member cap.
 	healthCheck chan struct{}
 
+	health healthState
+
 	// lastQuery is the most recent successful target-server query, kept so
 	// query failures fall back to real data instead of failing the update.
 	lastQuery *minecraft.ServerStatus
@@ -168,6 +170,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 
 	b.relay = b.startRelay(sig)
 	b.started = true
+	b.health.setIdentity(b.primaryXUID(), clientGamertag(b.conf.XBLClient, b.xblClient))
 	b.info("nethernet broadcaster started", "network_id", signalingNetworkID(sig), "target", b.conf.JoinURL)
 
 	go b.sessionLoop()
@@ -191,7 +194,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 }
 
 // logSocialSummary logs the authenticated account and its friend usage at
-// startup, mirroring MCXboxBroadcast's "N/2000 friends" line. The count comes
+// startup, like MCXboxBroadcast's "N/2000 friends" line but against the 1000 limit. The count comes
 // from the friend list like MCXboxBroadcast; the social summary's
 // targetFollowingCount is unreliable for the caller's own profile.
 func (b *Broadcaster) logSocialSummary() {
@@ -208,7 +211,7 @@ func (b *Broadcaster) logSocialSummary() {
 	b.info("authenticated to xbox live",
 		"gamertag", b.hostNameFallback(),
 		"xuid", b.primaryXUID(),
-		"friends", fmt.Sprintf("%d/2000", len(friends)),
+		"friends", fmt.Sprintf("%d/%d", len(friends), MaxFriends),
 	)
 }
 
@@ -229,6 +232,8 @@ func (b *Broadcaster) friendSyncer() FriendSyncer {
 		History:  b.conf.FriendHistory,
 		Notifier: b.conf.Notifier,
 		Log:      b.log,
+
+		friendCount: &b.health.friends,
 	}
 	if b.conf.FriendSync.InitialInvite {
 		syncer.Inviter = &broadcasterInviter{b: b}
@@ -254,6 +259,7 @@ func (b *Broadcaster) startRelay(sig nethernet.Signaling) *httpRelay {
 			return verifyOfferIdentity(ctx, sdp, verifier)
 		},
 		history: recorder,
+		joins:   &b.health.joins,
 		log:     b.log,
 	})
 }

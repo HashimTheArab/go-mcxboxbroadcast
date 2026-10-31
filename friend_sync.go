@@ -53,6 +53,8 @@ type FriendSyncer struct {
 	// A nil Trigger leaves the syncer purely periodic.
 	Trigger <-chan struct{}
 	Log     *slog.Logger
+
+	friendCount *friendCount // nil outside a Broadcaster
 }
 
 const (
@@ -124,7 +126,10 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 			return result, nil
 		}
 	}
-	if !opts.expire || !s.Config.ExpiryEnabled || s.History == nil {
+	expiryOn := s.Config.ExpiryEnabled && s.History != nil
+	expire := opts.expire && expiryOn
+	// Lists friends for the count even without expiry, inside this serialized loop.
+	if !expire && !s.friendCount.needsList(expiryOn) {
 		return result, nil
 	}
 	operationCtx, cancel := xboxOperationContext(ctx)
@@ -132,7 +137,16 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 	cancel()
 	if err != nil {
 		result.readRetryAfter = retryDelay(err)
+		if !expire {
+			s.friendCount.listFailed()
+			s.debug(ctx, "count friends", "err", err)
+			return result, nil
+		}
 		return result, err
+	}
+	s.friendCount.set(len(friends))
+	if !expire {
+		return result, nil
 	}
 	s.debug(ctx, "friend expiry scan", "friends", fmt.Sprintf("%d/%d", len(friends), MaxFriends))
 	expired := 0
@@ -219,6 +233,7 @@ func (s FriendSyncer) addFriend(ctx context.Context, p Person, result *friendSyn
 
 // added starts p's expiry clock and sends the initial invite.
 func (s FriendSyncer) added(ctx context.Context, p Person, source string) {
+	s.friendCount.add(1)
 	s.info(ctx, "added friend", "xuid", p.XUID, "gamertag", p.Gamertag, "source", source)
 	if recorder, ok := s.History.(HistoryRecorder); ok {
 		if err := recorder.Seen(ctx, p.XUID, time.Now()); err != nil && s.Log != nil {
@@ -276,6 +291,7 @@ func (s FriendSyncer) expire(ctx context.Context, p Person, result *friendSyncRe
 		}
 		return false
 	}
+	s.friendCount.add(-1)
 	s.info(ctx, "removed friend due to inactivity", "xuid", p.XUID, "gamertag", p.Gamertag, "last_seen", lastSeen)
 	if err := s.History.Clear(ctx, p.XUID); err != nil && s.Log != nil {
 		s.Log.Error("clear player history", "xuid", p.XUID, "err", err)

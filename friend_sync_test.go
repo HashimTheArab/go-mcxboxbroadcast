@@ -37,6 +37,58 @@ func TestFriendSyncerAcceptsPendingRequestsAndInvites(t *testing.T) {
 	}
 }
 
+// Without expiry the syncer still counts friends, adjusts for accepts, and re-lists an old count.
+func TestFriendSyncerCountsFriendsWithoutExpiry(t *testing.T) {
+	client := &syncFriendClient{
+		people: []Person{{XUID: "1"}, {XUID: "2"}, {XUID: "3"}},
+		accept: func(context.Context) ([]Person, error) { return []Person{{XUID: "4"}}, nil },
+	}
+	count := &friendCount{}
+	syncer := FriendSyncer{Client: client, Config: FriendSyncConfig{AutoFriend: true}, friendCount: count}
+	for range 2 {
+		if err := syncer.Sync(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if friends, _ := count.snapshot(); client.lists != 1 || friends != 4 {
+		t.Fatalf("lists = %d, friends = %d; want one list and 3 listed + 1 accepted", client.lists, friends)
+	}
+	// An old count is listed again, so friends who left are dropped.
+	count.countedAt = time.Now().Add(-friendCountRefresh - time.Minute)
+	client.people = client.people[:2]
+	client.accept = nil
+	if err := syncer.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if friends, _ := count.snapshot(); client.lists != 2 || friends != 2 {
+		t.Fatalf("after refresh lists = %d, friends = %d; want 2 and 2", client.lists, friends)
+	}
+}
+
+// A failing list taken only for the count is not a sync error and waits before retrying.
+func TestFriendSyncerCountFailureIsQuiet(t *testing.T) {
+	client := &failingFriendsClient{}
+	count := &friendCount{}
+	syncer := FriendSyncer{Client: client, friendCount: count}
+	for range 2 {
+		if err := syncer.Sync(context.Background()); err != nil {
+			t.Fatalf("count-only list failure surfaced: %v", err)
+		}
+	}
+	if client.lists != 1 {
+		t.Fatalf("lists = %d, want one attempt before the retry delay", client.lists)
+	}
+}
+
+type failingFriendsClient struct {
+	syncFriendClient
+}
+
+func (c *failingFriendsClient) Friends(context.Context) ([]Person, error) {
+	c.lists++
+	return nil, errors.New("peoplehub unavailable")
+}
+
 func TestFriendSyncerSkipsPendingRequestsWithoutAutoFriend(t *testing.T) {
 	client := &syncFriendClient{accept: func(context.Context) ([]Person, error) {
 		t.Fatal("accepted requests with autoFriend off")
@@ -214,6 +266,7 @@ type syncFriendClient struct {
 	mu      sync.Mutex
 	added   []string
 	removed []string
+	lists   int
 }
 
 func (c *syncFriendClient) removals() []string {
@@ -223,6 +276,9 @@ func (c *syncFriendClient) removals() []string {
 }
 
 func (c *syncFriendClient) Friends(context.Context) ([]Person, error) {
+	c.mu.Lock()
+	c.lists++
+	c.mu.Unlock()
 	return c.people, nil
 }
 

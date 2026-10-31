@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -31,6 +32,7 @@ type commandBroadcaster interface {
 	Start(context.Context) error
 	Wait() error
 	Close() error
+	Health() broadcaster.Health
 }
 
 type commandDeps struct {
@@ -97,6 +99,20 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 	for _, note := range cfg.Notes {
 		log.Warn("config adjusted", "note", note)
 	}
+	// Metrics bind before sign-in, so a stuck or failing login shows as a reachable target with no series.
+	var running atomic.Pointer[commandBroadcaster]
+	if listen := strings.TrimSpace(cfg.Metrics.Listen); listen != "" {
+		stopMetrics, err := serveMetrics(ctx, listen, func() broadcaster.Health {
+			if b := running.Load(); b != nil {
+				return (*b).Health()
+			}
+			return broadcaster.Health{}
+		}, log)
+		if err != nil {
+			return fmt.Errorf("serve metrics: %w", err)
+		}
+		defer stopMetrics()
+	}
 	var xblClients []*xsapi.Client
 	defer func() {
 		deps.CloseXSAPIClients(log, xblClients)
@@ -151,6 +167,7 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 	if err != nil {
 		return fmt.Errorf("configure broadcaster: %w", err)
 	}
+	running.Store(&b)
 	if err := b.Start(ctx); err != nil {
 		return fmt.Errorf("start: %w", err)
 	}

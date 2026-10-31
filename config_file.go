@@ -45,10 +45,16 @@ type ConfigFile struct {
 	Notifications                NotificationConfig `yaml:"notifications" toml:"notifications"`
 	Gallery                      GalleryFileConfig  `yaml:"gallery" toml:"gallery"`
 	Accounts                     AccountsConfig     `yaml:"accounts" toml:"accounts"`
+	Metrics                      MetricsFileConfig  `yaml:"metrics" toml:"metrics"`
 
 	// Notes lists adjustments applied while loading, such as out-of-range
 	// values that were clamped. Callers should surface them as warnings.
 	Notes []string `yaml:"-" toml:"-"`
+}
+
+// MetricsFileConfig serves Prometheus metrics on Listen (host:port); empty disables them.
+type MetricsFileConfig struct {
+	Listen string `yaml:"listen" toml:"listen"`
 }
 
 type HTTPFileConfig struct {

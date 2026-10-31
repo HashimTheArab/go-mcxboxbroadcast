@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -78,6 +79,9 @@ func TestHTTPRelayForwardsAnswerAfterCandidatesSettle(t *testing.T) {
 		if _, ok := history.lastSeen["2535400000000001"]; !ok {
 			t.Fatal("relayed join was not recorded")
 		}
+		if joins := r.joins.Load(); joins != 1 {
+			t.Fatalf("joins = %d, want 1", joins)
+		}
 		r.close()
 	})
 }
@@ -125,7 +129,7 @@ func TestHTTPRelayMapsFailuresToConnectErrors(t *testing.T) {
 				if len(sent) != 1 || sent[0].Type != nethernet.SignalTypeError || sent[0].Data != tc.code || sent[0].ConnectionID != 42 || sent[0].NetworkID != "client" {
 					t.Fatalf("signals sent = %+v, want CONNECTERROR 42 %s", sent, tc.code)
 				}
-				if len(history.lastSeen) != 0 {
+				if len(history.lastSeen) != 0 || r.joins.Load() != 0 {
 					t.Fatal("failed join was recorded")
 				}
 			})
@@ -285,6 +289,7 @@ func startTestRelay(t *testing.T, target *fakeJoinEndpoint, history HistoryRecor
 			return offerIdentity{XUID: "2535400000000001", Gamertag: "Player"}, verifyErr
 		},
 		history: history,
+		joins:   new(atomic.Uint64),
 		log:     testBroadcasterLogger(),
 	})
 	return sig, r
