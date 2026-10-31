@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// A rotation's grace period and Xbox errors keep the last answer; checks that stop running do not.
+// Brief Xbox errors keep the last answer; long errors and checks that stop running do not.
 func TestHealthAdvertisedAtExpires(t *testing.T) {
 	checked := time.Unix(1_000, 0)
 	for name, tc := range map[string]struct {
@@ -16,9 +16,9 @@ func TestHealthAdvertisedAtExpires(t *testing.T) {
 		"never checked":       {Health{Advertised: true}, checked, false},
 		"found missing":       {Health{Advertised: false, CheckedAt: checked, AttemptedAt: checked}, checked, false},
 		"found open":          {Health{Advertised: true, CheckedAt: checked, AttemptedAt: checked}, checked, true},
-		"within rotation gap": {Health{Advertised: true, CheckedAt: checked, AttemptedAt: checked}, checked.Add(activityGracePeriod + activityCheckInterval), true},
 		"checks stopped":      {Health{Advertised: true, CheckedAt: checked, AttemptedAt: checked}, checked.Add(advertisedFreshness + time.Second), false},
-		"xbox errors since":   {Health{Advertised: true, CheckedAt: checked, AttemptedAt: checked.Add(time.Hour)}, checked.Add(time.Hour), true},
+		"brief xbox errors":   {Health{Advertised: true, CheckedAt: checked, AttemptedAt: checked.Add(10 * time.Minute)}, checked.Add(10 * time.Minute), true},
+		"long xbox errors":    {Health{Advertised: true, CheckedAt: checked, AttemptedAt: checked.Add(time.Hour)}, checked.Add(time.Hour), false},
 	} {
 		if got := tc.health.AdvertisedAt(tc.at); got != tc.want {
 			t.Errorf("%s: AdvertisedAt = %v, want %v", name, got, tc.want)

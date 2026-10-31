@@ -170,6 +170,7 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 
 	b.relay = b.startRelay(sig)
 	b.started = true
+	b.health.setIdentity(b.primaryXUID(), clientGamertag(b.conf.XBLClient, b.xblClient))
 	b.info("nethernet broadcaster started", "network_id", signalingNetworkID(sig), "target", b.conf.JoinURL)
 
 	go b.sessionLoop()

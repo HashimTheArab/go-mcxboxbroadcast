@@ -65,6 +65,30 @@ func TestFriendSyncerCountsFriendsWithoutExpiry(t *testing.T) {
 	}
 }
 
+// A failing list taken only for the count is not a sync error and waits before retrying.
+func TestFriendSyncerCountFailureIsQuiet(t *testing.T) {
+	client := &failingFriendsClient{}
+	count := &friendCount{}
+	syncer := FriendSyncer{Client: client, friendCount: count}
+	for range 2 {
+		if err := syncer.Sync(context.Background()); err != nil {
+			t.Fatalf("count-only list failure surfaced: %v", err)
+		}
+	}
+	if client.lists != 1 {
+		t.Fatalf("lists = %d, want one attempt before the retry delay", client.lists)
+	}
+}
+
+type failingFriendsClient struct {
+	syncFriendClient
+}
+
+func (c *failingFriendsClient) Friends(context.Context) ([]Person, error) {
+	c.lists++
+	return nil, errors.New("peoplehub unavailable")
+}
+
 func TestFriendSyncerSkipsPendingRequestsWithoutAutoFriend(t *testing.T) {
 	client := &syncFriendClient{accept: func(context.Context) ([]Person, error) {
 		t.Fatal("accepted requests with autoFriend off")

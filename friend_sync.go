@@ -136,6 +136,11 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 	cancel()
 	if err != nil {
 		result.readRetryAfter = retryDelay(err)
+		if !expire {
+			s.friendCount.listFailed()
+			s.debug(ctx, "count friends", "err", err)
+			return result, nil
+		}
 		return result, err
 	}
 	s.friendCount.set(len(friends))

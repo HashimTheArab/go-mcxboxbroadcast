@@ -79,7 +79,6 @@ func (b *Broadcaster) primaryActivityCurrent(activity *publishedActivity) bool {
 // publication, but cannot prove that another account can see or join the session.
 // The session loop owns state and serializes any resulting recovery.
 func (b *Broadcaster) activityHealthIssue(state *activityObservation, now time.Time) sessionHealthIssue {
-	b.recordHealthIdentity()
 	publication, ok := b.publishedActivity()
 	if !ok {
 		return sessionHealthIssue{}
@@ -88,9 +87,6 @@ func (b *Broadcaster) activityHealthIssue(state *activityObservation, now time.T
 		state.publication = publication
 		state.misses = 0
 		state.checkAfter = now.Add(activityGracePeriod)
-	}
-	if now.Before(state.checkAfter) {
-		return sessionHealthIssue{}
 	}
 	ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
 	defer cancel()
@@ -102,13 +98,16 @@ func (b *Broadcaster) activityHealthIssue(state *activityObservation, now time.T
 			break
 		}
 	}
+	// Xbox may not show a new session during its grace period, so only a found handle counts then.
+	// Checks run through grace and the recovery cooldown so a rotating or recovered session reads as advertised.
+	settling := now.Before(state.checkAfter)
 	// An external Update can replace the session while the query runs; its old result no longer applies.
 	current := func() bool {
 		published, ok := b.publishedActivity()
 		return ok && published == publication
 	}
 	if current() {
-		b.health.checked(err == nil, found, now)
+		b.health.checked(err == nil && (found || !settling), found, now)
 	}
 	switch {
 	case err != nil || found:
@@ -116,8 +115,8 @@ func (b *Broadcaster) activityHealthIssue(state *activityObservation, now time.T
 		if err != nil && b.ctx.Err() == nil {
 			b.debug("check published activity", "err", err)
 		}
-	case now.Before(state.recoverAfter):
-		// The cooldown only delays recovery; checks still update health, and misses count after it.
+	case settling || now.Before(state.recoverAfter):
+		// Misses count only after the grace period and the recovery cooldown.
 	default:
 		state.misses++
 	}

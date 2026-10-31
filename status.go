@@ -104,14 +104,8 @@ func applyQueriedStatus(st *Status, queried minecraft.ServerStatus) {
 // hostNameFallback returns the account gamertag for empty host names, matching
 // MCXboxBroadcast, with a static fallback when no profile is available.
 func (b *Broadcaster) hostNameFallback() string {
-	client := b.conf.XBLClient
-	if client == nil {
-		client = b.xblClient
-	}
-	if client != nil {
-		if gamertag := client.UserInfo().GamerTag; gamertag != "" {
-			return gamertag
-		}
+	if gamertag := clientGamertag(b.conf.XBLClient, b.xblClient); gamertag != "" {
+		return gamertag
 	}
 	return "MCXboxBroadcast"
 }

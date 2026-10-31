@@ -119,14 +119,15 @@ restart enabled so the next process recreates authentication and client state.
 ### Metrics
 
 Set `metrics.listen` (for example `127.0.0.1:9466`) to serve Prometheus
-metrics on `/metrics`. The endpoint has no authentication and exposes the
+metrics on `/metrics`. The listener starts before sign-in and exports nothing
+until the broadcaster has started. The endpoint has no authentication and exposes the
 account's XUID, gamertag and friend count, so bind to all interfaces (`:9466`)
 only on a network where just your scraper can reach it. It reports:
 
 - `mcxboxbroadcast_session_advertised{xuid,gamertag,version,protocol}`: 1 when
   the last answered check found the account's own session open and checks are
-  still running. Xbox errors keep the last answer. It is 0 until the first
-  check, a few minutes after startup.
+  still running. Xbox errors keep the last answer for up to 15 minutes. It is 0
+  until a check first finds the session.
 - `mcxboxbroadcast_friends` and `mcxboxbroadcast_friend_limit`: the friend list
   size, counted on the first friend sync and each expiry scan (or, with expiry
   off, on the next friend sync once the count is 30 minutes old), and adjusted

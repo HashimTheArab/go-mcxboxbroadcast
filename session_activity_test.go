@@ -97,10 +97,11 @@ func TestActivityHealthRequiresConsecutiveConfirmedMisses(t *testing.T) {
 	})
 	var state activityObservation
 	now := time.Now()
-	b.activityHealthIssue(&state, now)
-	b.activityHealthIssue(&state, now.Add(time.Minute))
-	if calls != 0 {
-		t.Fatal("queried directory during startup grace period")
+	// Misses during the grace period do not count toward recovery.
+	for minute := range 2 {
+		if issue := b.activityHealthIssue(&state, now.Add(time.Duration(minute)*time.Minute)); issue.reason != "" || state.misses != 0 {
+			t.Fatalf("grace-period miss counted: issue %+v, misses %d", issue, state.misses)
+		}
 	}
 	// Errors and healthy handles break the run; stale or another owner's handles do not satisfy it.
 	for i, response := range []string{"missing", "missing", "error", "missing", "healthy", "wrong owner", "healthy", "closed", "stale", "wrong owner"} {
@@ -146,12 +147,25 @@ func TestActivityHealthRequiresConsecutiveConfirmedMisses(t *testing.T) {
 	}
 }
 
+// A busy bot rotates sessions faster than the grace period, so a handle found during grace counts as advertised.
+func TestActivityHealthRecordsFoundHandleDuringGrace(t *testing.T) {
+	var b *Broadcaster
+	b = activityTestBroadcaster(t, func(*http.Request) (*http.Response, error) {
+		return activityResponse(t, "123", b.announcer.(*room.XBLAnnouncer).SessionReference), nil
+	})
+	now := time.Now()
+	b.activityHealthIssue(&activityObservation{}, now)
+	if health := b.Health(); !health.Advertised || !health.CheckedAt.Equal(now) {
+		t.Fatalf("health = %+v, want the found handle recorded during grace", health)
+	}
+}
+
 // A metrics scrape must not wait for Update, which holds the lifecycle lock across Xbox calls.
 func TestHealthDoesNotWaitForLifecycleLock(t *testing.T) {
 	b := activityTestBroadcaster(t, func(*http.Request) (*http.Response, error) {
 		return broadcasterResponse(http.StatusOK, `{"results":[]}`), nil
 	})
-	b.activityHealthIssue(&activityObservation{}, time.Now())
+	b.health.setIdentity("123", "Bot")
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	done := make(chan Health, 1)
