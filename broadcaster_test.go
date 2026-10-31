@@ -325,3 +325,21 @@ func TestCloseWaitsForWorkers(t *testing.T) {
 		}
 	})
 }
+
+// A worker that ignores cancellation must not stop Close from returning, or the supervisor never restarts the process.
+func TestCloseBoundsWaitForStuckWorker(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		b := &Broadcaster{started: true, ctx: ctx, cancel: cancel, log: testBroadcasterLogger()}
+		stuck := make(chan struct{})
+		b.spawn(func() { <-stuck })
+		start := time.Now()
+		if err := b.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if waited := time.Since(start); waited != closeWorkersTimeout {
+			t.Fatalf("Close waited %v, want %v", waited, closeWorkersTimeout)
+		}
+		close(stuck)
+	})
+}

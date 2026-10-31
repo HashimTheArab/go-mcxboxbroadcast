@@ -484,10 +484,23 @@ func (b *Broadcaster) Close() error {
 	err := b.releaseSessions()
 	b.started = false
 	b.mu.Unlock()
-	// Workers may need b.mu to notice cancellation, so wait after releasing it.
-	b.workers.Wait()
+	// Workers may need b.mu to notice cancellation, so wait after releasing it. The wait is
+	// bounded so a call that ignores cancellation cannot stop the process from exiting.
+	done := make(chan struct{})
+	go func() {
+		b.workers.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(closeWorkersTimeout):
+		b.log.Warn("closed while background work was still running", "waited", closeWorkersTimeout)
+	}
 	return err
 }
+
+// closeWorkersTimeout outlasts every bounded worker call, the longest being a gallery upload.
+const closeWorkersTimeout = galleryUploadTimeout + 5*time.Second
 
 // spawn runs fn in a goroutine that Close waits for.
 func (b *Broadcaster) spawn(fn func()) {
