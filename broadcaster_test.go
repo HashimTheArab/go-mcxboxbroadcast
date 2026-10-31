@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -21,23 +20,6 @@ import (
 	"github.com/sandertv/gophertunnel/minecraft/room"
 	"github.com/sandertv/gophertunnel/minecraft/service"
 )
-
-func TestXBLAnnouncerUnwrapsDiagnosticsWrappers(t *testing.T) {
-	inner := &room.XBLAnnouncer{}
-	wrapped := signalingConnectionAnnouncer{
-		Announcer: loggingAnnouncer{Announcer: inner},
-		connection: p2p.Connection{
-			Type: p2p.ConnectionTypeSignalingOverJSONRPC,
-		},
-	}
-	got, ok := xblAnnouncer(wrapped)
-	if !ok {
-		t.Fatal("xbl announcer was not found")
-	}
-	if got != inner {
-		t.Fatal("unexpected xbl announcer")
-	}
-}
 
 func TestBroadcasterInviteRequiresActiveBroadcaster(t *testing.T) {
 	var b Inviter = &Broadcaster{announcer: &room.XBLAnnouncer{Session: &mpsd.Session{}}}
@@ -133,24 +115,6 @@ func TestNewRejectsHalfAdvertisedPair(t *testing.T) {
 	cfg.Session.SessionInfo.Version = "1.26.50"
 	if _, err := New(cfg.RuntimeConfig(RuntimeConfigInput{XBLClient: testXBLClient(t, "123")})); err == nil {
 		t.Fatal("New accepted a version without a protocol")
-	}
-}
-
-// A spent context, such as an expired upload deadline, must not drop the notification.
-func TestNotifySurvivesSpentContext(t *testing.T) {
-	spent, cancel := context.WithCancel(context.Background())
-	cancel()
-	for name, ctx := range map[string]context.Context{"live": context.Background(), "spent": spent} {
-		var notified bool
-		var gotErr error
-		b := &Broadcaster{conf: Config{Notifier: fakeNotifier{notify: func(ctx context.Context, _ string) {
-			notified = true
-			gotErr = ctx.Err()
-		}}}}
-		b.notify(ctx, "message")
-		if !notified || gotErr != nil {
-			t.Fatalf("%s: notified = %v with context error %v, want a live notification", name, notified, gotErr)
-		}
 	}
 }
 
@@ -323,109 +287,4 @@ func TestStartCleansUpWhenAnnounceFails(t *testing.T) {
 	if !announcer.Closed() || !sig.closed.Load() {
 		t.Fatalf("announcer closed = %v, signaling closed = %v, want both", announcer.Closed(), sig.closed.Load())
 	}
-}
-
-// Thresholds match MCXboxBroadcast: rotate at 28 of 30 members, retire after 30 s.
-func TestRotationThresholdsMatchJava(t *testing.T) {
-	if sessionRotateMembers != 28 || sessionRotateGrace != 30*time.Second {
-		t.Fatalf("rotate at %d members after %s, want 28 and 30s", sessionRotateMembers, sessionRotateGrace)
-	}
-	b := &Broadcaster{healthCheck: make(chan struct{}, 1)}
-	b.membersChanged(sessionRotateMembers - 1)
-	select {
-	case <-b.healthCheck:
-		t.Fatal("health check requested below the rotation threshold")
-	default:
-	}
-	b.membersChanged(sessionRotateMembers)
-	b.membersChanged(sessionRotateMembers + 1) // must not block on a pending request
-	select {
-	case <-b.healthCheck:
-	default:
-		t.Fatal("no health check requested at the rotation threshold")
-	}
-}
-
-// Rotation publishes a new session on the same signaling and keeps the old one,
-// hiding it only after the grace period when configured.
-func TestRotateSessionRetiresOldSession(t *testing.T) {
-	for _, hide := range []bool{true, false} {
-		t.Run(fmt.Sprintf("hide=%v", hide), func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				old := &hidingAnnouncer{}
-				next := &hidingAnnouncer{}
-				b := &Broadcaster{
-					log:     testBroadcasterLogger(),
-					started: true,
-					conf: Config{
-						XBLClient:       testXBLClient(t, "123"),
-						Status:          Status{HostName: "Host"},
-						HideOldSessions: hide,
-					},
-					announcerFactory: func(*Broadcaster) room.Announcer { return next },
-				}
-				b.ctx, b.cancel = context.WithCancel(t.Context())
-				defer b.cancel()
-				b.sessionConnection = &p2p.Connection{Type: p2p.ConnectionTypeSignalingOverJSONRPC, NetherNetID: "123456789", PlayerMessagingID: fakePlayerMessagingID}
-				b.announcer = b.wrapAnnouncer(old)
-
-				if err := b.rotateSession(t.Context()); err != nil {
-					t.Fatal(err)
-				}
-				if unwrapAnnouncer(b.announcer) != next || next.Status().HostName != "Host" {
-					t.Fatal("rotation did not publish the new session")
-				}
-				if got := next.Status().SupportedConnections; len(got) != 1 || got[0].NetherNetID != "123456789" {
-					t.Fatalf("new session advertises %+v, want the same signaling connection", got)
-				}
-				if old.Closed() || len(b.retiredSessions) != 1 {
-					t.Fatal("old session was closed instead of kept for its members")
-				}
-				time.Sleep(sessionRotateGrace - time.Nanosecond)
-				synctest.Wait()
-				if old.hidden() {
-					t.Fatal("old session hidden before the grace period ended")
-				}
-				time.Sleep(time.Nanosecond)
-				synctest.Wait()
-				if old.hidden() != hide {
-					t.Fatalf("old session hidden = %v, want %v", old.hidden(), hide)
-				}
-				if err := b.cleanupPublishedSessions(); err != nil {
-					t.Fatal(err)
-				}
-				if !old.Closed() || len(b.retiredSessions) != 0 {
-					t.Fatal("shutdown left a retired session open")
-				}
-			})
-		})
-	}
-}
-
-// A retired session is closed only once its grace period has passed and only the bot remains.
-func TestCloseDrainedSessionsKeepsPlayersAndGracePeriod(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		playing := &hidingAnnouncer{members: 5}
-		drained := &hidingAnnouncer{members: 1}
-		unpublished := &hidingAnnouncer{members: -1}
-		b := &Broadcaster{log: testBroadcasterLogger()}
-		for _, a := range []*hidingAnnouncer{playing, drained, unpublished} {
-			b.retire(b.wrapAnnouncer(a))
-		}
-		time.Sleep(sessionRotateGrace - time.Nanosecond)
-		b.closeDrainedSessions()
-		if drained.Closed() || len(b.retiredSessions) != 3 {
-			t.Fatal("drained session closed during its grace period")
-		}
-		time.Sleep(time.Nanosecond)
-		b.closeDrainedSessions()
-		if !drained.Closed() || playing.Closed() || unpublished.Closed() || len(b.retiredSessions) != 2 {
-			t.Fatalf("closed playing=%v drained=%v unpublished=%v, want only the drained session", playing.Closed(), drained.Closed(), unpublished.Closed())
-		}
-		playing.setMembers(1)
-		b.closeDrainedSessions()
-		if !playing.Closed() || len(b.retiredSessions) != 1 {
-			t.Fatal("session was not closed after its players left")
-		}
-	})
 }

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/sandertv/gophertunnel/minecraft/room"
 )
 
 const (
@@ -218,4 +220,168 @@ func retryWithBackoff(ctx context.Context, base, max time.Duration, limit int, a
 		}
 	}
 	return errors.New("session recovery requires at least one attempt")
+}
+
+const (
+	sessionMemberCap = 30 // members the MinecraftLobby template allows
+	// sessionRotateMembers rotates before sessionMemberCap so joins in
+	// progress still fit; players stay members while they play.
+	sessionRotateMembers = 28
+	// sessionRotateGrace keeps a rotated-out session joinable for players mid-join.
+	sessionRotateGrace = 30 * time.Second
+	// sessionUpdateFailureLimit is how many consecutive update failures
+	// trigger a full session recreation.
+	sessionUpdateFailureLimit = 3
+)
+
+type sessionHealthIssue struct {
+	reason   string
+	activity *publishedActivity
+	rotate   bool // the session is nearly full rather than broken
+}
+
+// sessionHealthIssue reports why the current session needs rotation or
+// recovery, or an empty issue when it is healthy.
+func (b *Broadcaster) sessionHealthIssue() sessionHealthIssue {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	counter, ok := unwrapAnnouncer(b.announcer).(memberCounter)
+	if !ok {
+		return sessionHealthIssue{}
+	}
+	count, published, lost := counter.memberCount()
+	switch {
+	case !published:
+		return sessionHealthIssue{}
+	case lost:
+		return sessionHealthIssue{reason: "mpsd session lost"}
+	case count >= sessionRotateMembers:
+		return sessionHealthIssue{reason: fmt.Sprintf("session has %d/%d members", count, sessionMemberCap), rotate: true}
+	}
+	return sessionHealthIssue{}
+}
+
+// membersChanged requests an early health check once a session nears its member cap.
+func (b *Broadcaster) membersChanged(count int) {
+	if count < sessionRotateMembers {
+		return
+	}
+	select {
+	case b.healthCheck <- struct{}{}:
+	default:
+	}
+}
+
+// rotateSession moves the activity to a fresh session on the same signaling
+// connection and retires the old one, like the Java rotation.
+func (b *Broadcaster) rotateSession(ctx context.Context) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.started || b.recovering {
+		return errors.New("broadcaster is not running")
+	}
+	announcer, err := b.publishSession(ctx, "")
+	if err != nil {
+		return err
+	}
+	b.retire(b.announcer)
+	b.announcer = announcer
+	return nil
+}
+
+// retiredSession is a rotated-out session and when it was retired.
+type retiredSession struct {
+	announcer room.Announcer
+	at        time.Time
+}
+
+// retire keeps a rotated-out session for players mid-join, then hides it if
+// configured. Its members stay so they keep playing. The caller must hold b.mu.
+func (b *Broadcaster) retire(announcer room.Announcer) {
+	b.retiredSessions = append(b.retiredSessions, retiredSession{announcer: announcer, at: time.Now()})
+	if !b.conf.HideOldSessions {
+		return
+	}
+	hider, ok := unwrapAnnouncer(announcer).(sessionHider)
+	if !ok {
+		return
+	}
+	ctx, log := b.ctx, b.log
+	go func() {
+		select {
+		case <-time.After(sessionRotateGrace):
+		case <-ctx.Done():
+			return
+		}
+		hideCtx, cancel := xboxOperationContext(ctx)
+		defer cancel()
+		if err := hider.hide(hideCtx); err != nil {
+			log.Warn("hide old session", "err", err)
+			return
+		}
+		log.Debug("hid old session")
+	}()
+}
+
+// closeDrainedSessions closes retired sessions past their grace period that
+// only the bot still belongs to, so they stop holding RTA subscriptions.
+func (b *Broadcaster) closeDrainedSessions() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	kept := b.retiredSessions[:0]
+	for _, retired := range b.retiredSessions {
+		counter, ok := unwrapAnnouncer(retired.announcer).(memberCounter)
+		count, published := 0, false
+		if ok {
+			count, published, _ = counter.memberCount()
+		}
+		if !published || count > 1 || time.Since(retired.at) < sessionRotateGrace {
+			kept = append(kept, retired)
+			continue
+		}
+		if err := retired.announcer.Close(); err != nil {
+			b.log.Warn("close drained session", "err", err)
+			kept = append(kept, retired)
+			continue
+		}
+		b.log.Debug("closed drained session")
+	}
+	clear(b.retiredSessions[len(kept):])
+	b.retiredSessions = kept
+}
+
+// recreateSession tears down and rebuilds signaling, sessions and the relay after a drop.
+func (b *Broadcaster) recreateSession() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.ctx.Err() != nil || !b.started {
+		return errors.New("broadcaster is shut down")
+	}
+	_ = b.releaseSessions()
+
+	sig, err := b.signalingFor(b.ctx)
+	if err != nil {
+		return fmt.Errorf("re-create signaling: %w", err)
+	}
+	if sig.Context().Err() != nil {
+		_ = closeSignaling(sig)
+		return errors.New("re-create signaling: factory returned signaling with dead context")
+	}
+	b.signaling = sig
+	b.log.Debug("nethernet signaling re-created", "network_id", sig.NetworkID())
+
+	ctx, cancel := context.WithTimeout(b.ctx, 30*time.Second)
+	defer cancel()
+	if err := b.publishOn(ctx, sig); err != nil {
+		_ = closeSignaling(sig)
+		b.signaling = nil
+		return fmt.Errorf("re-create session: %w", err)
+	}
+	b.log.Debug("join relay restarted", "network_id", sig.NetworkID(), "target", b.conf.JoinURL)
+
+	// Re-showcase the gallery image so a swapped file does not require a
+	// process restart; the upload no-ops when the image is already set.
+	go b.uploadGallery()
+	return nil
 }

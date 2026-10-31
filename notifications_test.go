@@ -74,3 +74,21 @@ func TestSlackNotifierErrorDoesNotLeakWebhookURL(t *testing.T) {
 		t.Fatalf("webhook URL leaked in malformed URL error: %v", err)
 	}
 }
+
+// A spent context, such as an expired upload deadline, must not drop the notification.
+func TestNotifySurvivesSpentContext(t *testing.T) {
+	spent, cancel := context.WithCancel(context.Background())
+	cancel()
+	for name, ctx := range map[string]context.Context{"live": context.Background(), "spent": spent} {
+		var notified bool
+		var gotErr error
+		b := &Broadcaster{conf: Config{Notifier: fakeNotifier{notify: func(ctx context.Context, _ string) {
+			notified = true
+			gotErr = ctx.Err()
+		}}}}
+		b.notify(ctx, "message")
+		if !notified || gotErr != nil {
+			t.Fatalf("%s: notified = %v with context error %v, want a live notification", name, notified, gotErr)
+		}
+	}
+}

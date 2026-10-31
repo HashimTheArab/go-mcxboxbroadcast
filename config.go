@@ -137,10 +137,6 @@ type GalleryConfig struct {
 	DeleteOtherImages bool
 }
 
-type Notifier interface {
-	Notify(ctx context.Context, message string) error
-}
-
 type FriendSyncConfig struct {
 	UpdateInterval time.Duration
 	// AutoFriend accepts incoming friend requests.

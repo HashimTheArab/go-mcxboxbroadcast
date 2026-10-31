@@ -26,6 +26,38 @@ const (
 	galleryUploadTimeout = 30 * time.Second
 )
 
+// uploadGallery sets the configured showcase image of the account's gallery.
+func (b *Broadcaster) uploadGallery() {
+	b.galleryMu.Lock()
+	defer b.galleryMu.Unlock()
+
+	cfg := b.conf.Gallery
+	if cfg == nil {
+		return
+	}
+	if _, err := os.Stat(cfg.ImagePath); errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(b.ctx, galleryUploadTimeout)
+	defer cancel()
+	tokens, err := b.minecraftTokenSource(ctx)
+	if err != nil {
+		b.log.Warn("minecraft services token source unavailable", "err", err)
+		b.notify(ctx, "Showcase image upload skipped: Minecraft services token source is unavailable.")
+		return
+	}
+	client := galleryClient{tokens: tokens, http: httpClient(b.conf.HTTPClient), log: b.log}
+	args := []any{"path", cfg.ImagePath, "delete_other", cfg.DeleteOtherImages, "xuid", b.xuid()}
+	b.log.Info("setting showcase image", args...)
+	result, err := client.setShowcase(ctx, b.xuid(), cfg.ImagePath, cfg.DeleteOtherImages)
+	if err != nil {
+		b.log.Error("set showcase image", append(args, "err", err)...)
+		b.notify(ctx, "Showcase image upload failed: "+err.Error())
+		return
+	}
+	b.log.Info("set showcase image", append(args, "image_id", result.ImageID, "uploaded", result.Uploaded, "already_set", result.AlreadySet)...)
+}
+
 // galleryClient manages the account's Minecraft profile showcase images.
 type galleryClient struct {
 	tokens service.TokenSource
