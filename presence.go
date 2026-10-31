@@ -2,34 +2,20 @@ package broadcaster
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"time"
 
 	"github.com/df-mc/go-xsapi/v2/presence"
 )
 
-const (
-	defaultPresenceHeartbeat = 300 * time.Second
-)
+const defaultPresenceHeartbeat = 300 * time.Second
 
-// PresenceClient updates Xbox user presence so the broadcaster account remains
-// visible as active while its MPSD session is published.
-type PresenceClient struct {
-	XUID     string
-	Presence *presence.Client
-}
-
-func (c PresenceClient) Update(ctx context.Context) (time.Duration, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if c.Presence == nil {
-		return defaultPresenceHeartbeat, errors.New("presence client is nil")
-	}
-	operationCtx, cancel := xboxOperationContext(ctx)
-	result, err := c.Presence.Update(operationCtx, presence.TitleRequest{State: presence.StateActive})
-	cancel()
+// updatePresence marks the account active, which keeps its session visible, and returns
+// when Xbox wants the next heartbeat.
+func updatePresence(ctx context.Context, client *presence.Client) (time.Duration, error) {
+	ctx, cancel := xboxOperationContext(ctx)
+	defer cancel()
+	result, err := client.Update(ctx, presence.TitleRequest{State: presence.StateActive})
 	if err != nil {
 		return defaultPresenceHeartbeat, err
 	}
@@ -39,20 +25,16 @@ func (c PresenceClient) Update(ctx context.Context) (time.Duration, error) {
 	return result.HeartbeatAfter, nil
 }
 
-func (c PresenceClient) Run(ctx context.Context, log *slog.Logger) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+// runPresence sends presence heartbeats until ctx ends.
+func runPresence(ctx context.Context, client *presence.Client, log *slog.Logger) {
 	for {
-		heartbeat, err := c.Update(ctx)
+		heartbeat, err := updatePresence(ctx, client)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			if log != nil {
-				log.Error("update presence", "err", err)
-			}
-		} else if log != nil {
+			log.Error("update presence", "err", err)
+		} else {
 			log.Debug("presence updated", "next_update", heartbeat)
 		}
 		timer := time.NewTimer(heartbeat)

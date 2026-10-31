@@ -28,19 +28,12 @@ const liveAuthScope = "service::user.auth.xboxlive.com::MBI_SSL"
 
 var minecraftServiceErrorPattern = regexp.MustCompile(`minecraft/service:\s*([^:]+):\s*"([^"]*)"`)
 
-// NewLiveTokenSource returns a Microsoft Live token source that uses ctx for
-// outbound authentication requests. If ctx carries oauth2.HTTPClient, that
-// client is used for device auth and refresh requests.
-func NewLiveTokenSource(ctx context.Context, tok *oauth2.Token, out io.Writer) oauth2.TokenSource {
-	return NewLiveTokenSourceWithPersist(ctx, tok, out, nil)
-}
-
-// NewLiveTokenSourceWithPersist is like NewLiveTokenSource but calls persist
-// with every newly issued token so rotated refresh tokens survive restarts.
-// A rejected refresh token falls back to device-code login: blocking before
-// the first token is handed out, in the background afterwards, with Token
-// failing fast until the operator completes it.
-func NewLiveTokenSourceWithPersist(ctx context.Context, tok *oauth2.Token, out io.Writer, persist func(*oauth2.Token)) oauth2.TokenSource {
+// NewLiveTokenSource returns a Microsoft Live token source that prints device-code prompts to
+// out and calls persist, if non-nil, with every newly issued token. Requests use ctx's
+// oauth2.HTTPClient when set. A rejected refresh token falls back to device-code login: blocking
+// before the first token is handed out, in the background afterwards, with Token failing fast
+// until the operator completes it.
+func NewLiveTokenSource(ctx context.Context, tok *oauth2.Token, out io.Writer, persist func(*oauth2.Token)) oauth2.TokenSource {
 	return oauth2.ReuseTokenSource(tok, newLiveTokenSource(ctx, tok, out, persist))
 }
 
@@ -69,8 +62,7 @@ func NewXBLTokenSource(ctx context.Context, live oauth2.TokenSource) xsapi.Token
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ctx = withDefaultXBLTokenCache(ctx)
-	return auth.ContextSession(ctx, live)
+	return auth.ContextSession(auth.WithXBLTokenCache(ctx, auth.AndroidConfig.NewTokenCache()), live)
 }
 
 // NewXSAPIClient creates the Xbox Live API client set used for MPSD, social,
@@ -86,34 +78,33 @@ func NewXSAPIClient(ctx context.Context, src xsapi.TokenSource, client *http.Cli
 	return xsapi.ClientConfig{HTTPClient: client, Logger: log, RTAMode: xsapi.RTALazy}.New(ctx, src)
 }
 
-func NewMinecraftTokenSource(ctx context.Context, xbl *xsapi.Client, client *http.Client) (service.TokenSource, error) {
-	return newMinecraftTokenSource(ctx, xbl, client, nil)
-}
-
-func newMinecraftTokenSource(ctx context.Context, xbl *xsapi.Client, client *http.Client, log *slog.Logger) (service.TokenSource, error) {
+// NewMinecraftTokenSource logs in to PlayFab with xbl and returns the Minecraft services token
+// source for signaling and gallery requests. A nil log uses slog.Default.
+func NewMinecraftTokenSource(ctx context.Context, xbl *xsapi.Client, client *http.Client, log *slog.Logger) (service.TokenSource, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if log == nil {
+		log = slog.Default()
 	}
 	if xbl == nil {
 		return nil, fmt.Errorf("xbox live client is nil")
 	}
 	ctx = auth.WithContextClient(ctx, client)
-	debugLog(log, "discovering minecraft services")
+	log.Debug("discovering minecraft services")
 	discovery, err := service.Discover(ctx, service.ApplicationTypeMinecraftPE, protocol.CurrentVersion)
 	if err != nil {
 		return nil, fmt.Errorf("discover minecraft services: %w", err)
 	}
-	debugLog(log, "discovered minecraft services")
-	debugLog(log, "loading minecraft auth environment")
 	env := new(service.AuthorizationEnvironment)
 	if err := discovery.Environment(env); err != nil {
 		return nil, fmt.Errorf("load auth environment: %w", err)
 	}
-	debugLog(log, "loaded minecraft auth environment", "playfab_title_id", env.PlayFabTitleID)
+	log.Debug("loaded minecraft auth environment", "playfab_title_id", env.PlayFabTitleID)
 	if client != nil {
 		env.HTTPClient = client
 	}
-	debugLog(log, "logging in to playfab with xbox")
+	log.Debug("logging in to playfab with xbox")
 	playfabClient, err := playfab.LoginWithXbox(ctx, env.PlayFabTitleID, xbl, playfab.ClientConfig{
 		HTTPClient:    client,
 		CreateAccount: true,
@@ -121,7 +112,7 @@ func newMinecraftTokenSource(ctx context.Context, xbl *xsapi.Client, client *htt
 	if err != nil {
 		return nil, fmt.Errorf("login to playfab with xbox: %w", err)
 	}
-	debugLog(log, "logged in to playfab with xbox")
+	log.Debug("logged in to playfab with xbox")
 	return withMinecraftTokenDiagnostics(env.TokenSource(playfabClient, service.TokenConfig{})), nil
 }
 
@@ -172,13 +163,6 @@ func (e *minecraftTokenHeaderError) Error() string {
 
 func (e *minecraftTokenHeaderError) Unwrap() error {
 	return e.err
-}
-
-func withDefaultXBLTokenCache(ctx context.Context) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return auth.WithXBLTokenCache(ctx, auth.AndroidConfig.NewTokenCache())
 }
 
 // errLiveReauthPending is returned while a background device-code login runs.
@@ -291,12 +275,6 @@ func (s *liveTokenSource) finishReauth() (*oauth2.Token, error) {
 // A code that expires or that Microsoft rejects is explained on out and
 // replaced, so the operator sees why before the next code.
 func requestLiveTokenWriter(ctx context.Context, conf auth.Config, out io.Writer) (*oauth2.Token, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if out == nil {
-		out = io.Discard
-	}
 	for {
 		tok, err := conf.RequestLiveTokenContext(ctx, out)
 		if err == nil {
@@ -423,9 +401,6 @@ func (e *liveRefreshError) requiresReauth() bool {
 }
 
 func postLiveForm(ctx context.Context, endpoint string, retry authclient.RetryOptions, form url.Values) (*http.Response, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("create request for POST %s: %w", endpoint, err)
@@ -462,10 +437,8 @@ func (r *liveTokenResponse) token() *oauth2.Token {
 }
 
 func liveAuthHTTPClient(ctx context.Context) *http.Client {
-	if ctx != nil {
-		if client, ok := ctx.Value(oauth2.HTTPClient).(*http.Client); ok && client != nil {
-			return client
-		}
+	if client, ok := ctx.Value(oauth2.HTTPClient).(*http.Client); ok && client != nil {
+		return client
 	}
 	return defaultLiveAuthHTTPClient
 }

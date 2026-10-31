@@ -76,41 +76,6 @@ func (s failingMinecraftTokenSource) ServiceToken(context.Context) (*service.Tok
 	return nil, s.err
 }
 
-type contextCapturingTokenSource struct {
-	ctx context.Context
-}
-
-func (s *contextCapturingTokenSource) XSTSToken(ctx context.Context, _ string) (*xsts.Token, error) {
-	s.ctx = ctx
-	return nil, errors.New("stop before network")
-}
-
-func (*contextCapturingTokenSource) DeviceToken(context.Context) (*xasd.Token, error) {
-	return nil, errors.New("unexpected device token request")
-}
-
-func (*contextCapturingTokenSource) ProofKey() *ecdsa.PrivateKey { return nil }
-
-type blockingTokenSource struct {
-	started chan<- struct{}
-	unblock <-chan struct{}
-}
-
-func (s blockingTokenSource) XSTSToken(ctx context.Context, _ string) (*xsts.Token, error) {
-	select {
-	case s.started <- struct{}{}:
-	default:
-	}
-	<-s.unblock
-	return nil, ctx.Err()
-}
-
-func (blockingTokenSource) DeviceToken(context.Context) (*xasd.Token, error) {
-	return nil, errors.New("unexpected device token request")
-}
-
-func (blockingTokenSource) ProofKey() *ecdsa.PrivateKey { return nil }
-
 func TestNewLiveTokenSourceUsesContextHTTPClientForRefresh(t *testing.T) {
 	var called bool
 	var client *http.Client
@@ -129,7 +94,7 @@ func TestNewLiveTokenSourceUsesContextHTTPClientForRefresh(t *testing.T) {
 		AccessToken:  "old-access",
 		RefreshToken: "old-refresh",
 		Expiry:       time.Now().Add(-time.Hour),
-	}, io.Discard)
+	}, io.Discard, nil)
 
 	tok, err := src.Token()
 	if err != nil {
@@ -152,7 +117,7 @@ func TestLiveTokenSourcePersistsRotatedRefreshTokens(t *testing.T) {
 	})}
 	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, client)
 	var persisted []*oauth2.Token
-	src := NewLiveTokenSourceWithPersist(ctx, &oauth2.Token{
+	src := NewLiveTokenSource(ctx, &oauth2.Token{
 		AccessToken:  "old-access",
 		RefreshToken: "old-refresh",
 		Expiry:       time.Now().Add(-time.Hour),
@@ -350,7 +315,7 @@ func TestLiveTokenSourceFallsBackToDeviceCodeWhenRefreshRejected(t *testing.T) {
 		AccessToken:  "old-access",
 		RefreshToken: "old-refresh",
 		Expiry:       time.Now().Add(-time.Hour),
-	}, io.Discard)
+	}, io.Discard, nil)
 
 	_, err := src.Token()
 	if err == nil {
@@ -442,38 +407,6 @@ func TestMinecraftTokenDiagnosticsFormatsPlayerBannedError(t *testing.T) {
 	}
 }
 
-// The lazily created token source outlives one upload, so it must not get the upload's deadline.
-func TestUploadGalleryUsesBroadcasterContextForLazyMinecraftTokenSource(t *testing.T) {
-	type contextKey struct{}
-	const want = "broadcaster"
-
-	src := &contextCapturingTokenSource{}
-	broadcasterCtx := context.WithValue(context.Background(), contextKey{}, want)
-
-	b := &Broadcaster{
-		ctx: broadcasterCtx,
-		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		conf: Config{
-			XBLTokenSource: src,
-			Gallery: &GalleryConfig{
-				Enabled:   true,
-				ImagePath: testGalleryImageFile(t),
-			},
-		},
-	}
-	b.uploadGallery()
-
-	if src.ctx == nil {
-		t.Fatal("xbox token source was not called")
-	}
-	if _, ok := src.ctx.Deadline(); ok {
-		t.Fatal("lazy token source got the upload deadline")
-	}
-	if got := src.ctx.Value(contextKey{}); got != want {
-		t.Fatalf("lazy token source context value = %v, want %q", got, want)
-	}
-}
-
 func TestNewXBLTokenSourceCachesDeviceAndXSTSTokens(t *testing.T) {
 	var deviceRequests int
 	var sisuRequests int
@@ -481,7 +414,7 @@ func TestNewXBLTokenSourceCachesDeviceAndXSTSTokens(t *testing.T) {
 	client := &http.Client{Transport: tokenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch req.URL.String() {
 		case "https://title.mgt.xboxlive.com/titles/default/endpoints?type=1":
-			return tokenTestResponse(http.StatusOK, `{"EndPoints":[{"Protocol":"https","Host":"*.xboxlive.com","HostType":"wildcard","RelyingParty":"http://xboxlive.com","TokenType":"JWT"}]}`), nil
+			return tokenTestResponse(http.StatusOK, testTitleEndpoints), nil
 		case "https://device.auth.xboxlive.com/device/authenticate":
 			deviceRequests++
 			return tokenTestResponse(http.StatusOK, `{"IssueInstant":"`+validUntil+`","NotAfter":"`+validUntil+`","Token":"device","DisplayClaims":{"xdi":{"did":"device"}}}`), nil

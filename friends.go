@@ -20,9 +20,6 @@ type Person struct {
 	Gamertag string
 }
 
-// MaxFriends is the Xbox friend list limit.
-const MaxFriends = 1000
-
 // friendListConfig matches the undecorated friend list request MCXboxBroadcast makes.
 var friendListConfig = xblsocial.PeopleListConfig{Undecorated: true}
 

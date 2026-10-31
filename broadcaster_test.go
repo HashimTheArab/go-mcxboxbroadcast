@@ -54,6 +54,9 @@ func (s broadcasterTokenSource) ProofKey() *ecdsa.PrivateKey {
 	return s.key
 }
 
+// testTitleEndpoints routes every Xbox Live host through NSAL with an XBL token.
+const testTitleEndpoints = `{"EndPoints":[{"Protocol":"https","Host":"*.xboxlive.com","HostType":"wildcard","RelyingParty":"http://xboxlive.com","TokenType":"JWT"}]}`
+
 // newTestXSAPIClient constructs real API subclients with a stubbed title configuration.
 func newTestXSAPIClient(t *testing.T, client *http.Client, xuid string) *xsapi.Client {
 	t.Helper()
@@ -64,7 +67,8 @@ func newTestXSAPIClient(t *testing.T, client *http.Client, xuid string) *xsapi.C
 	configured := *client
 	configured.Transport = broadcasterRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if req.URL.Host == "title.mgt.xboxlive.com" {
-			return broadcasterResponse(http.StatusOK, `{"EndPoints":[{"Protocol":"https","Host":"peoplehub.xboxlive.com","HostType":"fqdn","RelyingParty":"http://xboxlive.com","TokenType":"JWT"},{"Protocol":"https","Host":"social.xboxlive.com","HostType":"fqdn","RelyingParty":"http://xboxlive.com","TokenType":"JWT"},{"Protocol":"https","Host":"userpresence.xboxlive.com","HostType":"fqdn","RelyingParty":"http://xboxlive.com","TokenType":"JWT"}]}`), nil
+			// NSAL caches the default title process-wide, so every test must stub the same one.
+			return broadcasterResponse(http.StatusOK, testTitleEndpoints), nil
 		}
 		return base.RoundTrip(req)
 	})
@@ -79,25 +83,17 @@ func newTestXSAPIClient(t *testing.T, client *http.Client, xuid string) *xsapi.C
 	return xbl
 }
 
-func TestBroadcasterForgetsCreatedXBLClient(t *testing.T) {
-	client := newTestXSAPIClient(t, &http.Client{Transport: broadcasterRoundTripFunc(func(*http.Request) (*http.Response, error) {
+// testXBLClient is a real Xbox Live client for xuid whose Xbox requests all fail.
+func testXBLClient(t *testing.T, xuid string) *xsapi.Client {
+	t.Helper()
+	return newTestXSAPIClient(t, offlineHTTPClient(), xuid)
+}
+
+// offlineHTTPClient fails every request, so tests never reach the network.
+func offlineHTTPClient() *http.Client {
+	return &http.Client{Transport: broadcasterRoundTripFunc(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("offline")
-	})}, "123")
-	b := &Broadcaster{
-		createdXBLClient:       client,
-		createdMinecraftTokens: true,
-		conf: Config{
-			XBLClient:            client,
-			MinecraftTokenSource: staticMinecraftTokenSource{},
-		},
-	}
-	_ = b.closeCreatedXBLClient()
-	if b.conf.XBLClient != nil || b.createdXBLClient != nil {
-		t.Fatal("created client was not cleared")
-	}
-	if b.conf.MinecraftTokenSource != nil {
-		t.Fatal("minecraft token source derived from the created client was not cleared")
-	}
+	})}
 }
 
 func TestXBLAnnouncerUnwrapsDiagnosticsWrappers(t *testing.T) {
@@ -118,14 +114,8 @@ func TestXBLAnnouncerUnwrapsDiagnosticsWrappers(t *testing.T) {
 }
 
 func TestBroadcasterInviteRequiresActiveBroadcaster(t *testing.T) {
-	// Keep the public API Minecraft-specific: callers provide only the XUID,
-	// while Broadcaster supplies the package's title ID.
-	var invite func(*Broadcaster, context.Context, string) error = (*Broadcaster).Invite
-
-	b := &Broadcaster{
-		announcer: &room.XBLAnnouncer{Session: &mpsd.Session{}},
-	}
-	err := invite(b, context.Background(), "456")
+	var b Inviter = &Broadcaster{announcer: &room.XBLAnnouncer{Session: &mpsd.Session{}}}
+	err := b.Invite(context.Background(), "456")
 	if err == nil || !strings.Contains(err.Error(), "broadcaster not started") {
 		t.Fatalf("Invite error = %v, want broadcaster-not-started error", err)
 	}
@@ -164,9 +154,9 @@ func TestBroadcasterUpdateLogsUpdatedSession(t *testing.T) {
 		announcer: &fakeAnnouncer{},
 		started:   true,
 		conf: Config{
-			JoinURL: "http://127.0.0.1:19132",
-			XUID:    "123",
-			Status:  Status{HostName: "Host", WorldName: "World"},
+			JoinURL:   "http://127.0.0.1:19132",
+			XBLClient: testXBLClient(t, "123"),
+			Status:    Status{HostName: "Host", WorldName: "World"},
 		},
 	}
 
@@ -182,9 +172,10 @@ func TestBroadcasterSignalingFactoryIsUsedOnceForSharedSignaling(t *testing.T) {
 	var calls int
 	sig := &fakeSignaling{networkID: "123456789"}
 	b := &Broadcaster{
+		log: testBroadcasterLogger(),
 		conf: Config{
 			JoinURL:              "http://127.0.0.1:19132",
-			XUID:                 "123",
+			XBLClient:            testXBLClient(t, "123"),
 			MinecraftTokenSource: minecraftTokenSourceWithPMID{pmid: uuid.New()},
 			Status:               Status{HostName: "Host", WorldName: "World"},
 			UpdateInterval:       30 * time.Second,
@@ -301,7 +292,7 @@ func TestRotateSessionRetiresOldSession(t *testing.T) {
 					log:     testBroadcasterLogger(),
 					started: true,
 					conf: Config{
-						XUID:            "123",
+						XBLClient:       testXBLClient(t, "123"),
 						Status:          Status{HostName: "Host"},
 						HideOldSessions: hide,
 					},

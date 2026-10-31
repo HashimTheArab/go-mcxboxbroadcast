@@ -18,54 +18,28 @@ import (
 func TestRunBroadcasterCommandStartsAndClosesBroadcaster(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var output strings.Builder
-	started := false
-	closed := false
+	started, closed := false, false
 	var closedClients int
-	err := runBroadcasterCommand(ctx, commandOptions{
-		ConfigPath: "/base/config.yml",
-	}, commandDeps{
-		Stdout: &output,
-		LoadConfig: func(string) (broadcaster.ConfigFile, error) {
-			cfg := broadcaster.DefaultConfigFile()
-			cfg.Session.JoinURL = "http://127.0.0.1:19132"
-			cfg.Accounts.PrimaryCachePath = "cache/live_token.json"
-			return cfg, nil
-		},
-		LoadLiveToken: func(string) (*oauth2.Token, error) {
-			return nil, errors.ErrUnsupported
-		},
-		NewLiveTokenSource: func(context.Context, *oauth2.Token, io.Writer, func(*oauth2.Token)) oauth2.TokenSource {
-			return staticOAuthTokenSource{}
-		},
-		SaveLiveToken: func(string, *oauth2.Token) error {
-			return nil
-		},
-		NewXBLTokenSource: func(context.Context, oauth2.TokenSource) xsapi.TokenSource {
-			return nil
-		},
-		NewXSAPIClient: testNewXSAPIClient,
-		CloseXSAPIClient: func(*slog.Logger, *xsapi.Client) {
-			closedClients++
-		},
-		NewBroadcaster: func(broadcaster.Config) (commandBroadcaster, error) {
-			return fakeCommandBroadcaster{
-				start: func(context.Context) error {
-					started = true
-					cancel()
-					return nil
-				},
-				wait: func() error {
-					<-ctx.Done()
-					return nil
-				},
-				close: func() error {
-					closed = true
-					return nil
-				},
-			}, nil
-		},
+	deps := testDeps(func(broadcaster.Config) (commandBroadcaster, error) {
+		return fakeCommandBroadcaster{
+			start: func(context.Context) error {
+				started = true
+				cancel()
+				return nil
+			},
+			wait: func() error {
+				<-ctx.Done()
+				return nil
+			},
+			close: func() error {
+				closed = true
+				return nil
+			},
+		}, nil
 	})
-	if err != nil {
+	deps.Stdout = &output
+	deps.CloseXSAPIClient = func(*slog.Logger, *xsapi.Client) { closedClients++ }
+	if err := runBroadcasterCommand(ctx, commandOptions{ConfigPath: "/base/config.yml"}, deps); err != nil {
 		t.Fatal(err)
 	}
 	if !started || !closed {
@@ -79,42 +53,14 @@ func TestRunBroadcasterCommandStartsAndClosesBroadcaster(t *testing.T) {
 	}
 }
 
-func TestRunBroadcasterCommandClosesXSAPIClientsWhenStartFails(t *testing.T) {
+func TestRunBroadcasterCommandClosesXSAPIClientWhenStartFails(t *testing.T) {
 	startErr := errors.New("start failed")
 	var closedClients int
-	err := runBroadcasterCommand(context.Background(), commandOptions{
-		ConfigPath: "/base/config.yml",
-	}, commandDeps{
-		Stdout: io.Discard,
-		LoadConfig: func(string) (broadcaster.ConfigFile, error) {
-			cfg := broadcaster.DefaultConfigFile()
-			cfg.Session.JoinURL = "http://127.0.0.1:19132"
-			return cfg, nil
-		},
-		LoadLiveToken: func(string) (*oauth2.Token, error) {
-			return nil, errors.ErrUnsupported
-		},
-		NewLiveTokenSource: func(context.Context, *oauth2.Token, io.Writer, func(*oauth2.Token)) oauth2.TokenSource {
-			return staticOAuthTokenSource{}
-		},
-		SaveLiveToken: func(string, *oauth2.Token) error {
-			return nil
-		},
-		NewXBLTokenSource: func(context.Context, oauth2.TokenSource) xsapi.TokenSource {
-			return nil
-		},
-		NewXSAPIClient: testNewXSAPIClient,
-		CloseXSAPIClient: func(*slog.Logger, *xsapi.Client) {
-			closedClients++
-		},
-		NewBroadcaster: func(broadcaster.Config) (commandBroadcaster, error) {
-			return fakeCommandBroadcaster{
-				start: func(context.Context) error {
-					return startErr
-				},
-			}, nil
-		},
+	deps := testDeps(func(broadcaster.Config) (commandBroadcaster, error) {
+		return fakeCommandBroadcaster{start: func(context.Context) error { return startErr }}, nil
 	})
+	deps.CloseXSAPIClient = func(*slog.Logger, *xsapi.Client) { closedClients++ }
+	err := runBroadcasterCommand(context.Background(), commandOptions{ConfigPath: "/base/config.yml"}, deps)
 	if !errors.Is(err, startErr) {
 		t.Fatalf("expected start error, got %v", err)
 	}
@@ -138,44 +84,20 @@ func TestRunBroadcasterCommandClosesAfterInternalFailure(t *testing.T) {
 			defer cancel()
 			var closed bool
 			var closedClients int
+			deps := testDeps(func(broadcaster.Config) (commandBroadcaster, error) {
+				return fakeCommandBroadcaster{
+					start: func(context.Context) error { return nil },
+					wait:  func() error { return runErr },
+					close: func() error {
+						closed = true
+						return tc.closeErr
+					},
+				}, nil
+			})
+			deps.CloseXSAPIClient = func(*slog.Logger, *xsapi.Client) { closedClients++ }
 			result := make(chan error, 1)
 			go func() {
-				result <- runBroadcasterCommand(ctx, commandOptions{
-					ConfigPath: "/base/config.yml",
-				}, commandDeps{
-					Stdout: io.Discard,
-					LoadConfig: func(string) (broadcaster.ConfigFile, error) {
-						cfg := broadcaster.DefaultConfigFile()
-						cfg.Session.JoinURL = "http://127.0.0.1:19132"
-						return cfg, nil
-					},
-					LoadLiveToken: func(string) (*oauth2.Token, error) {
-						return nil, errors.ErrUnsupported
-					},
-					NewLiveTokenSource: func(context.Context, *oauth2.Token, io.Writer, func(*oauth2.Token)) oauth2.TokenSource {
-						return staticOAuthTokenSource{}
-					},
-					SaveLiveToken: func(string, *oauth2.Token) error {
-						return nil
-					},
-					NewXBLTokenSource: func(context.Context, oauth2.TokenSource) xsapi.TokenSource {
-						return nil
-					},
-					NewXSAPIClient: testNewXSAPIClient,
-					CloseXSAPIClient: func(*slog.Logger, *xsapi.Client) {
-						closedClients++
-					},
-					NewBroadcaster: func(broadcaster.Config) (commandBroadcaster, error) {
-						return fakeCommandBroadcaster{
-							start: func(context.Context) error { return nil },
-							wait:  func() error { return runErr },
-							close: func() error {
-								closed = true
-								return tc.closeErr
-							},
-						}, nil
-					},
-				})
+				result <- runBroadcasterCommand(ctx, commandOptions{ConfigPath: "/base/config.yml"}, deps)
 			}()
 			select {
 			case err := <-result:
@@ -203,55 +125,39 @@ func TestRunBroadcasterCommandClosesAfterInternalFailure(t *testing.T) {
 	}
 }
 
+// A configured proxy reaches the broadcaster and every authentication step.
 func TestRunBroadcasterCommandAppliesConfiguredHTTPProxy(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	var gotClient *http.Client
-	var gotAuthClient *http.Client
-	err := runBroadcasterCommand(ctx, commandOptions{
-		ConfigPath: "/base/config.yml",
-	}, commandDeps{
-		Stdout: io.Discard,
-		LoadConfig: func(string) (broadcaster.ConfigFile, error) {
-			cfg := broadcaster.DefaultConfigFile()
-			cfg.HTTP.Proxy = "http://127.0.0.1:8080"
-			cfg.Session.JoinURL = "http://127.0.0.1:19132"
-			return cfg, nil
-		},
-		LoadLiveToken: func(string) (*oauth2.Token, error) {
-			return nil, errors.ErrUnsupported
-		},
-		NewLiveTokenSource: func(context.Context, *oauth2.Token, io.Writer, func(*oauth2.Token)) oauth2.TokenSource {
-			return staticOAuthTokenSource{}
-		},
-		SaveLiveToken: func(string, *oauth2.Token) error {
+	var gotClient, gotLiveAuthClient, gotXBLAuthClient *http.Client
+	deps := testDeps(func(conf broadcaster.Config) (commandBroadcaster, error) {
+		gotClient = conf.HTTPClient
+		return fakeCommandBroadcaster{start: func(context.Context) error {
+			cancel()
 			return nil
-		},
-		NewXBLTokenSource: func(ctx context.Context, _ oauth2.TokenSource) xsapi.TokenSource {
-			gotAuthClient, _ = ctx.Value(oauth2.HTTPClient).(*http.Client)
-			return nil
-		},
-		NewXSAPIClient: testNewXSAPIClient,
-		NewBroadcaster: func(conf broadcaster.Config) (commandBroadcaster, error) {
-			gotClient = conf.HTTPClient
-			return fakeCommandBroadcaster{
-				start: func(context.Context) error {
-					cancel()
-					return nil
-				},
-				close: func() error {
-					return nil
-				},
-			}, nil
-		},
+		}}, nil
 	})
-	if err != nil {
+	load := deps.LoadConfig
+	deps.LoadConfig = func(path string) (broadcaster.ConfigFile, error) {
+		cfg, err := load(path)
+		cfg.HTTP.Proxy = "http://127.0.0.1:8080"
+		return cfg, err
+	}
+	deps.NewLiveTokenSource = func(ctx context.Context, _ *oauth2.Token, _ io.Writer, _ func(*oauth2.Token)) oauth2.TokenSource {
+		gotLiveAuthClient, _ = ctx.Value(oauth2.HTTPClient).(*http.Client)
+		return staticOAuthTokenSource{}
+	}
+	deps.NewXBLTokenSource = func(ctx context.Context, _ oauth2.TokenSource) xsapi.TokenSource {
+		gotXBLAuthClient, _ = ctx.Value(oauth2.HTTPClient).(*http.Client)
+		return nil
+	}
+	if err := runBroadcasterCommand(ctx, commandOptions{ConfigPath: "/base/config.yml"}, deps); err != nil {
 		t.Fatal(err)
 	}
 	if gotClient == nil {
 		t.Fatal("expected configured HTTP client")
 	}
-	if gotAuthClient != gotClient {
-		t.Fatal("expected Xbox auth context to use configured HTTP client")
+	if gotLiveAuthClient != gotClient || gotXBLAuthClient != gotClient {
+		t.Fatal("expected Live and Xbox auth contexts to use the configured HTTP client")
 	}
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://example.com", nil)
 	if err != nil {
@@ -266,101 +172,23 @@ func TestRunBroadcasterCommandAppliesConfiguredHTTPProxy(t *testing.T) {
 	}
 }
 
-func TestRunBroadcasterCommandAppliesConfiguredHTTPProxyToPrimaryLiveTokenSource(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	var gotLiveAuthClient *http.Client
-	var gotRuntimeClient *http.Client
-	err := runBroadcasterCommand(ctx, commandOptions{
-		ConfigPath: "/base/config.yml",
-	}, commandDeps{
-		Stdout: io.Discard,
-		LoadConfig: func(string) (broadcaster.ConfigFile, error) {
-			cfg := broadcaster.DefaultConfigFile()
-			cfg.HTTP.Proxy = "http://127.0.0.1:8080"
-			cfg.Session.JoinURL = "http://127.0.0.1:19132"
-			return cfg, nil
-		},
-		LoadLiveToken: func(string) (*oauth2.Token, error) {
-			return nil, errors.ErrUnsupported
-		},
-		NewLiveTokenSource: func(ctx context.Context, _ *oauth2.Token, _ io.Writer, _ func(*oauth2.Token)) oauth2.TokenSource {
-			gotLiveAuthClient, _ = ctx.Value(oauth2.HTTPClient).(*http.Client)
-			return staticOAuthTokenSource{}
-		},
-		SaveLiveToken: func(string, *oauth2.Token) error {
-			return nil
-		},
-		NewXBLTokenSource: func(context.Context, oauth2.TokenSource) xsapi.TokenSource {
-			return nil
-		},
-		NewXSAPIClient: testNewXSAPIClient,
-		NewBroadcaster: func(conf broadcaster.Config) (commandBroadcaster, error) {
-			gotRuntimeClient = conf.HTTPClient
-			return fakeCommandBroadcaster{
-				start: func(context.Context) error {
-					cancel()
-					return nil
-				},
-				close: func() error {
-					return nil
-				},
-			}, nil
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if gotRuntimeClient == nil {
-		t.Fatal("expected configured runtime HTTP client")
-	}
-	if gotLiveAuthClient != gotRuntimeClient {
-		t.Fatal("expected primary Live auth source to use configured HTTP client")
-	}
-}
-
 func TestRunBroadcasterCommandPreservesHTTPClientWithoutConfiguredProxy(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	baseClient := &http.Client{}
-	var gotLiveAuthClient *http.Client
-	var gotRuntimeClient *http.Client
-	err := runBroadcasterCommand(ctx, commandOptions{
-		ConfigPath: "/base/config.yml",
-	}, commandDeps{
-		Stdout:     io.Discard,
-		HTTPClient: baseClient,
-		LoadConfig: func(string) (broadcaster.ConfigFile, error) {
-			cfg := broadcaster.DefaultConfigFile()
-			cfg.Session.JoinURL = "http://127.0.0.1:19132"
-			return cfg, nil
-		},
-		LoadLiveToken: func(string) (*oauth2.Token, error) {
-			return nil, errors.ErrUnsupported
-		},
-		NewLiveTokenSource: func(ctx context.Context, _ *oauth2.Token, _ io.Writer, _ func(*oauth2.Token)) oauth2.TokenSource {
-			gotLiveAuthClient, _ = ctx.Value(oauth2.HTTPClient).(*http.Client)
-			return staticOAuthTokenSource{}
-		},
-		SaveLiveToken: func(string, *oauth2.Token) error {
+	var gotLiveAuthClient, gotRuntimeClient *http.Client
+	deps := testDeps(func(conf broadcaster.Config) (commandBroadcaster, error) {
+		gotRuntimeClient = conf.HTTPClient
+		return fakeCommandBroadcaster{start: func(context.Context) error {
+			cancel()
 			return nil
-		},
-		NewXBLTokenSource: func(context.Context, oauth2.TokenSource) xsapi.TokenSource {
-			return nil
-		},
-		NewXSAPIClient: testNewXSAPIClient,
-		NewBroadcaster: func(conf broadcaster.Config) (commandBroadcaster, error) {
-			gotRuntimeClient = conf.HTTPClient
-			return fakeCommandBroadcaster{
-				start: func(context.Context) error {
-					cancel()
-					return nil
-				},
-				close: func() error {
-					return nil
-				},
-			}, nil
-		},
+		}}, nil
 	})
-	if err != nil {
+	deps.HTTPClient = baseClient
+	deps.NewLiveTokenSource = func(ctx context.Context, _ *oauth2.Token, _ io.Writer, _ func(*oauth2.Token)) oauth2.TokenSource {
+		gotLiveAuthClient, _ = ctx.Value(oauth2.HTTPClient).(*http.Client)
+		return staticOAuthTokenSource{}
+	}
+	if err := runBroadcasterCommand(ctx, commandOptions{ConfigPath: "/base/config.yml"}, deps); err != nil {
 		t.Fatal(err)
 	}
 	if gotRuntimeClient != baseClient {
@@ -371,14 +199,33 @@ func TestRunBroadcasterCommandPreservesHTTPClientWithoutConfiguredProxy(t *testi
 	}
 }
 
+// testDeps fakes every command dependency, with newBroadcaster standing in for broadcaster.New.
+func testDeps(newBroadcaster func(broadcaster.Config) (commandBroadcaster, error)) commandDeps {
+	return commandDeps{
+		Stdout: io.Discard,
+		LoadConfig: func(string) (broadcaster.ConfigFile, error) {
+			cfg := broadcaster.DefaultConfigFile()
+			cfg.Session.JoinURL = "http://127.0.0.1:19132"
+			return cfg, nil
+		},
+		LoadLiveToken: func(string) (*oauth2.Token, error) { return nil, errors.ErrUnsupported },
+		NewLiveTokenSource: func(context.Context, *oauth2.Token, io.Writer, func(*oauth2.Token)) oauth2.TokenSource {
+			return staticOAuthTokenSource{}
+		},
+		SaveLiveToken:     func(string, *oauth2.Token) error { return nil },
+		NewXBLTokenSource: func(context.Context, oauth2.TokenSource) xsapi.TokenSource { return nil },
+		NewXSAPIClient: func(context.Context, xsapi.TokenSource, *http.Client, *slog.Logger) (*xsapi.Client, error) {
+			return &xsapi.Client{}, nil
+		},
+		CloseXSAPIClient: func(*slog.Logger, *xsapi.Client) {},
+		NewBroadcaster:   newBroadcaster,
+	}
+}
+
 type staticOAuthTokenSource struct{}
 
 func (staticOAuthTokenSource) Token() (*oauth2.Token, error) {
 	return &oauth2.Token{AccessToken: "token"}, nil
-}
-
-func testNewXSAPIClient(context.Context, xsapi.TokenSource, *http.Client, *slog.Logger) (*xsapi.Client, error) {
-	return &xsapi.Client{}, nil
 }
 
 type fakeCommandBroadcaster struct {
@@ -403,6 +250,10 @@ func (f fakeCommandBroadcaster) Wait() error {
 	return f.wait()
 }
 
+// Close returns the simulated close result, or success when omitted.
 func (f fakeCommandBroadcaster) Close() error {
+	if f.close == nil {
+		return nil
+	}
 	return f.close()
 }

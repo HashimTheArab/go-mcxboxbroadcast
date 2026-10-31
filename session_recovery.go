@@ -76,7 +76,7 @@ func (b *Broadcaster) sessionLoop() {
 				consecutiveFailures = 0
 				continue
 			}
-			b.warn("session is unhealthy but signaling is statically configured; cannot re-create", "reason", issue.reason)
+			b.log.Warn("session is unhealthy but signaling is statically configured; cannot re-create", "reason", issue.reason)
 		}
 		err := b.refreshSession()
 		if err == nil {
@@ -103,14 +103,14 @@ func (b *Broadcaster) sessionLoop() {
 // rotate reports whether the session rotated; on failure the caller falls
 // back to full recreation, as Java restarts.
 func (b *Broadcaster) rotate(issue sessionHealthIssue) bool {
-	b.info("rotating session", "reason", issue.reason)
+	b.log.Info("rotating session", "reason", issue.reason)
 	ctx, cancel := context.WithTimeout(b.ctx, 30*time.Second)
 	defer cancel()
 	if err := b.rotateSession(ctx); err != nil {
 		b.log.Error("rotate session; re-creating instead", "err", err)
 		return false
 	}
-	b.info("rotated session")
+	b.log.Info("rotated session")
 	return true
 }
 
@@ -145,7 +145,7 @@ func (b *Broadcaster) recoverSession(issue sessionHealthIssue) bool {
 		return false
 	}
 	if !b.canRecreateSignaling() {
-		b.warn("session is unhealthy but signaling is statically configured; cannot re-create", "reason", issue.reason)
+		b.log.Warn("session is unhealthy but signaling is statically configured; cannot re-create", "reason", issue.reason)
 		return true
 	}
 	b.mu.Lock()
@@ -155,7 +155,7 @@ func (b *Broadcaster) recoverSession(issue sessionHealthIssue) bool {
 	}
 	b.recovering = true
 	b.mu.Unlock()
-	b.warn("re-creating xbox live session", "reason", issue.reason)
+	b.log.Warn("re-creating xbox live session", "reason", issue.reason)
 	failures := 0
 	err := retryWithBackoff(b.ctx, reconnectBackoffBase, reconnectBackoffMax, sessionRecoveryAttempts, b.recreateSession, func(err error, next time.Duration) {
 		failures++
@@ -177,7 +177,7 @@ func (b *Broadcaster) recoverSession(issue sessionHealthIssue) bool {
 		}
 		return false
 	}
-	b.info("xbox live session recovered", "reason", issue.reason)
+	b.log.Info("xbox live session recovered", "reason", issue.reason)
 	if failures != 0 {
 		b.notify(b.ctx, "Xbox session recovered.")
 	}

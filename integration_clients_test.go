@@ -153,9 +153,10 @@ func TestNotifyUsesLiveContextWhenInputContextIsCanceled(t *testing.T) {
 
 func TestGalleryClientUploadsImageWhenConfigured(t *testing.T) {
 	var uploaded, listed bool
-	g := GalleryClient{
-		TokenSource: staticMinecraftTokenSource{},
-		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+	g := galleryClient{
+		tokens: staticMinecraftTokenSource{},
+		log:    testBroadcasterLogger(),
+		http: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			switch {
 			case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/xuid/1"):
 				listed = true
@@ -169,7 +170,7 @@ func TestGalleryClientUploadsImageWhenConfigured(t *testing.T) {
 			}
 		})},
 	}
-	if err := g.SetShowcase(context.Background(), "1", testGalleryImageFile(t), true); err != nil {
+	if _, err := g.setShowcase(context.Background(), "1", testGalleryImageFile(t), true); err != nil {
 		t.Fatal(err)
 	}
 	if !listed || !uploaded {
@@ -180,9 +181,10 @@ func TestGalleryClientUploadsImageWhenConfigured(t *testing.T) {
 func TestGalleryClientReportsDeleteFailures(t *testing.T) {
 	imagePath := testGalleryImageFile(t)
 	imageBytes := testGalleryImageBytes(t)
-	g := GalleryClient{
-		TokenSource: staticMinecraftTokenSource{},
-		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+	g := galleryClient{
+		tokens: staticMinecraftTokenSource{},
+		log:    testBroadcasterLogger(),
+		http: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			switch {
 			case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/xuid/1"):
 				return response(http.StatusOK, `{"result":{"showcasedImages":[{"id":"keep","url":"https://cdn.example.test/image.jpg"},{"id":"old"}]}}`), nil
@@ -196,7 +198,7 @@ func TestGalleryClientReportsDeleteFailures(t *testing.T) {
 			return nil, nil
 		})},
 	}
-	if err := g.SetShowcase(context.Background(), "1", imagePath, true); err == nil {
+	if _, err := g.setShowcase(context.Background(), "1", imagePath, true); err == nil {
 		t.Fatal("expected delete failure")
 	}
 }
@@ -225,18 +227,14 @@ func TestFileHistoryStoreRecordsAndClearsLastSeen(t *testing.T) {
 
 func TestStatusUsesConfiguredProvider(t *testing.T) {
 	b, err := New(Config{
-		XBLTokenSource: staticTokenSource{},
-		XUID:           "123",
+		XBLClient:      testXBLClient(t, "123"),
 		JoinURL:        "http://127.0.0.1:19132",
 		StatusProvider: staticStatusProvider{host: "Provider Host", world: "Provider World", titleID: TitleID},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	status, err := b.status(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	status := b.status(context.Background())
 	if status.HostName != "Provider Host" || status.WorldName != "Provider World" {
 		t.Fatalf("provider not used: %#v", status)
 	}
@@ -281,9 +279,10 @@ func TestStartAdvertisesJSONRPCForInjectedSignaling(t *testing.T) {
 	sig := &fakeSignaling{networkID: "123456789"}
 	announcer := &fakeAnnouncer{}
 	b := &Broadcaster{
+		log: testBroadcasterLogger(),
 		conf: Config{
 			JoinURL:        "http://127.0.0.1:19132",
-			XBLTokenSource: staticTokenSource{xuid: "123"},
+			XBLClient:      testXBLClient(t, "123"),
 			Signaling:      sig,
 			Status:         Status{HostName: "Host", WorldName: "World"},
 			UpdateInterval: 30 * time.Second,
@@ -329,9 +328,10 @@ func TestStartAdvertisesOpaqueNetherNetID(t *testing.T) {
 	sig := &fakeSignaling{networkID: networkID}
 	announcer := &fakeAnnouncer{}
 	b := &Broadcaster{
+		log: testBroadcasterLogger(),
 		conf: Config{
 			JoinURL:              "http://127.0.0.1:19132",
-			XBLTokenSource:       staticTokenSource{xuid: "123"},
+			XBLClient:            testXBLClient(t, "123"),
 			Signaling:            sig,
 			MinecraftTokenSource: minecraftTokenSourceWithPMID{pmid: pmsgID},
 			Status:               Status{HostName: "Host", WorldName: "World"},
@@ -369,7 +369,7 @@ func TestStartTimesOutDefaultSignalingDial(t *testing.T) {
 	})}
 	b, err := New(Config{
 		JoinURL:              "http://127.0.0.1:19132",
-		XBLTokenSource:       staticTokenSource{xuid: "123"},
+		XBLClient:            testXBLClient(t, "123"),
 		MinecraftTokenSource: minecraftTokenSourceWithPMID{pmid: uuid.New()},
 		HTTPClient:           blockingClient,
 		SignalingDialTimeout: time.Millisecond,
@@ -384,14 +384,26 @@ func TestStartTimesOutDefaultSignalingDial(t *testing.T) {
 	}
 }
 
+// Creating the Minecraft token source counts toward the signaling dial timeout.
 func TestStartTimesOutDefaultSignalingTokenSourceCreation(t *testing.T) {
 	started := make(chan struct{}, 1)
-	unblock := make(chan struct{})
-	defer close(unblock)
-
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
 	b, err := New(Config{
-		JoinURL:              "http://127.0.0.1:19132",
-		XBLTokenSource:       blockingTokenSource{started: started, unblock: unblock},
+		JoinURL:   "http://127.0.0.1:19132",
+		XBLClient: testXBLClient(t, "123"),
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			select {
+			case <-req.Context().Done():
+				return nil, req.Context().Err()
+			case <-release:
+				return nil, errors.New("test finished")
+			}
+		})},
 		SignalingDialTimeout: 10 * time.Millisecond,
 	})
 	if err != nil {
@@ -405,7 +417,7 @@ func TestStartTimesOutDefaultSignalingTokenSourceCreation(t *testing.T) {
 	select {
 	case <-started:
 	default:
-		t.Fatal("default signaling did not start xbox live token source creation")
+		t.Fatal("default signaling did not start minecraft token source creation")
 	}
 }
 
@@ -444,8 +456,10 @@ func TestStartCleansUpWhenPrimaryAnnounceFails(t *testing.T) {
 	sig := &fakeSignaling{}
 	announcer := &fakeAnnouncer{announceErr: announceErr}
 	b := &Broadcaster{
+		log: testBroadcasterLogger(),
 		conf: Config{
 			JoinURL:   "http://127.0.0.1:19132",
+			XBLClient: testXBLClient(t, "123"),
 			Signaling: sig,
 			StatusProvider: room.NewStatusProvider(room.Status{
 				HostName:  "Host",
@@ -474,7 +488,7 @@ func TestStartCleansUpWhenPrimaryAnnounceFails(t *testing.T) {
 }
 
 func TestQueryStatusFallsBackToWeb(t *testing.T) {
-	status, err := queryStatusWithFallback(context.Background(), QueryOptions{
+	status, err := queryStatusWithFallback(context.Background(), queryOptions{
 		JoinURL:            "http://127.0.0.1:1",
 		Timeout:            time.Nanosecond,
 		WebFallbackEnabled: true,
@@ -609,7 +623,7 @@ func (s minecraftTokenSourceWithPMID) ServiceToken(context.Context) (*service.To
 // Status queries read the target's /v1/join status document and send the advertised client info.
 func TestQueryStatusReadsHTTPSignalingStatus(t *testing.T) {
 	var query url.Values
-	status, err := queryStatus(context.Background(), QueryOptions{
+	status, err := queryStatus(context.Background(), queryOptions{
 		JoinURL:    "https://bedrock.test:19132",
 		ClientInfo: endpoint.ClientInfo{Version: "1.26.60", Protocol: 2225, Platform: relayClientPlatform},
 		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {

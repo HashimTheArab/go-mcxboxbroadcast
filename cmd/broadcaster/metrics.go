@@ -21,9 +21,6 @@ var (
 	friendsDesc = prometheus.NewDesc("mcxboxbroadcast_friends",
 		"Friends on the account's Xbox friend list.",
 		[]string{"xuid", "gamertag"}, nil)
-	friendLimitDesc = prometheus.NewDesc("mcxboxbroadcast_friend_limit",
-		"Xbox friend list limit.",
-		[]string{"xuid", "gamertag"}, nil)
 	friendListFullDesc = prometheus.NewDesc("mcxboxbroadcast_friend_list_full",
 		"1 while Xbox refuses the account's friend requests because its own list is full.",
 		[]string{"xuid", "gamertag"}, nil)
@@ -41,7 +38,6 @@ type healthCollector struct {
 func (c healthCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- advertisedDesc
 	ch <- friendsDesc
-	ch <- friendLimitDesc
 	ch <- friendListFullDesc
 	ch <- joinsDesc
 }
@@ -56,7 +52,6 @@ func (c healthCollector) Collect(ch chan<- prometheus.Metric) {
 		advertised = 1
 	}
 	ch <- prometheus.MustNewConstMetric(advertisedDesc, prometheus.GaugeValue, advertised, health.XUID, health.Gamertag, health.Version, strconv.Itoa(int(health.Protocol)))
-	ch <- prometheus.MustNewConstMetric(friendLimitDesc, prometheus.GaugeValue, broadcaster.MaxFriends, health.XUID, health.Gamertag)
 	if !health.FriendsCheckedAt.IsZero() {
 		ch <- prometheus.MustNewConstMetric(friendsDesc, prometheus.GaugeValue, float64(health.Friends), health.XUID, health.Gamertag)
 	}

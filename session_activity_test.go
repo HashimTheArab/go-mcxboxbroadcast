@@ -43,7 +43,7 @@ func activityTestBroadcaster(t *testing.T, respond func(*http.Request) (*http.Re
 	})}, nil, xsts.UserInfo{XUID: "123"}, testBroadcasterLogger())
 	return &Broadcaster{
 		ctx: context.Background(), log: testBroadcasterLogger(), started: true,
-		conf:      Config{XUID: "123", UpdateInterval: time.Hour},
+		conf:      Config{XBLClient: testXBLClient(t, "123"), UpdateInterval: time.Hour},
 		announcer: &room.XBLAnnouncer{Client: client, SessionReference: mpsd.SessionReference{ServiceConfigID: serviceConfigUUID, TemplateName: TemplateName, Name: "CURRENT"}},
 	}
 }

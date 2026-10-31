@@ -32,7 +32,7 @@ func TestBroadcasterRecoversSuccessiveSignalingDrops(t *testing.T) {
 		log: slog.New(recoveryLogHandler{Handler: slog.NewTextHandler(io.Discard, nil), recovered: recovered}),
 		conf: Config{
 			JoinURL:              "http://127.0.0.1:19132",
-			XUID:                 "123",
+			XBLClient:            testXBLClient(t, "123"),
 			MinecraftTokenSource: minecraftTokenSourceWithPMID{pmid: uuid.New()},
 			StatusProvider:       status,
 			UpdateInterval:       time.Hour,

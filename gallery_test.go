@@ -3,113 +3,57 @@ package broadcaster
 import (
 	"bytes"
 	"context"
-	"errors"
 	"image"
 	"image/color"
 	"image/png"
 	"io"
-	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/sandertv/gophertunnel/minecraft/service"
 )
 
-func TestGalleryClientCleanupWaitsForActiveUpload(t *testing.T) {
-	imagePath := testGalleryImageFile(t)
-	requestStarted := make(chan struct{})
-	releaseRequest := make(chan struct{})
-	client := newTestXSAPIClient(t, &http.Client{Transport: galleryRoundTripFunc(func(*http.Request) (*http.Response, error) {
-		return nil, errors.New("offline")
-	})}, "primary")
-	b := &Broadcaster{
-		createdXBLClient: client,
-		ctx:              context.Background(),
-		log:              slog.New(slog.NewTextHandler(io.Discard, nil)),
-		conf: Config{
-			XBLClient: client,
-			XUID:      "primary",
-			Gallery: &GalleryConfig{
-				Enabled:     true,
-				ImagePath:   imagePath,
-				TokenSource: galleryTokenSource{authorization: "Bearer primary"},
-				Client: &http.Client{Transport: galleryRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-					if strings.HasSuffix(req.URL.Path, "/xuid/primary") {
-						close(requestStarted)
-						<-releaseRequest
-					}
-					return galleryHTTPResponse(http.StatusInternalServerError, ""), nil
-				})},
-			},
-		},
-	}
-
-	uploadDone := make(chan struct{})
-	go func() {
-		defer close(uploadDone)
-		b.uploadGallery()
-	}()
-	<-requestStarted
-
-	cleanupDone := make(chan struct{})
-	go func() {
-		defer close(cleanupDone)
-		_ = b.closeCreatedXBLClient()
-	}()
-
-	select {
-	case <-cleanupDone:
-		t.Fatal("client cleanup completed while gallery upload was active")
-	case <-time.After(20 * time.Millisecond):
-	}
-	if b.conf.XBLClient != client {
-		t.Fatal("client reference was cleared before the active gallery upload completed")
-	}
-
-	close(releaseRequest)
-	<-uploadDone
-	<-cleanupDone
-	if b.conf.XBLClient != nil {
-		t.Fatal("client reference was not cleared after gallery upload completed")
-	}
-}
-
 // A gallery request that never answers is abandoned at the upload timeout.
 func TestGalleryUploadStopsAtTimeout(t *testing.T) {
-	imagePath := testGalleryImageFile(t)
-	client := &http.Client{Transport: galleryRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		<-req.Context().Done()
-		return nil, req.Context().Err()
-	})}
-	b := &Broadcaster{
-		ctx:                  context.Background(),
-		log:                  slog.New(slog.NewTextHandler(io.Discard, nil)),
-		galleryUploadTimeout: 20 * time.Millisecond,
-		conf: Config{
-			XUID: "primary",
-			Gallery: &GalleryConfig{
-				Enabled:     true,
-				ImagePath:   imagePath,
-				TokenSource: galleryTokenSource{authorization: "Bearer primary"},
-				Client:      client,
+	synctest.Test(t, func(t *testing.T) {
+		b := &Broadcaster{
+			ctx: t.Context(),
+			log: testBroadcasterLogger(),
+			conf: Config{
+				XBLClient:            testXBLClient(t, "123"),
+				MinecraftTokenSource: staticMinecraftTokenSource{},
+				HTTPClient: &http.Client{Transport: galleryRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+					<-req.Context().Done()
+					return nil, req.Context().Err()
+				})},
+				Gallery: &GalleryConfig{ImagePath: testGalleryImageFile(t)},
 			},
-		},
-	}
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		b.uploadGallery()
-	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("gallery upload outlived its timeout")
-	}
+		}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			b.uploadGallery()
+		}()
+		time.Sleep(galleryUploadTimeout - time.Nanosecond)
+		synctest.Wait()
+		select {
+		case <-done:
+			t.Fatal("gallery upload ended before its timeout")
+		default:
+		}
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Fatal("gallery upload outlived its timeout")
+		}
+	})
 }
 
 func TestGalleryClientReusesReencodedEquivalentImage(t *testing.T) {
@@ -124,9 +68,10 @@ func TestGalleryClientReusesReencodedEquivalentImage(t *testing.T) {
 	}
 
 	var downloaded bool
-	g := GalleryClient{
-		TokenSource: galleryMinecraftTokenSource{},
-		Client: &http.Client{Transport: galleryRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+	g := galleryClient{
+		tokens: galleryMinecraftTokenSource{},
+		log:    testBroadcasterLogger(),
+		http: &http.Client{Transport: galleryRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 			switch {
 			case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/xuid/1"):
 				return galleryHTTPResponse(http.StatusOK, `{"result":{"showcasedImages":[{"id":"img","url":"https://cdn.example.test/image.png"}]}}`), nil
@@ -142,7 +87,7 @@ func TestGalleryClientReusesReencodedEquivalentImage(t *testing.T) {
 		})},
 	}
 
-	if err := g.SetShowcase(context.Background(), "1", imagePath, true); err != nil {
+	if _, err := g.setShowcase(context.Background(), "1", imagePath, true); err != nil {
 		t.Fatal(err)
 	}
 	if !downloaded {
@@ -157,9 +102,10 @@ func TestGalleryClientAuthenticatesRemoteImageFetch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	g := GalleryClient{
-		TokenSource: galleryMinecraftTokenSource{},
-		Client: &http.Client{Transport: galleryRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+	g := galleryClient{
+		tokens: galleryMinecraftTokenSource{},
+		log:    testBroadcasterLogger(),
+		http: &http.Client{Transport: galleryRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 			switch {
 			case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/xuid/1"):
 				return galleryHTTPResponse(http.StatusOK, `{"result":{"showcasedImages":[{"id":"img","url":"https://cdn.example.test/image.png"}]}}`), nil
@@ -179,7 +125,7 @@ func TestGalleryClientAuthenticatesRemoteImageFetch(t *testing.T) {
 		})},
 	}
 
-	result, err := g.SetShowcaseResult(context.Background(), "1", imagePath, false)
+	result, err := g.setShowcase(context.Background(), "1", imagePath, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +134,7 @@ func TestGalleryClientAuthenticatesRemoteImageFetch(t *testing.T) {
 	}
 }
 
-func TestGalleryClientSetShowcaseResultReportsExistingImage(t *testing.T) {
+func TestGalleryClientSetShowcaseReportsExistingImage(t *testing.T) {
 	localImage := testPNG(t, png.BestCompression)
 	remoteImage := testPNG(t, png.NoCompression)
 	imagePath := filepath.Join(t.TempDir(), "image.png")
@@ -196,9 +142,10 @@ func TestGalleryClientSetShowcaseResultReportsExistingImage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	g := GalleryClient{
-		TokenSource: galleryMinecraftTokenSource{},
-		Client: &http.Client{Transport: galleryRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+	g := galleryClient{
+		tokens: galleryMinecraftTokenSource{},
+		log:    testBroadcasterLogger(),
+		http: &http.Client{Transport: galleryRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 			switch {
 			case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/xuid/1"):
 				return galleryHTTPResponse(http.StatusOK, `{"result":{"showcasedImages":[{"id":"img","url":"https://cdn.example.test/image.png"}]}}`), nil
@@ -213,7 +160,7 @@ func TestGalleryClientSetShowcaseResultReportsExistingImage(t *testing.T) {
 		})},
 	}
 
-	result, err := g.SetShowcaseResult(context.Background(), "1", imagePath, true)
+	result, err := g.setShowcase(context.Background(), "1", imagePath, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,9 +181,10 @@ func TestGalleryClientReportsInvalidLocalImage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	g := GalleryClient{
-		TokenSource: galleryMinecraftTokenSource{},
-		Client: &http.Client{Transport: galleryRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+	g := galleryClient{
+		tokens: galleryMinecraftTokenSource{},
+		log:    testBroadcasterLogger(),
+		http: &http.Client{Transport: galleryRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 			switch {
 			case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/xuid/1"):
 				return galleryHTTPResponse(http.StatusOK, `{"result":{"showcasedImages":[]}}`), nil
@@ -249,7 +197,7 @@ func TestGalleryClientReportsInvalidLocalImage(t *testing.T) {
 		})},
 	}
 
-	err := g.SetShowcase(context.Background(), "1", imagePath, true)
+	_, err := g.setShowcase(context.Background(), "1", imagePath, true)
 	if err == nil {
 		t.Fatal("expected invalid image error")
 	}
@@ -330,12 +278,4 @@ type galleryMinecraftTokenSource struct{}
 
 func (galleryMinecraftTokenSource) ServiceToken(context.Context) (*service.Token, error) {
 	return &service.Token{AuthorizationHeader: "Bearer minecraft", ValidUntil: time.Now().Add(time.Hour)}, nil
-}
-
-type galleryTokenSource struct {
-	authorization string
-}
-
-func (s galleryTokenSource) ServiceToken(context.Context) (*service.Token, error) {
-	return &service.Token{AuthorizationHeader: s.authorization, ValidUntil: time.Now().Add(time.Hour)}, nil
 }

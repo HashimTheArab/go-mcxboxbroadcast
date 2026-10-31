@@ -400,7 +400,7 @@ type fakeSyncInviter struct {
 	err    error
 }
 
-func (f fakeSyncInviter) Invite(_ context.Context, xuid, _ string) error {
+func (f fakeSyncInviter) Invite(_ context.Context, xuid string) error {
 	if f.invite != nil {
 		f.invite(xuid)
 	}

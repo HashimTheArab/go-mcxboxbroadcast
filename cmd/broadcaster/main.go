@@ -71,9 +71,6 @@ func main() {
 
 func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps commandDeps) error {
 	deps = deps.withDefaults()
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if opts.ConfigPath == "" {
 		opts.ConfigPath = "config.yml"
 	}
@@ -135,26 +132,18 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 	if err := deps.SaveLiveToken(cachePath, tok); err != nil {
 		log.Warn("could not save token cache", "err", err)
 	}
-	xblSource := deps.NewXBLTokenSource(authCtx, live)
-	xblClient, err := deps.NewXSAPIClient(authCtx, xblSource, httpClient, log)
+	xblClient, err := deps.NewXSAPIClient(authCtx, deps.NewXBLTokenSource(authCtx, live), httpClient, log)
 	if err != nil {
 		return fmt.Errorf("authenticate xbox live: %w", err)
 	}
 	defer deps.CloseXSAPIClient(log, xblClient)
 
-	runtime, err := cfg.RuntimeConfig(broadcaster.RuntimeConfigInput{
-		XBLClient:      xblClient,
-		XBLTokenSource: xblSource,
-		XUID:           xblClient.UserInfo().XUID,
-		HTTPClient:     httpClient,
-		Log:            log,
-		BaseDir:        baseDir,
-	})
-	if err != nil {
-		return fmt.Errorf("configure: %w", err)
-	}
-
-	b, err := deps.NewBroadcaster(runtime)
+	b, err := deps.NewBroadcaster(cfg.RuntimeConfig(broadcaster.RuntimeConfigInput{
+		XBLClient:  xblClient,
+		HTTPClient: httpClient,
+		Log:        log,
+		BaseDir:    baseDir,
+	}))
 	if err != nil {
 		return fmt.Errorf("configure broadcaster: %w", err)
 	}
@@ -191,7 +180,7 @@ func (d commandDeps) withDefaults() commandDeps {
 		d.LoadLiveToken = broadcaster.LoadLiveToken
 	}
 	if d.NewLiveTokenSource == nil {
-		d.NewLiveTokenSource = broadcaster.NewLiveTokenSourceWithPersist
+		d.NewLiveTokenSource = broadcaster.NewLiveTokenSource
 	}
 	if d.SaveLiveToken == nil {
 		d.SaveLiveToken = broadcaster.SaveLiveToken
@@ -214,9 +203,6 @@ func (d commandDeps) withDefaults() commandDeps {
 }
 
 func closeXSAPIClient(log *slog.Logger, client *xsapi.Client) {
-	if client.HTTPClient() == nil && client.MPSD() == nil && client.TokenSource() == nil {
-		return
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := client.CloseContext(ctx); err != nil {
@@ -235,10 +221,7 @@ func defaultCachePath() string {
 // savePersistedToken saves rotated tokens to the cache path, logging failures.
 func savePersistedToken(log *slog.Logger, save func(string, *oauth2.Token) error, path string) func(*oauth2.Token) {
 	return func(tok *oauth2.Token) {
-		if save == nil {
-			return
-		}
-		if err := save(path, tok); err != nil && log != nil {
+		if err := save(path, tok); err != nil {
 			log.Warn("could not save rotated token cache", "path", path, "err", err)
 		}
 	}
@@ -263,7 +246,7 @@ func (w *notifyingWriter) Write(p []byte) (int, error) {
 	message := strings.TrimSpace(string(p))
 	if message != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		if err := w.notifier.Notify(ctx, message); err != nil && w.log != nil {
+		if err := w.notifier.Notify(ctx, message); err != nil {
 			w.log.Warn("send sign-in notification", "err", err)
 		}
 		cancel()

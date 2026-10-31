@@ -39,9 +39,8 @@ func (b *Broadcaster) publishedActivity() (publishedActivity, bool) {
 	if !b.started || b.recovering {
 		return publishedActivity{}, false
 	}
-	xuid := b.xuid()
 	xbl, ok := xblAnnouncer(b.announcer)
-	if !ok || xuid == "" {
+	if !ok {
 		return publishedActivity{}, false
 	}
 	xbl.Lock()
@@ -49,7 +48,7 @@ func (b *Broadcaster) publishedActivity() (publishedActivity, bool) {
 	if xbl.Client == nil || xbl.SessionReference.Name == "" {
 		return publishedActivity{}, false
 	}
-	return publishedActivity{xuid: xuid, ref: xbl.SessionReference, announcer: xbl, session: xbl.Session, client: xbl.Client}, true
+	return publishedActivity{xuid: b.xuid(), ref: xbl.SessionReference, announcer: xbl, session: xbl.Session, client: xbl.Client}, true
 }
 
 // activityCurrentLocked reports whether activity still identifies the current
@@ -111,7 +110,7 @@ func (b *Broadcaster) activityHealthIssue(state *activityObservation, now time.T
 	case err != nil || found:
 		state.misses = 0
 		if err != nil && b.ctx.Err() == nil {
-			b.debug("check published activity", "err", err)
+			b.log.Debug("check published activity", "err", err)
 		}
 	case settling || now.Before(state.recoverAfter):
 		// Misses count only after the grace period and the recovery cooldown.

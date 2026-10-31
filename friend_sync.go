@@ -3,7 +3,6 @@ package broadcaster
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -22,8 +21,9 @@ type FriendAPI interface {
 	RemoveFriend(ctx context.Context, xuid string) error
 }
 
+// Inviter sends a newly added friend a Minecraft game invite.
 type Inviter interface {
-	Invite(ctx context.Context, xuid, titleID string) error
+	Invite(ctx context.Context, xuid string) error
 }
 
 type HistoryStore interface {
@@ -183,7 +183,7 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 	if !expire {
 		return result, nil
 	}
-	s.debug(ctx, "friend expiry scan", "friends", fmt.Sprintf("%d/%d", len(friends), MaxFriends))
+	s.debug(ctx, "friend expiry scan", "friends", len(friends))
 	expired := 0
 	for _, p := range friends {
 		if err := ctx.Err(); err != nil {
@@ -374,7 +374,7 @@ func (s FriendSyncer) pruneHistory(ctx context.Context, people []Person) {
 func (s FriendSyncer) sendInitialInvite(ctx context.Context, p Person, source string) {
 	s.debug(ctx, "sending initial invite", "xuid", p.XUID, "gamertag", p.Gamertag, "source", source)
 	operationCtx, cancel := xboxOperationContext(ctx)
-	err := s.Inviter.Invite(operationCtx, p.XUID, strconv.FormatInt(TitleID, 10))
+	err := s.Inviter.Invite(operationCtx, p.XUID)
 	cancel()
 	if err != nil {
 		if s.Log != nil {

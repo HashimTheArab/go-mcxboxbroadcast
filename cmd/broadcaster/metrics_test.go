@@ -15,9 +15,6 @@ func TestHealthCollectorExportsAccount(t *testing.T) {
 	health := broadcaster.Health{XUID: "1", Gamertag: "Bot", Version: "1.26.60", Protocol: 2225, Advertised: true, CheckedAt: now, AttemptedAt: now, RelayedJoins: 7}
 	collector := healthCollector{now: func() time.Time { return now }, health: func() broadcaster.Health { return health }}
 	header := `
-# HELP mcxboxbroadcast_friend_limit Xbox friend list limit.
-# TYPE mcxboxbroadcast_friend_limit gauge
-mcxboxbroadcast_friend_limit{gamertag="Bot",xuid="1"} 1000
 # HELP mcxboxbroadcast_friend_list_full 1 while Xbox refuses the account's friend requests because its own list is full.
 # TYPE mcxboxbroadcast_friend_list_full gauge
 mcxboxbroadcast_friend_list_full{gamertag="Bot",xuid="1"} 0

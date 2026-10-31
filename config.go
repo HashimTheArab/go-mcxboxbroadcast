@@ -18,16 +18,11 @@ import (
 
 // Config holds the dependencies and settings for a Broadcaster.
 type Config struct {
-	// XBLClient is the account's Xbox Live client for MPSD, social, and
-	// presence calls.
+	// XBLClient is the account's Xbox Live client and is required. The caller
+	// owns it and closes it after Close.
 	XBLClient *xsapi.Client
-	// XBLTokenSource supplies Xbox Live tokens when XBLClient is created lazily.
-	XBLTokenSource xsapi.TokenSource
-	// XUID is the account's Xbox user ID. If empty, it is read from XBLClient
-	// when available.
-	XUID string
 	// MinecraftTokenSource supplies Minecraft franchise service tokens for
-	// signaling and gallery/profile image requests.
+	// signaling and gallery requests. If nil, one is created from XBLClient.
 	MinecraftTokenSource service.TokenSource
 
 	// JoinURL is the base URL of the target server's NetherNet HTTP signaling,
@@ -42,7 +37,7 @@ type Config struct {
 	Status Status
 	// StatusProvider may dynamically provide room status for announcements.
 	StatusProvider room.StatusProvider
-	// Gallery controls optional Minecraft profile showcase image upload.
+	// Gallery enables the Minecraft profile showcase image upload when set.
 	Gallery *GalleryConfig
 	// Notifier receives operator-facing notifications.
 	Notifier Notifier
@@ -68,7 +63,8 @@ type Config struct {
 	// UpdateInterval controls the background session refresh interval. Zero
 	// uses 30 seconds; values below 20 seconds are raised to avoid Xbox rate limits.
 	UpdateInterval time.Duration
-	// HTTPClient is used by auth/signaling/session requests where supported.
+	// HTTPClient sends signaling, status, gallery and join requests. If nil,
+	// http.DefaultClient is used.
 	HTTPClient *http.Client
 	// SignalingDialTimeout bounds default signaling startup. If zero, a
 	// 15-second timeout is used. Injected Signaling and SignalingFactory values
@@ -116,7 +112,6 @@ type Status struct {
 	QueryTimeout     time.Duration
 	WebQueryFallback bool
 	QueryFallback    bool
-	WebQueryClient   *http.Client
 	// Version and Protocol override the advertised pair together; zero values
 	// advertise the protocol library's current pair.
 	Version  string
@@ -130,26 +125,16 @@ func (s Status) validate() error {
 	return nil
 }
 
-type BroadcastSetting int32
-
-const (
-	BroadcastSettingInviteOnly BroadcastSetting = iota + 1
-	BroadcastSettingFriendsOnly
-	BroadcastSettingFriendsOfFriends
-)
-
 const (
 	WorldTypeCreative  = room.WorldTypeCreative
 	WorldTypeSurvival  = "Survival"
 	WorldTypeAdventure = "Adventure"
 )
 
+// GalleryConfig names the image to showcase; a missing file skips the upload.
 type GalleryConfig struct {
-	Enabled           bool
 	ImagePath         string
 	DeleteOtherImages bool
-	TokenSource       service.TokenSource
-	Client            *http.Client
 }
 
 type Notifier interface {

@@ -146,7 +146,7 @@ func TestSyncSessionNoncesMatchesActiveMembers(t *testing.T) {
 
 func TestSessionNonceAnnouncerUpdateNoncesWritesCustomProperties(t *testing.T) {
 	session := &mpsd.Session{}
-	announcer := newSessionNonceAnnouncer(&room.XBLAnnouncer{Session: session}, "100", nil, nil)
+	announcer := newSessionNonceAnnouncer(&room.XBLAnnouncer{Session: session}, "100", testBroadcasterLogger(), func(int) {})
 	announcer.lastStatus = room.Status{
 		OwnerID:   "100",
 		WorldName: "World",
@@ -196,7 +196,7 @@ func TestSessionNonceAnnouncerUpdateNoncesWritesCustomProperties(t *testing.T) {
 
 func TestSessionNonceAnnouncerRepublishClearsNonceState(t *testing.T) {
 	session := &mpsd.Session{}
-	announcer := newSessionNonceAnnouncer(&room.XBLAnnouncer{Session: session}, "100", nil, nil)
+	announcer := newSessionNonceAnnouncer(&room.XBLAnnouncer{Session: session}, "100", testBroadcasterLogger(), func(int) {})
 	announcer.Session = session
 	announcer.handledSession = session
 	announcer.custom = []byte("cached")
@@ -239,7 +239,7 @@ func TestSessionNonceAnnouncerDoesNotNoOpWithoutSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	announcer := newSessionNonceAnnouncer(&room.XBLAnnouncer{}, "100", nil, nil)
+	announcer := newSessionNonceAnnouncer(&room.XBLAnnouncer{}, "100", testBroadcasterLogger(), func(int) {})
 	announcer.custom = custom
 	announcer.readRestriction = mpsd.SessionRestrictionFollowed
 	announcer.joinRestriction = mpsd.SessionRestrictionFollowed

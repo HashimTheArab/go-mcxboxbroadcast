@@ -163,7 +163,7 @@ func TestPterodactylDoneMarkerIsLoggedOnStart(t *testing.T) {
 	var logs bytes.Buffer
 	b, err := New(Config{
 		JoinURL:        "http://127.0.0.1:19132",
-		XBLTokenSource: staticTokenSource{xuid: "123"},
+		XBLClient:      testXBLClient(t, "123"),
 		Signaling:      &fakeSignaling{networkID: "123456789"},
 		Status:         Status{HostName: "Host", WorldName: "World"},
 		UpdateInterval: time.Hour,

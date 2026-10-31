@@ -14,9 +14,8 @@ import (
 
 func TestStatusDefaults(t *testing.T) {
 	b, err := New(Config{
-		XBLTokenSource: staticTokenSource{},
-		XUID:           "123",
-		JoinURL:        "http://127.0.0.1:19132",
+		XBLClient: testXBLClient(t, "123"),
+		JoinURL:   "http://127.0.0.1:19132",
 		Status: Status{
 			HostName:   "§aHost",
 			WorldName:  "",
@@ -27,10 +26,7 @@ func TestStatusDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	status, err := b.status(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	status := b.status(context.Background())
 	if status.HostName != "Host" {
 		t.Fatalf("unexpected host name %q", status.HostName)
 	}
@@ -57,18 +53,14 @@ func TestStatusDefaults(t *testing.T) {
 func TestStatusLevelIDUniquePerAccount(t *testing.T) {
 	levelID := func(xuid string) string {
 		b, err := New(Config{
-			XBLTokenSource: staticTokenSource{},
-			XUID:           xuid,
-			JoinURL:        "http://127.0.0.1:19132",
-			Status:         Status{HostName: "Host"},
+			XBLClient: testXBLClient(t, xuid),
+			JoinURL:   "http://127.0.0.1:19132",
+			Status:    Status{HostName: "Host"},
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
-		status, err := b.status(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
+		status := b.status(context.Background())
 		if status.LevelID == "" {
 			t.Fatal("level ID is empty")
 		}
@@ -76,10 +68,7 @@ func TestStatusLevelIDUniquePerAccount(t *testing.T) {
 		if raw, err := base64.StdEncoding.DecodeString(status.LevelID); err != nil || len(raw) != 8 {
 			t.Fatalf("level ID %q is not base64 of 8 bytes (err=%v)", status.LevelID, err)
 		}
-		again, err := b.status(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
+		again := b.status(context.Background())
 		if again.LevelID != status.LevelID {
 			t.Fatalf("level ID not stable: %q != %q", again.LevelID, status.LevelID)
 		}
@@ -103,10 +92,9 @@ func TestNormalizeStatusKeepsDefaultLevelIDStable(t *testing.T) {
 
 func TestStatusKeepsLastQueryResultWhenQueryFails(t *testing.T) {
 	b, err := New(Config{
-		XBLTokenSource: staticTokenSource{},
-		XUID:           "123",
-		// Port 1 on localhost is closed, so the query fails quickly.
-		JoinURL: "http://127.0.0.1:1",
+		XBLClient:  testXBLClient(t, "123"),
+		JoinURL:    "http://127.0.0.1:1",
+		HTTPClient: offlineHTTPClient(),
 		Status: Status{
 			HostName:     "Config Host",
 			WorldName:    "Config World",
@@ -123,10 +111,7 @@ func TestStatusKeepsLastQueryResultWhenQueryFails(t *testing.T) {
 		PlayerCount:   7,
 		MaxPlayers:    30,
 	}
-	status, err := b.status(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	status := b.status(context.Background())
 	if status.WorldName != "Queried World" || status.HostName != "Queried Host" {
 		t.Fatalf("expected last query result to be kept, got %q/%q", status.WorldName, status.HostName)
 	}
@@ -137,9 +122,9 @@ func TestStatusKeepsLastQueryResultWhenQueryFails(t *testing.T) {
 
 func TestStatusResetsToConfigWhenQueryFailsWithConfigFallback(t *testing.T) {
 	b, err := New(Config{
-		XBLTokenSource: staticTokenSource{},
-		XUID:           "123",
-		JoinURL:        "http://127.0.0.1:1",
+		XBLClient:  testXBLClient(t, "123"),
+		JoinURL:    "http://127.0.0.1:1",
+		HTTPClient: offlineHTTPClient(),
 		Status: Status{
 			HostName:      "Config Host",
 			WorldName:     "Config World",
@@ -152,10 +137,7 @@ func TestStatusResetsToConfigWhenQueryFailsWithConfigFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	b.lastQuery = &minecraft.ServerStatus{ServerName: "Queried World", ServerSubName: "Queried Host"}
-	status, err := b.status(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
+	status := b.status(context.Background())
 	if status.WorldName != "Config World" || status.HostName != "Config Host" {
 		t.Fatalf("expected config fallback values, got %q/%q", status.WorldName, status.HostName)
 	}
@@ -175,17 +157,13 @@ func TestStatusAdvertisesOnePair(t *testing.T) {
 		"provider override": {Config{StatusProvider: provider, Status: Status{Version: "1.26.50", Protocol: 2193}}, "1.26.50", 2193},
 	} {
 		t.Run(name, func(t *testing.T) {
-			tc.conf.XBLTokenSource = staticTokenSource{}
-			tc.conf.XUID = "123"
+			tc.conf.XBLClient = testXBLClient(t, "123")
 			tc.conf.JoinURL = "http://127.0.0.1:19132"
 			b, err := New(tc.conf)
 			if err != nil {
 				t.Fatal(err)
 			}
-			status, err := b.status(context.Background())
-			if err != nil {
-				t.Fatal(err)
-			}
+			status := b.status(context.Background())
 			if status.Version != tc.version || status.Protocol != tc.protocol {
 				t.Fatalf("advertised %s/%d, want %s/%d", status.Version, status.Protocol, tc.version, tc.protocol)
 			}

@@ -26,7 +26,7 @@ func TestSessionLoopStopsAfterRepeatedPublicationFailure(t *testing.T) {
 			started:   true,
 			signaling: &cancelableSignaling{ctx: lost, networkID: "123"},
 			conf: Config{
-				XUID:           "123",
+				XBLClient:      testXBLClient(t, "123"),
 				JoinURL:        "http://127.0.0.1:19132",
 				Status:         Status{HostName: "Host", WorldName: "World"},
 				UpdateInterval: 30 * time.Second,

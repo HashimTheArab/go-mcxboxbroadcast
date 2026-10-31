@@ -134,7 +134,7 @@ func (a *sessionNonceAnnouncer) Announce(ctx context.Context, status room.Status
 	a.readRestriction = read
 	a.joinRestriction = join
 	a.handleSessionLocked()
-	a.debug("published mpsd session nonces", "nonce_count", len(a.nonces))
+	a.log.Debug("published mpsd session nonces", "nonce_count", len(a.nonces))
 	return nil
 }
 
@@ -206,18 +206,8 @@ func (a *sessionNonceAnnouncer) updateNonces(ctx context.Context, session *mpsd.
 		return fmt.Errorf("set custom properties: %w", err)
 	}
 	a.custom = custom
-	a.debug(
-		"updated mpsd session nonces",
-		"nonce_count", len(a.nonces),
-		"active_member_count", len(activeXUIDs),
-	)
+	a.log.Debug("updated mpsd session nonces", "nonce_count", len(a.nonces), "active_member_count", len(activeXUIDs))
 	return nil
-}
-
-func (a *sessionNonceAnnouncer) debug(msg string, args ...any) {
-	if a.log != nil {
-		a.log.Debug(msg, args...)
-	}
 }
 
 type sessionNonceHandler struct {
@@ -225,15 +215,11 @@ type sessionNonceHandler struct {
 }
 
 func (h sessionNonceHandler) HandleSessionChange(session *mpsd.Session) {
-	if h.announcer.membersChanged != nil {
-		h.announcer.membersChanged(sessionMemberCount(session))
-	}
+	h.announcer.membersChanged(sessionMemberCount(session))
 	ctx, cancel := context.WithTimeout(session.Context(), 15*time.Second)
 	defer cancel()
 	if err := h.announcer.updateNoncesFromSession(ctx, session); err != nil {
-		if h.announcer.log != nil {
-			h.announcer.log.Error("update mpsd session nonces", "err", err)
-		}
+		h.announcer.log.Error("update mpsd session nonces", "err", err)
 	}
 }
 
@@ -253,12 +239,6 @@ func sessionMemberXUIDs(session *mpsd.Session) []string {
 }
 
 func syncSessionNonces(nonces map[string]string, activeXUIDs []string, ownerXUID string, generate func() (string, error)) (bool, error) {
-	if nonces == nil {
-		return false, errors.New("nonces map is nil")
-	}
-	if generate == nil {
-		generate = generateSessionNonce
-	}
 	ownerXUID = strings.TrimSpace(ownerXUID)
 	active := make(map[string]struct{}, len(activeXUIDs))
 	for _, xuid := range activeXUIDs {

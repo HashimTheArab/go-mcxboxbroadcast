@@ -17,7 +17,7 @@ import (
 
 	"github.com/df-mc/go-xsapi/v2"
 	"github.com/pelletier/go-toml/v2"
-	"github.com/sandertv/gophertunnel/minecraft/service"
+	"github.com/sandertv/gophertunnel/minecraft/p2p"
 	"gopkg.in/yaml.v3"
 )
 
@@ -122,14 +122,12 @@ type AccountsConfig struct {
 	PrimaryCachePath string `yaml:"primaryCachePath" toml:"primaryCachePath"`
 }
 
+// RuntimeConfigInput carries what a Config needs beyond the file; BaseDir resolves relative paths.
 type RuntimeConfigInput struct {
-	XBLClient            *xsapi.Client
-	XBLTokenSource       xsapi.TokenSource
-	XUID                 string
-	MinecraftTokenSource service.TokenSource
-	HTTPClient           *http.Client
-	Log                  *slog.Logger
-	BaseDir              string
+	XBLClient  *xsapi.Client
+	HTTPClient *http.Client
+	Log        *slog.Logger
+	BaseDir    string
 }
 
 func DefaultConfigFile() ConfigFile {
@@ -142,7 +140,7 @@ func DefaultConfigFile() ConfigFile {
 			QueryServer:      true,
 			WebQueryFallback: false,
 			ConfigFallback:   false,
-			BroadcastSetting: int32(BroadcastSettingFriendsOfFriends),
+			BroadcastSetting: int32(p2p.BroadcastSettingFriendsOfFriends),
 			WorldType:        WorldTypeSurvival,
 			HideOldSessions:  true,
 			SessionInfo: SessionInfoFile{
@@ -428,17 +426,15 @@ func (c *ConfigFile) note(format string, args ...any) {
 	c.Notes = append(c.Notes, fmt.Sprintf(format, args...))
 }
 
-func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
+// RuntimeConfig returns the broadcaster Config the file describes.
+func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) Config {
 	if in.BaseDir == "" {
 		in.BaseDir = "."
 	}
 	cfg := Config{
-		XBLClient:            in.XBLClient,
-		XBLTokenSource:       in.XBLTokenSource,
-		XUID:                 in.XUID,
-		MinecraftTokenSource: in.MinecraftTokenSource,
-		JoinURL:              strings.TrimSuffix(c.Session.JoinURL, "/"),
-		HideOldSessions:      c.Session.HideOldSessions,
+		XBLClient:       in.XBLClient,
+		JoinURL:         strings.TrimSuffix(c.Session.JoinURL, "/"),
+		HideOldSessions: c.Session.HideOldSessions,
 		Status: Status{
 			HostName:         c.Session.SessionInfo.HostName,
 			WorldName:        c.Session.SessionInfo.WorldName,
@@ -449,7 +445,6 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 			QueryTarget:      c.Session.QueryServer,
 			WebQueryFallback: c.Session.WebQueryFallback,
 			QueryFallback:    c.Session.ConfigFallback,
-			WebQueryClient:   in.HTTPClient,
 			Version:          c.Session.SessionInfo.Version,
 			Protocol:         c.Session.SessionInfo.Protocol,
 		},
@@ -464,15 +459,12 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 	}
 	if c.Gallery.Enabled {
 		cfg.Gallery = &GalleryConfig{
-			Enabled:           true,
 			ImagePath:         resolvePath(in.BaseDir, c.Gallery.ImagePath),
 			DeleteOtherImages: c.Gallery.DeleteOtherImages,
-			TokenSource:       in.MinecraftTokenSource,
-			Client:            in.HTTPClient,
 		}
 	}
 	cfg.Notifier = c.Notifications.Notifier(in.HTTPClient)
-	return cfg, nil
+	return cfg
 }
 
 func (f FriendFileConfig) runtime() *FriendSyncConfig {

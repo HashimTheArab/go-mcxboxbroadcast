@@ -134,10 +134,10 @@ only on a network where just your scraper can reach it. It reports:
   the last answered check found the account's own session open and checks are
   still running. Xbox errors keep the last answer for up to 15 minutes. It is 0
   until a check first finds the session.
-- `mcxboxbroadcast_friends` and `mcxboxbroadcast_friend_limit`: the friend list
-  size, counted on the first friend sync and each expiry scan (or, with expiry
-  off, on the next friend sync once the count is 30 minutes old), and adjusted
-  for adds and removals in between. It is missing until friend sync first runs.
+- `mcxboxbroadcast_friends`: the friend list size, counted on the first friend
+  sync and each expiry scan (or, with expiry off, on the next friend sync once
+  the count is 30 minutes old), and adjusted for adds and removals in between.
+  It is missing until friend sync first runs.
 - `mcxboxbroadcast_friend_list_full`: 1 while Xbox refuses friend requests
   because the account's own list is full.
 - `mcxboxbroadcast_relayed_joins_total`: join offers relayed since start.
@@ -201,11 +201,13 @@ Supplying a fixed `Config.Signaling` connection disables session recreation; a
 missing activity advertisement then produces a logged error and webhook
 notification.
 
-`Broadcaster.Wait()` returns any terminal recovery error. Call `Close()` afterward
-to release resources. A normal shutdown returns no recovery error.
+`Config.XBLClient` is required. The broadcaster never closes it, so close it
+after `Close()`. `Broadcaster.Wait()` returns any terminal recovery error. Call
+`Close()` afterward to release resources. A normal shutdown returns no recovery
+error.
 
 ```go
-live := broadcaster.NewLiveTokenSourceWithPersist(ctx, cachedLiveToken, os.Stdout, func(tok *oauth2.Token) {
+live := broadcaster.NewLiveTokenSource(ctx, cachedLiveToken, os.Stdout, func(tok *oauth2.Token) {
 	_ = broadcaster.SaveLiveToken(cachePath, tok)
 })
 xblClient, err := broadcaster.NewXSAPIClient(ctx, broadcaster.NewXBLTokenSource(ctx, live), http.DefaultClient, nil)
@@ -213,16 +215,11 @@ if err != nil {
 	return err
 }
 defer xblClient.Close()
-minecraftTokens, err := broadcaster.NewMinecraftTokenSource(ctx, xblClient, http.DefaultClient)
-if err != nil {
-	return err
-}
 
 b, err := broadcaster.New(broadcaster.Config{
-	XBLClient:            xblClient,
-	MinecraftTokenSource: minecraftTokens,
-	JoinURL:              "https://play.example.net:19132",
-	HideOldSessions:      true,
+	XBLClient:       xblClient,
+	JoinURL:         "https://play.example.net:19132",
+	HideOldSessions: true,
 	Status: broadcaster.Status{
 		HostName:    "Example",
 		WorldName:   "Example World",
@@ -230,10 +227,7 @@ b, err := broadcaster.New(broadcaster.Config{
 		MaxPlayers:  20,
 		QueryTarget: true,
 	},
-	Gallery: &broadcaster.GalleryConfig{
-		Enabled:   true,
-		ImagePath: "screenshot.jpg",
-	},
+	Gallery: &broadcaster.GalleryConfig{ImagePath: "screenshot.jpg"},
 })
 if err != nil {
 	return err
