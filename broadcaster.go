@@ -441,7 +441,11 @@ func (b *Broadcaster) cleanupPublishedSessions() error {
 	b.retiredSessions = nil
 	b.staleAnnouncers = failed
 	if b.announcer != nil {
-		err = errors.Join(err, b.announcer.Close())
+		if closeErr := b.announcer.Close(); closeErr != nil {
+			// A failed close leaves the session advertised; keep it so a later Update retries.
+			err = errors.Join(err, closeErr)
+			b.staleAnnouncers = append(b.staleAnnouncers, b.announcer)
+		}
 		b.announcer = nil
 	}
 	b.sessionConnection = nil

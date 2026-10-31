@@ -288,3 +288,20 @@ func TestStartCleansUpWhenAnnounceFails(t *testing.T) {
 		t.Fatalf("announcer closed = %v, signaling closed = %v, want both", announcer.Closed(), sig.closed.Load())
 	}
 }
+
+// A session whose close fails stays queued so a later Update retries it instead of leaving it advertised.
+func TestCleanupKeepsSessionWhoseCloseFailed(t *testing.T) {
+	failing := &fakeAnnouncer{closeErr: errors.New("mpsd unavailable")}
+	b := &Broadcaster{announcer: failing, log: testBroadcasterLogger()}
+	if err := b.cleanupPublishedSessions(); err == nil {
+		t.Fatal("cleanup hid the failed close")
+	}
+	if b.announcer != nil || len(b.staleAnnouncers) != 1 || b.staleAnnouncers[0] != failing {
+		t.Fatalf("announcer=%v stale=%v, want the failed session queued for retry", b.announcer, b.staleAnnouncers)
+	}
+	failing.closeErr = nil
+	b.closeStaleSessions()
+	if len(b.staleAnnouncers) != 0 {
+		t.Fatal("retry did not close the stale session")
+	}
+}
