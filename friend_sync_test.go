@@ -5,10 +5,13 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	xblsocial "github.com/df-mc/go-xsapi/v2/social"
@@ -116,7 +119,7 @@ func TestFriendSyncerDeclinesRestrictedRequests(t *testing.T) {
 	syncer := FriendSyncer{
 		Client:   client,
 		Config:   FriendSyncConfig{AutoFriend: true},
-		Notifier: notifierFunc(func(_ context.Context, m string) error { notified = append(notified, m); return nil }),
+		Notifier: fakeNotifier{notify: func(_ context.Context, m string) { notified = append(notified, m) }},
 	}
 	if err := syncer.Sync(context.Background()); err != nil {
 		t.Fatal(err)
@@ -307,6 +310,306 @@ func TestFriendSyncRunStateNeedsRefusalsSinceLastAccept(t *testing.T) {
 	}
 }
 
+// TestFriendSyncerRunSyncsOnTrigger checks that events can run ahead of polling.
+func TestFriendSyncerRunSyncsOnTrigger(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		accepts := 0
+		client := &syncFriendClient{
+			accept: func(context.Context) ([]Person, error) {
+				accepts++
+				return nil, nil
+			},
+		}
+		trigger := make(chan struct{}, 1)
+		syncer := FriendSyncer{
+			Client:  client,
+			Config:  FriendSyncConfig{AutoFriend: true, UpdateInterval: time.Hour},
+			Trigger: trigger,
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		go syncer.Run(ctx)
+		synctest.Wait()
+		if accepts != 1 {
+			t.Fatalf("initial passes = %d, want 1", accepts)
+		}
+		time.Sleep(30 * time.Second)
+		trigger <- struct{}{}
+		synctest.Wait()
+		if accepts != 2 {
+			t.Fatalf("passes after event = %d, want 2", accepts)
+		}
+	})
+}
+
+// A closed Trigger must not spin Run; a spinning loop never lets the bubble's clock advance.
+func TestFriendSyncerRunHandlesClosedTrigger(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var accepts atomic.Int32
+		trigger := make(chan struct{})
+		syncer := FriendSyncer{
+			Client: &syncFriendClient{accept: func(context.Context) ([]Person, error) {
+				accepts.Add(1)
+				return nil, nil
+			}},
+			Config:  FriendSyncConfig{AutoFriend: true, UpdateInterval: time.Hour},
+			Trigger: trigger,
+		}
+		go syncer.Run(t.Context())
+		synctest.Wait()
+		close(trigger)
+		time.Sleep(time.Minute)
+		synctest.Wait()
+		if got := accepts.Load(); got != 1 {
+			t.Fatalf("passes = %d, want only the initial one", got)
+		}
+	})
+}
+
+// A social event during add backoff must not accept requests early, while expiry keeps running.
+func TestReactiveFriendSyncPreservesAddBackoff(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var accepts, expiries atomic.Int32
+		client := &syncFriendClient{
+			people: []Person{{XUID: "123"}},
+			accept: func(context.Context) ([]Person, error) {
+				accepts.Add(1)
+				return nil, &xblsocial.ResponseError{StatusCode: 429, RetryAfter: time.Minute}
+			},
+		}
+		trigger := make(chan struct{}, 1)
+		syncer := FriendSyncer{
+			Client: client,
+			History: &syncHistoryStore{
+				lastSeen:   map[string]time.Time{"123": time.Now().Add(-48 * time.Hour)},
+				onLastSeen: func(string) { expiries.Add(1) },
+			},
+			Config: FriendSyncConfig{AutoFriend: true, ExpiryEnabled: true, ExpiryDays: 1,
+				UpdateInterval: time.Hour, ExpiryCheck: 20 * time.Second},
+			Trigger: trigger,
+		}
+		go syncer.Run(t.Context())
+		synctest.Wait()
+		if accepts.Load() != 1 || expiries.Load() != 1 || len(client.removals()) != 1 {
+			t.Fatalf("initial accepts=%d expiries=%d removals=%v, want one each", accepts.Load(), expiries.Load(), client.removals())
+		}
+		trigger <- struct{}{}
+		time.Sleep(20 * time.Second)
+		synctest.Wait()
+		if accepts.Load() != 1 || expiries.Load() != 2 {
+			t.Fatalf("during backoff accepts=%d expiries=%d, want 1 and 2", accepts.Load(), expiries.Load())
+		}
+		time.Sleep(40 * time.Second)
+		trigger <- struct{}{}
+		synctest.Wait()
+		if accepts.Load() != 2 {
+			t.Fatalf("after backoff accepts=%d, want 2", accepts.Load())
+		}
+	})
+}
+
+func TestFriendSyncReadRetryAfter(t *testing.T) {
+	for _, tc := range []struct {
+		name, url, retry string
+		status           int
+		delay            time.Duration
+		initialReads     int
+	}{
+		{"pending", pendingRequestsURL, "45", 429, 45 * time.Second, 1},
+		{"friends", peopleHubFriendsURL, "45", 429, 45 * time.Second, 2},
+		{"no retry header", peopleHubFriendsURL, "", 429, 20 * time.Second, 2},
+		{"short retry header", pendingRequestsURL, "5", 429, 20 * time.Second, 1},
+		{"service unavailable", pendingRequestsURL, "30", 503, 30 * time.Second, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				reads := make(chan timedFriendRead, 64)
+				failed := false
+				client := newFriendRateClient(reads, func(req *http.Request) *http.Response {
+					if req.URL.String() == tc.url && !failed {
+						failed = true
+						resp := response(tc.status, "")
+						resp.Header.Set("Retry-After", tc.retry)
+						return resp
+					}
+					return response(200, `{"people":[]}`)
+				})
+				trigger := make(chan struct{}, 16)
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				go newRateSyncer(client, trigger).Run(ctx)
+				synctest.Wait()
+				assertFriendRateReads(t, reads, 0, friendRateReadURLs[:tc.initialReads]...)
+				for range cap(trigger) {
+					trigger <- struct{}{}
+				}
+				synctest.Wait()
+				time.Sleep(tc.delay - time.Nanosecond)
+				synctest.Wait()
+				assertFriendRateReads(t, reads, 0)
+				time.Sleep(time.Nanosecond)
+				synctest.Wait()
+				assertFriendRateReads(t, reads, tc.delay, friendRateReadURLs...)
+				time.Sleep(20 * time.Second)
+				synctest.Wait()
+				assertFriendRateReads(t, reads, 0)
+			})
+		})
+	}
+}
+
+func TestFriendSyncReadRetryRunsWithoutAnotherTrigger(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		reads := make(chan timedFriendRead, 16)
+		first := true
+		client := newFriendRateClient(reads, func(*http.Request) *http.Response {
+			if first {
+				first = false
+				resp := response(429, "")
+				resp.Header.Set("Retry-After", "40")
+				return resp
+			}
+			return response(200, `{"people":[]}`)
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go newRateSyncer(client, nil).Run(ctx)
+		synctest.Wait()
+		assertFriendRateReads(t, reads, 0, pendingRequestsURL)
+		time.Sleep(40 * time.Second)
+		synctest.Wait()
+		assertFriendRateReads(t, reads, 40*time.Second, friendRateReadURLs...)
+	})
+}
+
+func TestFriendSyncTriggerSpacingStartsAfterPassCompletes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		reads := make(chan timedFriendRead, 64)
+		delayed := false
+		client := newFriendRateClient(reads, func(req *http.Request) *http.Response {
+			if req.URL.String() == peopleHubFriendsURL && !delayed {
+				delayed = true
+				time.Sleep(5 * time.Second)
+			}
+			return response(200, `{"people":[]}`)
+		})
+		trigger := make(chan struct{}, 16)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go newRateSyncer(client, trigger).Run(ctx)
+		synctest.Wait()
+		assertFriendRateReads(t, reads, 0, friendRateReadURLs...)
+		for range cap(trigger) {
+			trigger <- struct{}{}
+		}
+		time.Sleep(5 * time.Second)
+		synctest.Wait()
+		time.Sleep(20*time.Second - time.Nanosecond)
+		synctest.Wait()
+		assertFriendRateReads(t, reads, 0)
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		assertFriendRateReads(t, reads, 25*time.Second, pendingRequestsURL)
+		time.Sleep(20 * time.Second)
+		synctest.Wait()
+		assertFriendRateReads(t, reads, 0)
+		trigger <- struct{}{}
+		synctest.Wait()
+		assertFriendRateReads(t, reads, 45*time.Second, pendingRequestsURL)
+		trigger <- struct{}{}
+		synctest.Wait()
+		close(trigger)
+		cancel()
+		synctest.Wait()
+		time.Sleep(time.Minute)
+		assertFriendRateReads(t, reads, 0)
+	})
+}
+
+func TestFriendSyncCoalescesPollExpiryAndTrigger(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		passes := make(chan timedFriendRead, 16)
+		expiries := make(chan timedFriendRead, 16)
+		start := time.Now()
+		client := &syncFriendClient{people: []Person{{XUID: "123"}},
+			accept: func(context.Context) ([]Person, error) {
+				passes <- timedFriendRead{"pass", time.Since(start)}
+				return nil, nil
+			}}
+		trigger := make(chan struct{}, 16)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		history := &syncHistoryStore{
+			lastSeen:   map[string]time.Time{"123": time.Now().Add(time.Hour)},
+			onLastSeen: func(string) { expiries <- timedFriendRead{"expiry", time.Since(start)} },
+		}
+		go (FriendSyncer{Client: client, Trigger: trigger, History: history,
+			Config: FriendSyncConfig{AutoFriend: true, ExpiryEnabled: true,
+				UpdateInterval: 20 * time.Second, ExpiryCheck: 20 * time.Second}}).Run(ctx)
+		synctest.Wait()
+		assertFriendRateReads(t, passes, 0, "pass")
+		assertFriendRateReads(t, expiries, 0, "expiry")
+		time.Sleep(19 * time.Second)
+		for range cap(trigger) {
+			trigger <- struct{}{}
+		}
+		synctest.Wait()
+		assertFriendRateReads(t, passes, 0)
+		for _, at := range []time.Duration{20 * time.Second, 40 * time.Second} {
+			time.Sleep(at - time.Since(start))
+			synctest.Wait()
+			assertFriendRateReads(t, passes, at, "pass")
+			assertFriendRateReads(t, expiries, at, "expiry")
+		}
+	})
+}
+
+// friendRateReadURLs lists the reads in an empty pass that also checks expiry.
+var friendRateReadURLs = []string{pendingRequestsURL, peopleHubFriendsURL}
+
+// newRateSyncer starts with an expiry pass and then only accepts requests for an hour.
+func newRateSyncer(client FriendAPI, trigger <-chan struct{}) FriendSyncer {
+	return FriendSyncer{Client: client, Trigger: trigger, History: &syncHistoryStore{}, Config: FriendSyncConfig{
+		AutoFriend: true, ExpiryEnabled: true, UpdateInterval: time.Hour, ExpiryCheck: time.Hour}}
+}
+
+// timedFriendRead records the request and elapsed time at the transport boundary.
+type timedFriendRead struct {
+	url string
+	at  time.Duration
+}
+
+// newFriendRateClient keeps the real social API/error parsing with a local transport.
+func newFriendRateClient(reads chan<- timedFriendRead, respond func(*http.Request) *http.Response) FriendClient {
+	start := time.Now()
+	return FriendClient{Social: newTestSocialClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		reads <- timedFriendRead{req.URL.String(), time.Since(start)}
+		resp := respond(req)
+		resp.Request = req
+		return resp, nil
+	})})}
+}
+
+// assertFriendRateReads checks all requests since the previous assertion, including timing.
+func assertFriendRateReads(t *testing.T, reads <-chan timedFriendRead, at time.Duration, urls ...string) {
+	t.Helper()
+	for _, url := range urls {
+		select {
+		case got := <-reads:
+			if got.url != url || got.at != at {
+				t.Fatalf("request = %+v, want %s at %s", got, url, at)
+			}
+		default:
+			t.Fatalf("missing request %s at %s", url, at)
+		}
+	}
+	select {
+	case extra := <-reads:
+		t.Fatalf("unexpected request %+v", extra)
+	default:
+	}
+}
+
 type syncFriendClient struct {
 	people []Person
 	accept func(context.Context) ([]Person, error)
@@ -359,48 +662,12 @@ func (c *syncFriendClient) RemoveFriend(ctx context.Context, xuid string) error 
 	return nil
 }
 
-type notifierFunc func(context.Context, string) error
-
-func (f notifierFunc) Notify(ctx context.Context, message string) error {
-	return f(ctx, message)
-}
-
-type syncHistoryStore struct {
-	lastSeen map[string]time.Time
-}
-
-func (s *syncHistoryStore) LastSeen(_ context.Context, xuid string) (time.Time, bool, error) {
-	when, ok := s.lastSeen[xuid]
-	return when, ok, nil
-}
-
-func (s *syncHistoryStore) Seen(_ context.Context, xuid string, when time.Time) error {
-	if s.lastSeen == nil {
-		s.lastSeen = map[string]time.Time{}
-	}
-	s.lastSeen[xuid] = when
-	return nil
-}
-
-func (s *syncHistoryStore) Clear(_ context.Context, xuid string) error {
-	delete(s.lastSeen, xuid)
-	return nil
-}
-
-func (s *syncHistoryStore) XUIDs(context.Context) ([]string, error) {
-	xuids := make([]string, 0, len(s.lastSeen))
-	for xuid := range s.lastSeen {
-		xuids = append(xuids, xuid)
-	}
-	return xuids, nil
-}
-
 type fakeSyncInviter struct {
 	invite func(string)
 	err    error
 }
 
-func (f fakeSyncInviter) Invite(_ context.Context, xuid, _ string) error {
+func (f fakeSyncInviter) Invite(_ context.Context, xuid string) error {
 	if f.invite != nil {
 		f.invite(xuid)
 	}

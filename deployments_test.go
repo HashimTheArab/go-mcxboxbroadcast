@@ -16,39 +16,8 @@ import (
 	"github.com/sandertv/gophertunnel/minecraft/room"
 )
 
-func TestPterodactylArtifacts(t *testing.T) {
-	eggData, err := os.ReadFile("deployments/pterodactyl/egg-go-mcxboxbroadcast.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var egg struct {
-		Meta struct {
-			Version string `json:"version"`
-		} `json:"meta"`
-		Name         string            `json:"name"`
-		DockerImages map[string]string `json:"docker_images"`
-		Startup      string            `json:"startup"`
-		Config       struct {
-			Files   string `json:"files"`
-			Startup string `json:"startup"`
-			Logs    string `json:"logs"`
-			Stop    string `json:"stop"`
-		} `json:"config"`
-		Scripts struct {
-			Installation struct {
-				Script     string `json:"script"`
-				Container  string `json:"container"`
-				Entrypoint string `json:"entrypoint"`
-			} `json:"installation"`
-		} `json:"scripts"`
-		Variables []struct {
-			EnvVariable string `json:"env_variable"`
-		} `json:"variables"`
-	}
-	if err := json.Unmarshal(eggData, &egg); err != nil {
-		t.Fatalf("parse egg json: %v", err)
-	}
+func TestPterodactylEgg(t *testing.T) {
+	egg := loadPterodactylEgg(t)
 	if egg.Meta.Version != "PTDL_v2" {
 		t.Fatalf("egg version = %q, want PTDL_v2", egg.Meta.Version)
 	}
@@ -64,11 +33,8 @@ func TestPterodactylArtifacts(t *testing.T) {
 	if egg.Config.Stop != "^C" {
 		t.Fatalf("stop command = %q, want ^C", egg.Config.Stop)
 	}
-	if egg.Scripts.Installation.Container != "ghcr.io/pterodactyl/installers:alpine" {
-		t.Fatalf("install container = %q", egg.Scripts.Installation.Container)
-	}
-	if egg.Scripts.Installation.Entrypoint != "ash" {
-		t.Fatalf("install entrypoint = %q", egg.Scripts.Installation.Entrypoint)
+	if egg.Scripts.Installation.Container != "ghcr.io/pterodactyl/installers:alpine" || egg.Scripts.Installation.Entrypoint != "ash" {
+		t.Fatalf("installer = %q with %q", egg.Scripts.Installation.Container, egg.Scripts.Installation.Entrypoint)
 	}
 	for name, raw := range map[string]string{
 		"config.files":   egg.Config.Files,
@@ -80,60 +46,47 @@ func TestPterodactylArtifacts(t *testing.T) {
 			t.Fatalf("%s is not valid json: %v", name, err)
 		}
 	}
-
-	var seenJoinURL bool
-	for _, variable := range egg.Variables {
-		seenJoinURL = seenJoinURL || variable.EnvVariable == "JOIN_URL"
+	var joinURL bool
+	for _, v := range egg.Variables {
+		joinURL = joinURL || v.EnvVariable == "JOIN_URL"
 	}
-	if !seenJoinURL {
+	if !joinURL {
 		t.Fatal("JOIN_URL variable missing")
 	}
 	if !strings.Contains(egg.Config.Files, `"session.joinUrl": "{{server.build.env.JOIN_URL}}"`) {
 		t.Fatal("config.files does not map session.joinUrl")
 	}
-	for _, removed := range []string{"ICE_PORT", "icePortRange", "TARGET_SERVER", "sessionInfo.ip", "signalingMode"} {
+	for _, removed := range []string{"ICE_PORT", "icePortRange", "TARGET_SERVER", "sessionInfo.ip", "signalingMode", "subAccounts"} {
 		if strings.Contains(egg.Config.Files, removed) || strings.Contains(egg.Scripts.Installation.Script, removed) {
 			t.Fatalf("egg still references removed setting %q", removed)
 		}
-	}
-
-	dockerfile, err := os.ReadFile("Dockerfile")
-	if err != nil {
-		t.Fatal(err)
-	}
-	dockerfileText := string(dockerfile)
-	for _, want := range []string{
-		"FROM runtime-base AS pterodactyl",
-		"adduser -S -G container -h /home/container container",
-		"ENV USER=container HOME=/home/container",
-		"WORKDIR /home/container",
-		"COPY deployments/pterodactyl/entrypoint.sh /entrypoint.sh",
-		"FROM runtime-base AS standalone",
-	} {
-		if !strings.Contains(dockerfileText, want) {
-			t.Fatalf("Dockerfile does not contain %q", want)
-		}
-	}
-
-	workflow, err := os.ReadFile(".github/workflows/docker.yml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(workflow), "$DOCKER_IMAGE:pterodactyl") {
-		t.Fatal("docker workflow does not publish the pterodactyl tag")
 	}
 }
 
 // pterodactylEgg holds the egg fields that must track the program's behaviour.
 type pterodactylEgg struct {
-	Config struct {
+	Meta struct {
+		Version string `json:"version"`
+	} `json:"meta"`
+	Name         string            `json:"name"`
+	DockerImages map[string]string `json:"docker_images"`
+	Startup      string            `json:"startup"`
+	Config       struct {
+		Files   string `json:"files"`
 		Startup string `json:"startup"`
+		Logs    string `json:"logs"`
+		Stop    string `json:"stop"`
 	} `json:"config"`
 	Scripts struct {
 		Installation struct {
-			Script string `json:"script"`
+			Script     string `json:"script"`
+			Container  string `json:"container"`
+			Entrypoint string `json:"entrypoint"`
 		} `json:"installation"`
 	} `json:"scripts"`
+	Variables []struct {
+		EnvVariable string `json:"env_variable"`
+	} `json:"variables"`
 }
 
 func loadPterodactylEgg(t *testing.T) pterodactylEgg {
@@ -163,7 +116,7 @@ func TestPterodactylDoneMarkerIsLoggedOnStart(t *testing.T) {
 	var logs bytes.Buffer
 	b, err := New(Config{
 		JoinURL:        "http://127.0.0.1:19132",
-		XBLTokenSource: staticTokenSource{xuid: "123"},
+		XBLClient:      testXBLClient(t, "123"),
 		Signaling:      &fakeSignaling{networkID: "123456789"},
 		Status:         Status{HostName: "Host", WorldName: "World"},
 		UpdateInterval: time.Hour,

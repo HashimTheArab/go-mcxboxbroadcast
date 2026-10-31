@@ -21,25 +21,23 @@ import (
 
 var defaultRoomStatus = room.DefaultStatus()
 
-func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
-	ownerID, err := b.primaryXUIDForStatus(ctx)
-	if err != nil {
-		return room.Status{}, err
-	}
+// status returns the room status to announce; a failed target query falls back to earlier data.
+func (b *Broadcaster) status(ctx context.Context) room.Status {
+	ownerID := b.xuid()
 	if b.conf.StatusProvider != nil {
-		return b.advertise(normalizeStatusWithOwner(b.conf.StatusProvider.RoomStatus(), ownerID)), nil
+		return b.advertise(normalizeStatusWithOwner(b.conf.StatusProvider.RoomStatus(), ownerID))
 	}
 	st := b.conf.Status
 	if st.QueryTarget {
-		b.debug("querying target server status", "target", b.conf.JoinURL, "web_fallback", st.WebQueryFallback, "query_fallback", st.QueryFallback)
-		if queried, err := queryStatusWithFallback(ctx, QueryOptions{
+		b.log.Debug("querying target server status", "target", b.conf.JoinURL, "web_fallback", st.WebQueryFallback, "query_fallback", st.QueryFallback)
+		if queried, err := queryStatusWithFallback(ctx, queryOptions{
 			JoinURL:            b.conf.JoinURL,
 			Timeout:            st.QueryTimeout,
 			WebFallbackEnabled: st.WebQueryFallback,
-			Client:             st.WebQueryClient,
-			ClientInfo:         endpoint.ClientInfo{Version: b.advertisedVersion(), Protocol: int(b.advertisedProtocol()), Platform: relayClientPlatform},
+			Client:             b.conf.HTTPClient,
+			ClientInfo:         b.clientInfo(),
 		}); err == nil {
-			b.debug("queried target server status",
+			b.log.Debug("queried target server status",
 				"server_name", queried.ServerName,
 				"server_sub_name", queried.ServerSubName,
 				"players", queried.PlayerCount,
@@ -50,10 +48,10 @@ func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 		} else if !st.QueryFallback && b.lastQuery != nil {
 			// Keep the last successful query result instead of failing the
 			// whole update; configFallback: true resets to configured values.
-			b.debug("target server status query failed; keeping last successful query result", "err", err)
+			b.log.Debug("target server status query failed; keeping last successful query result", "err", err)
 			applyQueriedStatus(&st, *b.lastQuery)
 		} else {
-			b.debug("target server status query failed; using configured status fallback", "err", err)
+			b.log.Debug("target server status query failed; using configured status fallback", "err", err)
 		}
 	}
 
@@ -73,7 +71,7 @@ func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 		OnlineCrossPlatformGame: true,
 		CrossPlayDisabled:       false,
 		LevelID:                 defaultString(levelID(st.LevelID), accountLevelID(ownerID)),
-	})), nil
+	}))
 }
 
 // advertise sets the one version/protocol pair the session advertises.
@@ -93,6 +91,11 @@ func (b *Broadcaster) advertisedProtocol() int32 {
 	return protocol.CurrentProtocol
 }
 
+// clientInfo identifies the broadcaster to the target's HTTP signaling as a client of the advertised version.
+func (b *Broadcaster) clientInfo() endpoint.ClientInfo {
+	return endpoint.ClientInfo{Version: b.advertisedVersion(), Protocol: int(b.advertisedProtocol()), Platform: relayClientPlatform}
+}
+
 // applyQueriedStatus overlays a queried server status onto the announced one.
 func applyQueriedStatus(st *Status, queried minecraft.ServerStatus) {
 	st.WorldName = queried.ServerName
@@ -104,32 +107,10 @@ func applyQueriedStatus(st *Status, queried minecraft.ServerStatus) {
 // hostNameFallback returns the account gamertag for empty host names, matching
 // MCXboxBroadcast, with a static fallback when no profile is available.
 func (b *Broadcaster) hostNameFallback() string {
-	if gamertag := clientGamertag(b.conf.XBLClient, b.xblClient); gamertag != "" {
+	if gamertag := b.conf.XBLClient.UserInfo().GamerTag; gamertag != "" {
 		return gamertag
 	}
 	return "MCXboxBroadcast"
-}
-
-func (b *Broadcaster) primaryXUIDForStatus(ctx context.Context) (string, error) {
-	if xuid := b.primaryXUID(); xuid != "" {
-		return xuid, nil
-	}
-	if b.conf.XBLTokenSource == nil {
-		return "", nil
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	token, err := b.conf.XBLTokenSource.XSTSToken(ctx, xboxLiveRelyingParty)
-	if err != nil {
-		return "", fmt.Errorf("resolve xbox live xuid: %w", err)
-	}
-	if token == nil {
-		return "", fmt.Errorf("resolve xbox live xuid: token source returned nil XSTS token")
-	}
-	xuid := token.UserInfo().XUID
-	b.conf.XUID = xuid
-	return xuid, nil
 }
 
 func normalizeStatusWithOwner(status room.Status, ownerID string) room.Status {
@@ -198,7 +179,7 @@ func accountLevelID(xuid string) string {
 	return base64.StdEncoding.EncodeToString(buf[:])
 }
 
-type QueryOptions struct {
+type queryOptions struct {
 	JoinURL            string
 	Timeout            time.Duration
 	WebFallbackEnabled bool
@@ -207,7 +188,7 @@ type QueryOptions struct {
 	ClientInfo endpoint.ClientInfo
 }
 
-func queryStatusWithFallback(ctx context.Context, options QueryOptions) (minecraft.ServerStatus, error) {
+func queryStatusWithFallback(ctx context.Context, options queryOptions) (minecraft.ServerStatus, error) {
 	status, err := queryStatus(ctx, options)
 	if err == nil || !options.WebFallbackEnabled {
 		return status, err
@@ -215,7 +196,7 @@ func queryStatusWithFallback(ctx context.Context, options QueryOptions) (minecra
 	return webQueryStatus(ctx, options)
 }
 
-func webQueryStatus(ctx context.Context, options QueryOptions) (minecraft.ServerStatus, error) {
+func webQueryStatus(ctx context.Context, options queryOptions) (minecraft.ServerStatus, error) {
 	if options.Timeout == 0 {
 		options.Timeout = 5 * time.Second
 	}
@@ -272,7 +253,7 @@ func httpClient(c *http.Client) *http.Client {
 
 // queryStatus reads the status document the target serves on its HTTP
 // signaling endpoint, as the Java broadcaster does.
-func queryStatus(ctx context.Context, options QueryOptions) (minecraft.ServerStatus, error) {
+func queryStatus(ctx context.Context, options queryOptions) (minecraft.ServerStatus, error) {
 	timeout := options.Timeout
 	if timeout == 0 {
 		// MCXboxBroadcast pings with a 1500 ms timeout.

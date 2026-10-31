@@ -26,7 +26,8 @@ session:
     worldName: Minecraft World
     players: 0
     maxPlayers: 20
-    # Set both to advertise a version/protocol pair other than 1.26.60/2225.
+    # Unset, sessions advertise the version gophertunnel targets. Set both
+    # to advertise another pair, such as:
     # version: 1.26.60
     # protocol: 2225
 

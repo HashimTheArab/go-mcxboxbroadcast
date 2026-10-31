@@ -40,10 +40,11 @@ Configuration keys use the exact camelCase names shown in
 keys, including legacy kebab-case keys and `slack-webhook`, stop startup with an
 error naming the key. Older `configVersion`s are migrated and rewritten on load.
 
-Sessions advertise Minecraft 1.26.60 (protocol 2225), like MCXboxBroadcast.
-Xbox filters players by this pair before they join, so one bot serves one
-version. Set `session.sessionInfo.version` and `protocol` together to advertise
-another pair.
+Sessions advertise the Minecraft version and protocol of the bundled
+gophertunnel (`protocol.CurrentVersion` and `protocol.CurrentProtocol`). Xbox
+filters players by this pair before they join, so one bot serves one version.
+Set `session.sessionInfo.version` and `protocol` together to advertise another
+pair.
 
 Use `-debug` or set `debugMode: true` in the config to show detailed runtime
 events such as session creation, presence heartbeats, friend sync scans, pending
@@ -95,8 +96,8 @@ passed and every player has left it.
 Minecraft only lets friends join a session, so friend sync works with friends
 alone. `friendSync.autoFriend` accepts incoming friend requests, and requests
 from accounts whose restrictions prevent a friendship are declined. Expiry
-removes friends that have not joined within `friendSync.expiry.days`; the
-broadcaster's own accounts are never expired.
+removes friends that have not joined within `friendSync.expiry.days`; Xbox
+guest accounts are never expired.
 
 Xbox does not publish the friend limit, and it is above 1000. When a player's
 own friend list is full, Xbox refuses that one request; their request waits an
@@ -133,10 +134,10 @@ only on a network where just your scraper can reach it. It reports:
   the last answered check found the account's own session open and checks are
   still running. Xbox errors keep the last answer for up to 15 minutes. It is 0
   until a check first finds the session.
-- `mcxboxbroadcast_friends` and `mcxboxbroadcast_friend_limit`: the friend list
-  size, counted on the first friend sync and each expiry scan (or, with expiry
-  off, on the next friend sync once the count is 30 minutes old), and adjusted
-  for adds and removals in between. It is missing until friend sync first runs.
+- `mcxboxbroadcast_friends`: the friend list size, counted on the first friend
+  sync and each expiry scan (or, with expiry off, on the next friend sync once
+  the count is 30 minutes old), and adjusted for adds and removals in between.
+  It is missing until friend sync first runs.
 - `mcxboxbroadcast_friend_list_full`: 1 while Xbox refuses friend requests
   because the account's own list is full.
 - `mcxboxbroadcast_relayed_joins_total`: join offers relayed since start.
@@ -145,8 +146,8 @@ only on a network where just your scraper can reach it. It reports:
 
 Sessions use Xbox JSON-RPC signaling, the only signaling vanilla clients join
 through. Older configs that set `session.signalingMode` or list
-`accounts.subAccounts` load with those keys removed; only the primary account
-broadcasts.
+`accounts.subAccounts` load with those keys removed; only the account signed in
+at `accounts.primaryCachePath` broadcasts.
 
 ## Docker
 
@@ -194,51 +195,45 @@ enabled, the sign-in prompt is also sent to the configured webhook.
 
 ## Library
 
-Leave `Config.Signaling` unset to allow automatic primary-session recovery.
-Use `SignalingFactory` if you need custom signaling that can be recreated.
-Supplying a fixed `Config.Signaling` connection disables primary-session
-recreation; a missing activity advertisement then produces a logged error and
-webhook notification.
+Leave `Config.Signaling` unset to allow automatic session recovery. Use
+`SignalingFactory` if you need custom signaling that can be recreated.
+Supplying a fixed `Config.Signaling` connection disables session recreation; a
+missing activity advertisement then produces a logged error and webhook
+notification.
 
-`Broadcaster.Wait()` returns any terminal recovery error. Call `Close()` afterward
-to release resources. A normal shutdown returns no recovery error.
+`Config.XBLClient` is required. The broadcaster never closes it, so close it
+after `Close()`. `Broadcaster.Wait()` returns any terminal recovery error. Call
+`Close()` afterward to release resources. A normal shutdown returns no recovery
+error.
 
 ```go
-live := auth.RefreshTokenSourceWriter(cachedLiveToken, os.Stdout)
-xblSource := broadcaster.NewXBLTokenSource(ctx, live)
-xblClient, err := broadcaster.NewXSAPIClient(ctx, xblSource, http.DefaultClient, nil)
+live := broadcaster.NewLiveTokenSource(ctx, cachedLiveToken, os.Stdout, func(tok *oauth2.Token) {
+	_ = broadcaster.SaveLiveToken(cachePath, tok)
+})
+xblClient, err := broadcaster.NewXSAPIClient(ctx, broadcaster.NewXBLTokenSource(ctx, live), http.DefaultClient, nil)
 if err != nil {
-    return err
+	return err
 }
-minecraftTokens, err := broadcaster.NewMinecraftTokenSource(ctx, xblClient, http.DefaultClient)
-if err != nil {
-    return err
-}
+defer xblClient.Close()
 
 b, err := broadcaster.New(broadcaster.Config{
-    XBLClient:           xblClient,
-    XBLTokenSource:      xblSource,
-    XUID:                 xblClient.UserInfo().XUID,
-    MinecraftTokenSource: minecraftTokens,
-    JoinURL:              "https://play.example.net:19132",
-    HideOldSessions:      true,
-    Status: broadcaster.Status{
-        HostName:    "Example",
-        WorldName:   "Example World",
-        Players:     1,
-        MaxPlayers:  20,
-        QueryTarget: true,
-    },
-    Gallery: &broadcaster.GalleryConfig{
-        Enabled:   true,
-        ImagePath: "screenshot.jpg",
-    },
+	XBLClient:       xblClient,
+	JoinURL:         "https://play.example.net:19132",
+	HideOldSessions: true,
+	Status: broadcaster.Status{
+		HostName:    "Example",
+		WorldName:   "Example World",
+		Players:     1,
+		MaxPlayers:  20,
+		QueryTarget: true,
+	},
+	Gallery: &broadcaster.GalleryConfig{ImagePath: "screenshot.jpg"},
 })
 if err != nil {
-    return err
+	return err
 }
 if err := b.Start(ctx); err != nil {
-    return err
+	return err
 }
 runErr := b.Wait()
 closeErr := b.Close()
@@ -249,7 +244,7 @@ Contexts are accepted for start, update, signaling setup, announcement, and
 shutdown-sensitive operations.
 
 `Status.Version` and `Status.Protocol` override the advertised pair together;
-leave both empty for 1.26.60/2225.
+leave both empty for gophertunnel's current pair.
 
 ## Development
 

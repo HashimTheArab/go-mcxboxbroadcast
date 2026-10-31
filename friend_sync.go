@@ -3,7 +3,6 @@ package broadcaster
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -22,8 +21,9 @@ type FriendAPI interface {
 	RemoveFriend(ctx context.Context, xuid string) error
 }
 
+// Inviter sends a newly added friend a Minecraft game invite.
 type Inviter interface {
-	Invite(ctx context.Context, xuid, titleID string) error
+	Invite(ctx context.Context, xuid string) error
 }
 
 type HistoryStore interface {
@@ -59,7 +59,6 @@ type FriendSyncer struct {
 
 const (
 	friendListFullBackoff = time.Hour
-	friendSyncMinInterval = 20 * time.Second
 	// fullListPlayers is how many different players must be refused for a full list, with no
 	// accept since, before the bot treats its own list as full. One refusal is that player's list.
 	fullListPlayers = 2
@@ -184,7 +183,7 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 	if !expire {
 		return result, nil
 	}
-	s.debug(ctx, "friend expiry scan", "friends", fmt.Sprintf("%d/%d", len(friends), MaxFriends))
+	s.debug(ctx, "friend expiry scan", "friends", len(friends))
 	expired := 0
 	for _, p := range friends {
 		if err := ctx.Err(); err != nil {
@@ -317,7 +316,7 @@ func (s FriendSyncer) expire(ctx context.Context, p Person, result *friendSyncRe
 	}
 	expiryDays := s.Config.ExpiryDays
 	if expiryDays <= 0 {
-		expiryDays = 15
+		expiryDays = defaultFriendExpiryDays
 	}
 	if !lastSeen.Before(time.Now().Add(-time.Duration(expiryDays) * 24 * time.Hour)) {
 		return false
@@ -375,7 +374,7 @@ func (s FriendSyncer) pruneHistory(ctx context.Context, people []Person) {
 func (s FriendSyncer) sendInitialInvite(ctx context.Context, p Person, source string) {
 	s.debug(ctx, "sending initial invite", "xuid", p.XUID, "gamertag", p.Gamertag, "source", source)
 	operationCtx, cancel := xboxOperationContext(ctx)
-	err := s.Inviter.Invite(operationCtx, p.XUID, strconv.FormatInt(TitleID, 10))
+	err := s.Inviter.Invite(operationCtx, p.XUID)
 	cancel()
 	if err != nil {
 		if s.Log != nil {
@@ -422,7 +421,7 @@ func retryDelay(err error) time.Duration {
 			return responseErr.RetryAfter
 		}
 		if errors.Is(err, xblsocial.ErrRateLimited) {
-			return friendSyncMinInterval
+			return minUpdateInterval
 		}
 	}
 	return 0
@@ -430,8 +429,8 @@ func retryDelay(err error) time.Duration {
 
 // Run combines events, polling, and expiry into spaced sync passes.
 func (s FriendSyncer) Run(ctx context.Context) {
-	interval := max(s.Config.UpdateInterval, friendSyncMinInterval)
-	expiryInterval := max(s.Config.ExpiryCheck, friendSyncMinInterval)
+	interval := max(s.Config.UpdateInterval, minUpdateInterval)
+	expiryInterval := max(s.Config.ExpiryCheck, minUpdateInterval)
 	state := friendSyncRunState{}
 	nextPoll, nextExpiry := time.Now(), time.Now()
 	var nextScan time.Time
@@ -461,7 +460,7 @@ func (s FriendSyncer) Run(ctx context.Context) {
 		if pending && !now.Before(nextScan) {
 			retryAfter := s.runSync(ctx, &state, expire)
 			now = time.Now()
-			nextScan = now.Add(max(friendSyncMinInterval, retryAfter))
+			nextScan = now.Add(max(minUpdateInterval, retryAfter))
 			nextPoll = now.Add(interval)
 			pending = retryAfter > 0
 			if !pending {

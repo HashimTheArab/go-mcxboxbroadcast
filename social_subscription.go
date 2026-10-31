@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/df-mc/go-xsapi/v2"
 	xblsocial "github.com/df-mc/go-xsapi/v2/social"
 )
 
@@ -17,38 +16,12 @@ type socialSubscriber interface {
 	Subscribe(context.Context, xblsocial.SubscriptionHandler) (func(context.Context) error, error)
 }
 
-// reactiveFriendSyncApplicable reports whether an account with the given friend
-// sync configuration benefits from a reactive social subscription. Only
-// accepting friend requests acts on social changes, so a subscription is
-// pointless without it.
-func reactiveFriendSyncApplicable(conf *FriendSyncConfig) bool {
-	return conf != nil && conf.AutoFriend
-}
-
-// startSocialSubscription subscribes to the account's RTA social feed so friend
-// requests and relationship changes can be handled before the next poll.
-// It returns the syncer's trigger channel, or nil when no subscription is needed.
-func (b *Broadcaster) startSocialSubscription(client *xsapi.Client, conf *FriendSyncConfig, log *slog.Logger) <-chan struct{} {
-	if !hasSocialClient(client) || !reactiveFriendSyncApplicable(conf) {
-		return nil
-	}
-	return b.subscribeSocial(client.Social(), log)
-}
-
-// subscribeSocial subscribes sub to the social RTA feed and returns a trigger
-// channel that fires on each event. The subscription's lifetime is bound to the
-// broadcaster: a dedicated goroutine unsubscribes once the broadcaster's context
-// is canceled, and [Broadcaster.Close] waits for it via socialWg. This keeps a
-// caller-provided client (which the broadcaster does not close) from
-// accumulating stale handlers across broadcaster restarts.
-//
-// The subscription is best-effort: on a subscribe failure or a lost subscription
-// the periodic syncer remains the backstop, and the RTA connection re-subscribes
-// automatically after a transient drop.
-func (b *Broadcaster) subscribeSocial(sub socialSubscriber, log *slog.Logger) <-chan struct{} {
+// subscribeSocial returns a trigger that fires on each social RTA event. Close waits on socialWg
+// until the registration is released, so a caller's shared client keeps no stale handler.
+func (b *Broadcaster) subscribeSocial(sub socialSubscriber) <-chan struct{} {
 	// Buffered by one so bursts of events collapse into a single pending pass.
 	trigger := make(chan struct{}, 1)
-	handler := friendRequestSubscriptionHandler{trigger: trigger, log: log}
+	handler := friendRequestSubscriptionHandler{trigger: trigger, log: b.log}
 	b.socialWg.Add(1)
 	go func() {
 		defer b.socialWg.Done()
@@ -59,10 +32,10 @@ func (b *Broadcaster) subscribeSocial(sub socialSubscriber, log *slog.Logger) <-
 		unsubscribe, err := sub.Subscribe(ctx, handler)
 		cancel()
 		if err != nil {
-			log.Warn("subscribe to social rta feed; friend requests will be accepted on the sync interval", "err", err)
+			b.log.Warn("subscribe to social rta feed; friend requests will be accepted on the sync interval", "err", err)
 			return
 		}
-		log.Debug("subscribed to social rta feed for reactive friend sync")
+		b.log.Debug("subscribed to social rta feed for reactive friend sync")
 
 		<-b.ctx.Done()
 		// b.ctx is done, so use a fresh context to release the subscription.
@@ -71,7 +44,7 @@ func (b *Broadcaster) subscribeSocial(sub socialSubscriber, log *slog.Logger) <-
 		ctx, cancel = context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := unsubscribe(ctx); err != nil {
-			log.Debug("unsubscribe social rta feed", "err", err)
+			b.log.Debug("unsubscribe social rta feed", "err", err)
 		}
 	}()
 	return trigger

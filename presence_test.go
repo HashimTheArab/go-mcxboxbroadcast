@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -13,46 +12,44 @@ import (
 	"github.com/df-mc/go-xsapi/v2/xal/xsts"
 )
 
-func TestPresenceClientUpdatePostsActiveStateAndReturnsHeartbeat(t *testing.T) {
+func TestUpdatePresencePostsActiveStateAndReturnsHeartbeat(t *testing.T) {
 	var called bool
-	client := PresenceClient{
-		Presence: presence.New(testAuthenticatedClient("XBL3.0 x=user;token", roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			called = true
-			if req.Method != http.MethodPost {
-				t.Fatalf("unexpected method %s", req.Method)
-			}
-			if req.URL.String() != "https://userpresence.xboxlive.com/users/xuid(1)/devices/current/titles/current" {
-				t.Fatalf("unexpected URL %s", req.URL)
-			}
-			if req.Header.Get("Authorization") != "XBL3.0 x=user;token" {
-				t.Fatalf("unexpected authorization header %q", req.Header.Get("Authorization"))
-			}
-			if req.Header.Get("X-Xbl-Contract-Version") != "3" {
-				t.Fatalf("unexpected contract version %q", req.Header.Get("X-Xbl-Contract-Version"))
-			}
-			if req.Header.Get("Content-Type") != "application/json" {
-				t.Fatalf("unexpected content type %q", req.Header.Get("Content-Type"))
-			}
-			body, err := io.ReadAll(req.Body)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var payload struct {
-				State string `json:"state"`
-			}
-			if err := json.Unmarshal(body, &payload); err != nil {
-				t.Fatalf("decode body %q: %v", string(body), err)
-			}
-			if payload.State != "active" {
-				t.Fatalf("unexpected body state %q", payload.State)
-			}
-			resp := response(http.StatusOK, "")
-			resp.Header.Set("X-Heartbeat-After", "42")
-			return resp, nil
-		})), xsts.UserInfo{XUID: "1"}),
-	}
+	client := presence.New(testAuthenticatedClient("XBL3.0 x=user;token", roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		called = true
+		if req.Method != http.MethodPost {
+			t.Fatalf("unexpected method %s", req.Method)
+		}
+		if req.URL.String() != "https://userpresence.xboxlive.com/users/xuid(1)/devices/current/titles/current" {
+			t.Fatalf("unexpected URL %s", req.URL)
+		}
+		if req.Header.Get("Authorization") != "XBL3.0 x=user;token" {
+			t.Fatalf("unexpected authorization header %q", req.Header.Get("Authorization"))
+		}
+		if req.Header.Get("X-Xbl-Contract-Version") != "3" {
+			t.Fatalf("unexpected contract version %q", req.Header.Get("X-Xbl-Contract-Version"))
+		}
+		if req.Header.Get("Content-Type") != "application/json" {
+			t.Fatalf("unexpected content type %q", req.Header.Get("Content-Type"))
+		}
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload struct {
+			State string `json:"state"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("decode body %q: %v", string(body), err)
+		}
+		if payload.State != "active" {
+			t.Fatalf("unexpected body state %q", payload.State)
+		}
+		resp := response(http.StatusOK, "")
+		resp.Header.Set("X-Heartbeat-After", "42")
+		return resp, nil
+	})), xsts.UserInfo{XUID: "1"})
 
-	heartbeat, err := client.Update(context.Background())
+	heartbeat, err := updatePresence(context.Background(), client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,16 +61,14 @@ func TestPresenceClientUpdatePostsActiveStateAndReturnsHeartbeat(t *testing.T) {
 	}
 }
 
-func TestPresenceClientUpdateDefaultsHeartbeatWhenHeaderInvalid(t *testing.T) {
-	client := PresenceClient{
-		Presence: presence.New(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-			resp := response(http.StatusOK, "")
-			resp.Header.Set("X-Heartbeat-After", "bad")
-			return resp, nil
-		})}, xsts.UserInfo{XUID: "1"}),
-	}
+func TestUpdatePresenceDefaultsHeartbeatWhenHeaderInvalid(t *testing.T) {
+	client := presence.New(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		resp := response(http.StatusOK, "")
+		resp.Header.Set("X-Heartbeat-After", "bad")
+		return resp, nil
+	})}, xsts.UserInfo{XUID: "1"})
 
-	heartbeat, err := client.Update(context.Background())
+	heartbeat, err := updatePresence(context.Background(), client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,31 +77,20 @@ func TestPresenceClientUpdateDefaultsHeartbeatWhenHeaderInvalid(t *testing.T) {
 	}
 }
 
-func TestPresenceClientUpdateBoundsRequestContext(t *testing.T) {
-	client := PresenceClient{
-		Presence: presence.New(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			deadline, ok := req.Context().Deadline()
-			if !ok {
-				t.Fatal("presence request has no deadline")
-			}
-			remaining := time.Until(deadline)
-			if remaining <= 0 || remaining > 20*time.Second {
-				t.Fatalf("presence request deadline remaining = %s", remaining)
-			}
-			return response(http.StatusOK, ""), nil
-		})}, xsts.UserInfo{XUID: "1"}),
-	}
-	if _, err := client.Update(context.Background()); err != nil {
+func TestUpdatePresenceBoundsRequestContext(t *testing.T) {
+	client := presence.New(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		deadline, ok := req.Context().Deadline()
+		if !ok {
+			t.Fatal("presence request has no deadline")
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 || remaining > 20*time.Second {
+			t.Fatalf("presence request deadline remaining = %s", remaining)
+		}
+		return response(http.StatusOK, ""), nil
+	})}, xsts.UserInfo{XUID: "1"})
+	if _, err := updatePresence(context.Background(), client); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestPresenceClientUpdateRejectsNilClient(t *testing.T) {
-	client := PresenceClient{}
-
-	_, err := client.Update(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "presence client is nil") {
-		t.Fatalf("expected nil client error, got %v", err)
 	}
 }
 
@@ -119,12 +103,7 @@ func TestBroadcasterPresenceIsRemovedWhenOwnerCloses(t *testing.T) {
 		methods = append(methods, req.Method)
 		return response(http.StatusOK, ""), nil
 	})}, "100")
-	b := &Broadcaster{conf: Config{XBLClient: xbl}}
-	client, ok := b.presenceClient()
-	if !ok {
-		t.Fatal("no presence client for the account")
-	}
-	if _, err := client.Update(t.Context()); err != nil {
+	if _, err := updatePresence(t.Context(), xbl.Presence()); err != nil {
 		t.Fatal(err)
 	}
 	if err := xbl.CloseContext(t.Context()); err != nil {

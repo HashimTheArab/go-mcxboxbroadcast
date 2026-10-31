@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -21,10 +20,10 @@ func newTestSocialClient(client *http.Client) *xblsocial.Client {
 }
 
 func TestBroadcasterFriendClientUsesXSAPIOwnedSocialClient(t *testing.T) {
-	xbl := newTestXSAPIClient(t, &http.Client{}, "primary")
+	xbl := newTestXSAPIClient(t, &http.Client{}, "123")
 	b := &Broadcaster{conf: Config{XBLClient: xbl, HTTPClient: &http.Client{}}}
 
-	client := b.friendClientFor(xbl)
+	client := b.friendClient()
 	if client.Social == nil || client.Social != xbl.Social() {
 		t.Fatal("friend client did not use xsapi-owned social subclient")
 	}
@@ -251,7 +250,7 @@ func TestFriendClientFriendsReadsFriendList(t *testing.T) {
 	if got := strings.Join(requests, ","); got != peopleHubFriendsURL {
 		t.Fatalf("requests = %s, want %s", got, peopleHubFriendsURL)
 	}
-	if len(people) != 1 || people[0] != (Person{XUID: "1", Gamertag: "One", DisplayName: "Display"}) {
+	if len(people) != 1 || people[0] != (Person{XUID: "1", Gamertag: "One"}) {
 		t.Fatalf("people = %#v", people)
 	}
 }
@@ -287,35 +286,5 @@ func TestFriendClientAcceptPendingFriendRequestsSkipsGuests(t *testing.T) {
 	accepted, err := client.AcceptPendingFriendRequests(context.Background())
 	if err != nil || len(accepted) != 0 {
 		t.Fatalf("accepted = %#v, err = %v", accepted, err)
-	}
-}
-
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
-	return f(req)
-}
-
-func testAuthenticatedClient(auth string, next http.RoundTripper) *http.Client {
-	return &http.Client{Transport: authenticatedTestTransport{auth: auth, next: next}}
-}
-
-type authenticatedTestTransport struct {
-	auth string
-	next http.RoundTripper
-}
-
-func (t authenticatedTestTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	req = req.Clone(req.Context())
-	req.Header.Set("Authorization", t.auth)
-	return t.next.RoundTrip(req)
-}
-
-func response(code int, body string) *http.Response {
-	return &http.Response{
-		StatusCode: code,
-		Status:     http.StatusText(code),
-		Body:       io.NopCloser(strings.NewReader(body)),
-		Header:     make(http.Header),
 	}
 }

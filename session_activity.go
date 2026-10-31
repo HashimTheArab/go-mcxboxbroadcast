@@ -39,9 +39,8 @@ func (b *Broadcaster) publishedActivity() (publishedActivity, bool) {
 	if !b.started || b.recovering {
 		return publishedActivity{}, false
 	}
-	xuid := b.primaryXUID()
 	xbl, ok := xblAnnouncer(b.announcer)
-	if !ok || xuid == "" {
+	if !ok {
 		return publishedActivity{}, false
 	}
 	xbl.Lock()
@@ -49,12 +48,12 @@ func (b *Broadcaster) publishedActivity() (publishedActivity, bool) {
 	if xbl.Client == nil || xbl.SessionReference.Name == "" {
 		return publishedActivity{}, false
 	}
-	return publishedActivity{xuid: xuid, ref: xbl.SessionReference, announcer: xbl, session: xbl.Session, client: xbl.Client}, true
+	return publishedActivity{xuid: b.xuid(), ref: xbl.SessionReference, announcer: xbl, session: xbl.Session, client: xbl.Client}, true
 }
 
-// primaryActivityCurrentLocked reports whether activity still identifies the
-// primary publication. The caller must hold b.mu so Update cannot replace it.
-func (b *Broadcaster) primaryActivityCurrentLocked(activity *publishedActivity) bool {
+// activityCurrentLocked reports whether activity still identifies the current
+// publication. The caller must hold b.mu so Update cannot replace it.
+func (b *Broadcaster) activityCurrentLocked(activity *publishedActivity) bool {
 	if activity == nil {
 		return true
 	}
@@ -67,12 +66,12 @@ func (b *Broadcaster) primaryActivityCurrentLocked(activity *publishedActivity) 
 	return xbl.Session == activity.session && xbl.SessionReference == activity.ref
 }
 
-// primaryActivityCurrent reports whether activity still identifies the primary
+// activityCurrent reports whether activity still identifies the current
 // publication without holding the broadcaster lock during later network work.
-func (b *Broadcaster) primaryActivityCurrent(activity *publishedActivity) bool {
+func (b *Broadcaster) activityCurrent(activity *publishedActivity) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.primaryActivityCurrentLocked(activity)
+	return b.activityCurrentLocked(activity)
 }
 
 // activityHealthIssue checks the account's own directory handle. This detects lost
@@ -111,7 +110,7 @@ func (b *Broadcaster) activityHealthIssue(state *activityObservation, now time.T
 	case err != nil || found:
 		state.misses = 0
 		if err != nil && b.ctx.Err() == nil {
-			b.debug("check published activity", "err", err)
+			b.log.Debug("check published activity", "err", err)
 		}
 	case settling || now.Before(state.recoverAfter):
 		// Misses count only after the grace period and the recovery cooldown.

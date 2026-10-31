@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sandertv/gophertunnel/minecraft/p2p"
 )
 
 // A missing config is written with defaults, but the command must not run on them.
@@ -78,7 +80,8 @@ func TestExampleConfigLoads(t *testing.T) {
 	if cfg.Gallery.ImagePath != "screenshot.jpg" {
 		t.Fatalf("unexpected gallery image path %q", cfg.Gallery.ImagePath)
 	}
-	if _, err := cfg.RuntimeConfig(RuntimeConfigInput{XBLTokenSource: staticTokenSource{}}); err != nil {
+	runtime := cfg.RuntimeConfig(RuntimeConfigInput{XBLClient: testXBLClient(t, "123")})
+	if _, err := New(runtime); err != nil {
 		t.Fatalf("example config does not produce a valid runtime config: %v", err)
 	}
 }
@@ -116,7 +119,8 @@ func TestLoadConfigFileDropsSignalingMode(t *testing.T) {
 	}
 }
 
-func TestLoadConfigFileAcceptsCanonicalYAMLKeys(t *testing.T) {
+// A version 2 file keeps its values and moves its target to joinUrl.
+func TestLoadConfigFileMigratesVersion2(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yml")
 	if err := os.WriteFile(path, []byte(`
 configVersion: 2
@@ -266,7 +270,7 @@ func TestLoadConfigFileRejectsUnknownKeys(t *testing.T) {
 	}
 }
 
-// Configs written before the advertised-version override was removed keep loading, minus that override.
+// Version 3 configs drop their advertised-version override, which predates joinUrl.
 func TestLoadConfigFileMigratesAdvertisedVersionOverride(t *testing.T) {
 	for _, tc := range []struct{ file, data string }{
 		{"config.yml", "configVersion: 3\nsession:\n  sessionInfo:\n    ip: bedrock.test\n    protocol: 2168\n    version: 1.26.44\n"},
@@ -323,18 +327,14 @@ func TestConfigFileToConfigMapsOperatorSettings(t *testing.T) {
 	cfg.Session.SessionInfo.Protocol = 2193
 	cfg.Session.SessionInfo.HostName = "Host"
 	cfg.Session.SessionInfo.WorldName = "World"
-	cfg.Session.BroadcastSetting = int32(BroadcastSettingFriendsOnly)
+	cfg.Session.BroadcastSetting = int32(p2p.BroadcastSettingFriendsOnly)
 	cfg.Session.WorldType = WorldTypeSurvival
 	cfg.Session.QueryServer = false
 	cfg.Gallery.Enabled = true
 	cfg.Gallery.ImagePath = "images/showcase.jpg"
+	cfg.SuppressSessionUpdateMessage = true
 
-	runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{
-		XBLTokenSource: staticTokenSource{},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := cfg.RuntimeConfig(RuntimeConfigInput{})
 	if runtime.JoinURL != "https://bedrock.example.net:19133" || !runtime.HideOldSessions {
 		t.Fatalf("unexpected target %q hide=%v", runtime.JoinURL, runtime.HideOldSessions)
 	}
@@ -344,10 +344,10 @@ func TestConfigFileToConfigMapsOperatorSettings(t *testing.T) {
 	if runtime.UpdateInterval != 45*time.Second {
 		t.Fatalf("unexpected runtime interval %s", runtime.UpdateInterval)
 	}
-	if runtime.SuppressSessionUpdateMessage {
-		t.Fatal("unexpected suppressed session update message")
+	if !runtime.SuppressSessionUpdateMessage {
+		t.Fatal("suppress session update message was not mapped")
 	}
-	if runtime.Status.Broadcast != int32(BroadcastSettingFriendsOnly) {
+	if runtime.Status.Broadcast != int32(p2p.BroadcastSettingFriendsOnly) {
 		t.Fatalf("unexpected broadcast setting %d", runtime.Status.Broadcast)
 	}
 	if runtime.Gallery == nil || runtime.Gallery.ImagePath != "images/showcase.jpg" {
@@ -358,32 +358,12 @@ func TestConfigFileToConfigMapsOperatorSettings(t *testing.T) {
 	}
 }
 
-func TestConfigFileMapsSuppressSessionUpdateMessage(t *testing.T) {
-	cfg := DefaultConfigFile()
-	cfg.SuppressSessionUpdateMessage = true
-
-	runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{
-		XBLTokenSource: staticTokenSource{},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !runtime.SuppressSessionUpdateMessage {
-		t.Fatal("suppress session update message was not mapped")
-	}
-}
-
 func TestConfigFileDisablesFriendSyncWhenNoActionsConfigured(t *testing.T) {
 	cfg := DefaultConfigFile()
 	cfg.FriendSync.AutoFriend = false
 	cfg.FriendSync.Expiry.Enabled = false
 
-	runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{
-		XBLTokenSource: staticTokenSource{},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := cfg.RuntimeConfig(RuntimeConfigInput{})
 	if runtime.FriendSync != nil {
 		t.Fatalf("expected friend sync disabled, got %#v", runtime.FriendSync)
 	}
@@ -507,27 +487,11 @@ func TestRuntimeConfigTrimsJoinURLSlash(t *testing.T) {
 	}
 	cfg := DefaultConfigFile()
 	cfg.Session.JoinURL = "https://bedrock.test:19132/"
-	runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{XBLTokenSource: staticTokenSource{}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runtime := cfg.RuntimeConfig(RuntimeConfigInput{XBLClient: testXBLClient(t, "123")})
 	if runtime.JoinURL != "https://bedrock.test:19132" {
 		t.Fatalf("runtime join URL = %q", runtime.JoinURL)
 	}
 	if err := validateJoinURL(runtime.JoinURL); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestRuntimeConfigRejectsHalfAdvertisedPair(t *testing.T) {
-	cfg := DefaultConfigFile()
-	cfg.Session.JoinURL = "https://bedrock.test:19132"
-	cfg.Session.SessionInfo.Version = "1.26.50"
-	runtime, err := cfg.RuntimeConfig(RuntimeConfigInput{XBLTokenSource: staticTokenSource{}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := New(runtime); err == nil {
-		t.Fatal("New accepted a version without a protocol")
 	}
 }

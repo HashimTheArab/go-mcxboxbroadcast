@@ -1,11 +1,16 @@
 package main
 
 import (
+	"bytes"
+	"io"
+	"log/slog"
+	"net/http"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/HashimTheArab/go-mcxboxbroadcast"
+	broadcaster "github.com/HashimTheArab/go-mcxboxbroadcast"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
@@ -15,9 +20,6 @@ func TestHealthCollectorExportsAccount(t *testing.T) {
 	health := broadcaster.Health{XUID: "1", Gamertag: "Bot", Version: "1.26.60", Protocol: 2225, Advertised: true, CheckedAt: now, AttemptedAt: now, RelayedJoins: 7}
 	collector := healthCollector{now: func() time.Time { return now }, health: func() broadcaster.Health { return health }}
 	header := `
-# HELP mcxboxbroadcast_friend_limit Xbox friend list limit.
-# TYPE mcxboxbroadcast_friend_limit gauge
-mcxboxbroadcast_friend_limit{gamertag="Bot",xuid="1"} 1000
 # HELP mcxboxbroadcast_friend_list_full 1 while Xbox refuses the account's friend requests because its own list is full.
 # TYPE mcxboxbroadcast_friend_list_full gauge
 mcxboxbroadcast_friend_list_full{gamertag="Bot",xuid="1"} 0
@@ -43,5 +45,36 @@ mcxboxbroadcast_friends{gamertag="Bot",xuid="1"} 812
 	health = broadcaster.Health{}
 	if n := testutil.CollectAndCount(collector); n != 0 {
 		t.Fatalf("metrics before identity = %d, want 0", n)
+	}
+}
+
+// serveMetrics answers scrapes on its address and fails at once when the address is taken.
+func TestServeMetrics(t *testing.T) {
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	health := func() broadcaster.Health { return broadcaster.Health{XUID: "1", Gamertag: "Bot", RelayedJoins: 3} }
+	stop, err := serveMetrics(t.Context(), "127.0.0.1:0", health, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	addr := regexp.MustCompile(`addr=(\S+)`).FindStringSubmatch(logs.String())
+	if addr == nil {
+		t.Fatalf("listen address not logged: %s", logs.String())
+	}
+	resp, err := http.Get("http://" + addr[1] + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `mcxboxbroadcast_relayed_joins_total{gamertag="Bot",xuid="1"} 3`) {
+		t.Fatalf("GET /metrics = %s:\n%s", resp.Status, body)
+	}
+	if _, err := serveMetrics(t.Context(), addr[1], health, log); err == nil {
+		t.Fatal("serveMetrics bound an address already in use")
 	}
 }

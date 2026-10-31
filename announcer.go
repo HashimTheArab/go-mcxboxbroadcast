@@ -12,11 +12,133 @@ import (
 	"strings"
 	"time"
 
+	"github.com/df-mc/go-nethernet"
 	"github.com/df-mc/go-xsapi/v2/mpsd"
 	"github.com/google/uuid"
 	"github.com/sandertv/gophertunnel/minecraft/p2p"
 	"github.com/sandertv/gophertunnel/minecraft/room"
 )
+
+// newAnnouncer creates the MPSD session announcer; an empty name picks a random one.
+func (b *Broadcaster) newAnnouncer(name string) room.Announcer {
+	if b.announcerFactory != nil {
+		return b.announcerFactory(b)
+	}
+	ref := mpsd.SessionReference{
+		ServiceConfigID: serviceConfigUUID,
+		TemplateName:    TemplateName,
+		Name:            name,
+	}
+	if ref.Name == "" {
+		ref.Name = strings.ToUpper(uuid.NewString())
+	}
+	pub := b.conf.PublishConfig
+	b.log.Debug("configured xbox live session",
+		"service_config_id", ref.ServiceConfigID.String(),
+		"template", ref.TemplateName,
+		"session_name", ref.Name,
+		"join_restriction", defaultString(pub.JoinRestriction, mpsd.SessionRestrictionFollowed),
+		"read_restriction", defaultString(pub.ReadRestriction, mpsd.SessionRestrictionFollowed),
+		"xuid", b.xuid(),
+	)
+	return newSessionNonceAnnouncer(&room.XBLAnnouncer{
+		Client:           b.conf.XBLClient.MPSD(),
+		SessionReference: ref,
+		PublishConfig:    pub,
+	}, b.xuid(), b.log, b.membersChanged)
+}
+
+// wrapAnnouncer applies logging and the shared signaling connection to a
+// freshly created announcer.
+func (b *Broadcaster) wrapAnnouncer(announcer room.Announcer) room.Announcer {
+	announcer = loggingAnnouncer{Announcer: announcer, log: b.log}
+	if b.sessionConnection != nil {
+		announcer = signalingConnectionAnnouncer{Announcer: announcer, connection: *b.sessionConnection}
+	}
+	return announcer
+}
+
+// loggingAnnouncer wraps an announcer with debug-level status logging.
+type loggingAnnouncer struct {
+	room.Announcer
+	log *slog.Logger
+}
+
+// Announce logs the status at debug level before delegating to the wrapped announcer.
+func (a loggingAnnouncer) Announce(ctx context.Context, status room.Status) error {
+	debugRoomStatus(a.log, "publishing xbox live session status", status)
+	return a.Announcer.Announce(ctx, status)
+}
+
+type signalingConnectionAnnouncer struct {
+	room.Announcer
+	connection p2p.Connection
+}
+
+func (a signalingConnectionAnnouncer) Announce(ctx context.Context, status room.Status) error {
+	// The session document must advertise exactly the shared signaling
+	// connection clients can join through; any caller-provided connections are
+	// deliberately replaced.
+	status.SupportedConnections = []p2p.Connection{a.connection}
+	return a.Announcer.Announce(ctx, status)
+}
+
+// signalingConnection builds the MPSD connection entry that advertises sig's
+// JSON-RPC identity.
+func (b *Broadcaster) signalingConnection(sig nethernet.Signaling) (*p2p.Connection, error) {
+	if sig == nil {
+		return nil, errors.New("signaling connection: signaling is nil")
+	}
+	if strings.TrimSpace(sig.NetworkID()) == "" {
+		return nil, errors.New("signaling connection: nethernet id is empty")
+	}
+	jsonRPCSignaling, ok := sig.(p2p.JSONRPCSignaling)
+	if !ok {
+		return nil, fmt.Errorf("signaling %T does not expose its player messaging identity", sig)
+	}
+	connection, err := p2p.NewJSONRPCConnection(jsonRPCSignaling)
+	if err != nil {
+		return nil, fmt.Errorf("validate signaling connection: %w", err)
+	}
+	return &connection, nil
+}
+
+// xblAnnouncer unwraps announcer wrappers to find the underlying XBLAnnouncer.
+func xblAnnouncer(announcer room.Announcer) (*room.XBLAnnouncer, bool) {
+	switch a := unwrapAnnouncer(announcer).(type) {
+	case *room.XBLAnnouncer:
+		return a, true
+	case *sessionNonceAnnouncer:
+		return a.XBLAnnouncer, true
+	default:
+		return nil, false
+	}
+}
+
+// unwrapAnnouncer strips the broadcaster's logging and connection wrappers.
+func unwrapAnnouncer(announcer room.Announcer) room.Announcer {
+	for {
+		switch a := announcer.(type) {
+		case loggingAnnouncer:
+			announcer = a.Announcer
+		case signalingConnectionAnnouncer:
+			announcer = a.Announcer
+		default:
+			return announcer
+		}
+	}
+}
+
+// sessionHider is implemented by announcers whose session can be made invite-only.
+type sessionHider interface {
+	hide(ctx context.Context) error
+}
+
+// memberCounter is implemented by announcers that publish an MPSD session.
+type memberCounter interface {
+	// memberCount is zero for a lost session, whose MPSD context has ended.
+	memberCount() (count int, published, lost bool)
+}
 
 type sessionNonceAnnouncer struct {
 	*room.XBLAnnouncer
@@ -44,17 +166,17 @@ func newSessionNonceAnnouncer(announcer *room.XBLAnnouncer, ownerXUID string, lo
 	}
 }
 
-func (a *sessionNonceAnnouncer) memberCount() (int, bool) {
+func (a *sessionNonceAnnouncer) memberCount() (count int, published, lost bool) {
 	a.Lock()
 	session := a.Session
 	a.Unlock()
 	if session == nil {
-		return 0, false
+		return 0, false, false
 	}
 	if session.Context().Err() != nil {
-		return 0, true
+		return 0, true, true
 	}
-	return sessionMemberCount(session), true
+	return sessionMemberCount(session), true, false
 }
 
 // hide makes the published session invite-only so its members no longer
@@ -104,7 +226,7 @@ func (a *sessionNonceAnnouncer) Announce(ctx context.Context, status room.Status
 	restrictionsChanged := read != a.readRestriction || join != a.joinRestriction
 	if a.Session != nil && restrictionsChanged {
 		if a.Client == nil {
-			return errors.New("room: XBLAnnouncer.Client is nil and MPSD restrictions changed")
+			return errors.New("republish session: mpsd client is nil")
 		}
 		if err := a.Session.CloseContext(ctx); err != nil {
 			return fmt.Errorf("close stale session: %w", err)
@@ -120,16 +242,7 @@ func (a *sessionNonceAnnouncer) Announce(ctx context.Context, status room.Status
 
 	if a.Session == nil {
 		if a.Client == nil {
-			return errors.New("room: XBLAnnouncer.Client is nil")
-		}
-		if a.SessionReference.ServiceConfigID == uuid.Nil {
-			a.SessionReference.ServiceConfigID = uuid.MustParse("4fc10100-5f7a-4470-899b-280835760c07")
-		}
-		if a.SessionReference.TemplateName == "" {
-			a.SessionReference.TemplateName = "MinecraftLobby"
-		}
-		if a.SessionReference.Name == "" {
-			a.SessionReference.Name = strings.ToUpper(uuid.NewString())
+			return errors.New("publish session: mpsd client is nil")
 		}
 		session, err := a.Client.Publish(ctx, a.SessionReference, config)
 		if err != nil {
@@ -144,7 +257,7 @@ func (a *sessionNonceAnnouncer) Announce(ctx context.Context, status room.Status
 	a.readRestriction = read
 	a.joinRestriction = join
 	a.handleSessionLocked()
-	a.debug("published mpsd session nonces", "nonce_count", len(a.nonces))
+	a.log.Debug("published mpsd session nonces", "nonce_count", len(a.nonces))
 	return nil
 }
 
@@ -216,18 +329,8 @@ func (a *sessionNonceAnnouncer) updateNonces(ctx context.Context, session *mpsd.
 		return fmt.Errorf("set custom properties: %w", err)
 	}
 	a.custom = custom
-	a.debug(
-		"updated mpsd session nonces",
-		"nonce_count", len(a.nonces),
-		"active_member_count", len(activeXUIDs),
-	)
+	a.log.Debug("updated mpsd session nonces", "nonce_count", len(a.nonces), "active_member_count", len(activeXUIDs))
 	return nil
-}
-
-func (a *sessionNonceAnnouncer) debug(msg string, args ...any) {
-	if a.log != nil {
-		a.log.Debug(msg, args...)
-	}
 }
 
 type sessionNonceHandler struct {
@@ -235,15 +338,11 @@ type sessionNonceHandler struct {
 }
 
 func (h sessionNonceHandler) HandleSessionChange(session *mpsd.Session) {
-	if h.announcer.membersChanged != nil {
-		h.announcer.membersChanged(sessionMemberCount(session))
-	}
+	h.announcer.membersChanged(sessionMemberCount(session))
 	ctx, cancel := context.WithTimeout(session.Context(), 15*time.Second)
 	defer cancel()
 	if err := h.announcer.updateNoncesFromSession(ctx, session); err != nil {
-		if h.announcer.log != nil {
-			h.announcer.log.Error("update mpsd session nonces", "err", err)
-		}
+		h.announcer.log.Error("update mpsd session nonces", "err", err)
 	}
 }
 
@@ -263,12 +362,6 @@ func sessionMemberXUIDs(session *mpsd.Session) []string {
 }
 
 func syncSessionNonces(nonces map[string]string, activeXUIDs []string, ownerXUID string, generate func() (string, error)) (bool, error) {
-	if nonces == nil {
-		return false, errors.New("nonces map is nil")
-	}
-	if generate == nil {
-		generate = generateSessionNonce
-	}
 	ownerXUID = strings.TrimSpace(ownerXUID)
 	active := make(map[string]struct{}, len(activeXUIDs))
 	for _, xuid := range activeXUIDs {
@@ -336,4 +429,77 @@ func copyStringMap(m map[string]string) map[string]string {
 		cp[k] = v
 	}
 	return cp
+}
+
+func sessionMemberCount(session *mpsd.Session) int {
+	count := 0
+	for range session.Members() {
+		count++
+	}
+	return count
+}
+
+// debugRoomStatus logs the room status at debug level using the given logger.
+func debugRoomStatus(log *slog.Logger, msg string, status room.Status) {
+	if !log.Enabled(context.Background(), slog.LevelDebug) {
+		return
+	}
+	log.Debug(msg, roomStatusLogArgs(status)...)
+}
+
+// roomStatusLogArgs builds slog key-value args from a room status.
+func roomStatusLogArgs(status room.Status) []any {
+	return []any{
+		"host_name", status.HostName,
+		"world_name", status.WorldName,
+		"world_type", status.WorldType,
+		"owner_id", status.OwnerID,
+		"owner_id_set", status.OwnerID != "",
+		"member_count", status.MemberCount,
+		"max_member_count", status.MaxMemberCount,
+		"broadcast_setting", status.BroadcastSetting,
+		"joinability", status.Joinability,
+		"protocol", status.Protocol,
+		"version", status.Version,
+		"title_id", status.TitleID,
+		"transport_layer", status.TransportLayer,
+		"lan_game", status.LanGame,
+		"online_cross_platform_game", status.OnlineCrossPlatformGame,
+		"cross_play_disabled", status.CrossPlayDisabled,
+		"level_id_set", status.LevelID != "",
+		"level_id_len", len(status.LevelID),
+		"supported_connection_count", len(status.SupportedConnections),
+		"supported_connections", roomConnectionLogValues(status.SupportedConnections),
+	}
+}
+
+// roomConnectionLogValue is a loggable representation of a room connection.
+type roomConnectionLogValue struct {
+	ConnectionType int
+	HostIPAddress  string
+	HostPort       uint16
+	NetherNetID    string
+	NetherNetIDSet bool
+	RakNetGUIDSet  bool
+	PmsgID         string
+	PmsgIDSet      bool
+}
+
+// roomConnectionLogValues converts room connections to loggable values.
+func roomConnectionLogValues(connections []p2p.Connection) []roomConnectionLogValue {
+	values := make([]roomConnectionLogValue, 0, len(connections))
+	for _, connection := range connections {
+		netherNetID := string(connection.NetherNetID)
+		values = append(values, roomConnectionLogValue{
+			ConnectionType: connection.Type,
+			HostIPAddress:  connection.HostIPAddress,
+			HostPort:       connection.HostPort,
+			NetherNetID:    netherNetID,
+			NetherNetIDSet: netherNetID != "" && netherNetID != "0",
+			RakNetGUIDSet:  connection.RakNetGUID != "",
+			PmsgID:         connection.PlayerMessagingID.String(),
+			PmsgIDSet:      connection.PlayerMessagingID != uuid.Nil,
+		})
+	}
+	return values
 }

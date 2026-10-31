@@ -4,8 +4,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/df-mc/go-xsapi/v2"
 )
 
 // friendCountRefresh re-lists friends when expiry is off, so removals by other players are seen.
@@ -53,17 +51,6 @@ func (b *Broadcaster) Health() Health {
 	health.Version, health.Protocol = b.advertisedVersion(), b.advertisedProtocol()
 	health.RelayedJoins = b.health.joins.Load()
 	return health
-}
-
-func clientGamertag(clients ...*xsapi.Client) string {
-	for _, client := range clients {
-		if client != nil {
-			if gamertag := client.UserInfo().GamerTag; gamertag != "" {
-				return gamertag
-			}
-		}
-	}
-	return ""
 }
 
 // healthState collects what Health reports, apart from config-derived fields.

@@ -3,163 +3,29 @@ package broadcaster
 import (
 	"bytes"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"errors"
-	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"github.com/df-mc/go-nethernet"
-	"github.com/df-mc/go-xsapi/v2"
 	"github.com/df-mc/go-xsapi/v2/mpsd"
-	"github.com/df-mc/go-xsapi/v2/xal/xasd"
-	"github.com/df-mc/go-xsapi/v2/xal/xasu"
-	"github.com/df-mc/go-xsapi/v2/xal/xsts"
 	"github.com/google/uuid"
 	"github.com/sandertv/gophertunnel/minecraft/p2p"
 	"github.com/sandertv/gophertunnel/minecraft/room"
+	"github.com/sandertv/gophertunnel/minecraft/service"
 )
 
-// broadcasterTokenSource supplies deterministic credentials to test clients.
-type broadcasterTokenSource struct {
-	xuid string
-	key  *ecdsa.PrivateKey
-}
-
-// XSTSToken returns the account identity used by the test transport.
-func (s broadcasterTokenSource) XSTSToken(context.Context, string) (*xsts.Token, error) {
-	return &xsts.Token{
-		Token: "token",
-		DisplayClaims: xsts.DisplayClaims{UserInfo: []xsts.UserInfo{{
-			UserInfo: xasu.UserInfo{UserHash: "uhs"},
-			XUID:     s.xuid,
-		}}},
-	}, nil
-}
-
-// DeviceToken rejects unexpected device authentication during a test.
-func (broadcasterTokenSource) DeviceToken(context.Context) (*xasd.Token, error) {
-	return nil, errors.New("unexpected device token request")
-}
-
-// ProofKey returns the key used to sign test requests.
-func (s broadcasterTokenSource) ProofKey() *ecdsa.PrivateKey {
-	return s.key
-}
-
-// newTestXSAPIClient constructs real API subclients with a stubbed title configuration.
-func newTestXSAPIClient(t *testing.T, client *http.Client, xuid string) *xsapi.Client {
-	t.Helper()
-	base := client.Transport
-	if base == nil {
-		base = http.DefaultTransport
-	}
-	configured := *client
-	configured.Transport = broadcasterRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if req.URL.Host == "title.mgt.xboxlive.com" {
-			return broadcasterResponse(http.StatusOK, `{"EndPoints":[{"Protocol":"https","Host":"peoplehub.xboxlive.com","HostType":"fqdn","RelyingParty":"http://xboxlive.com","TokenType":"JWT"},{"Protocol":"https","Host":"social.xboxlive.com","HostType":"fqdn","RelyingParty":"http://xboxlive.com","TokenType":"JWT"},{"Protocol":"https","Host":"userpresence.xboxlive.com","HostType":"fqdn","RelyingParty":"http://xboxlive.com","TokenType":"JWT"}]}`), nil
-		}
-		return base.RoundTrip(req)
-	})
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate proof key: %v", err)
-	}
-	xbl, err := (xsapi.ClientConfig{HTTPClient: &configured, RTAMode: xsapi.RTADisabled}).New(t.Context(), broadcasterTokenSource{xuid: xuid, key: key})
-	if err != nil {
-		t.Fatalf("create xsapi client: %v", err)
-	}
-	return xbl
-}
-
-func TestBroadcasterClearCreatedXBLClientReferences(t *testing.T) {
-	primary := &xsapi.Client{}
-	tokens := staticMinecraftTokenSource{}
-	b := &Broadcaster{
-		xblClient:         primary,
-		minecraftTokens:   tokens,
-		createdXBLClients: []*xsapi.Client{primary},
-		conf: Config{
-			XBLClient:            primary,
-			MinecraftTokenSource: tokens,
-		},
-	}
-
-	b.clearCreatedXBLClientReferences(createdXBLClientSet(b.createdXBLClients))
-
-	if b.xblClient != nil {
-		t.Fatal("created primary client cache was not cleared")
-	}
-	if b.conf.XBLClient != nil {
-		t.Fatal("created primary config client was not cleared")
-	}
-	if b.minecraftTokens != nil || b.conf.MinecraftTokenSource != nil {
-		t.Fatal("minecraft token source derived from created primary client was not cleared")
-	}
-}
-
-func TestXBLAnnouncerUnwrapsDiagnosticsWrappers(t *testing.T) {
-	inner := &room.XBLAnnouncer{}
-	wrapped := signalingConnectionAnnouncer{
-		Announcer: loggingAnnouncer{Announcer: inner},
-		connection: p2p.Connection{
-			Type: p2p.ConnectionTypeSignalingOverJSONRPC,
-		},
-	}
-	got, ok := xblAnnouncer(wrapped)
-	if !ok {
-		t.Fatal("xbl announcer was not found")
-	}
-	if got != inner {
-		t.Fatal("unexpected xbl announcer")
-	}
-}
-
 func TestBroadcasterInviteRequiresActiveBroadcaster(t *testing.T) {
-	// Keep the public API Minecraft-specific: callers provide only the XUID,
-	// while Broadcaster supplies the package's title ID.
-	var invite func(*Broadcaster, context.Context, string) error = (*Broadcaster).Invite
-
-	b := &Broadcaster{
-		announcer: &room.XBLAnnouncer{Session: &mpsd.Session{}},
-	}
-	err := invite(b, context.Background(), "456")
+	var b Inviter = &Broadcaster{announcer: &room.XBLAnnouncer{Session: &mpsd.Session{}}}
+	err := b.Invite(context.Background(), "456")
 	if err == nil || !strings.Contains(err.Error(), "broadcaster not started") {
 		t.Fatalf("Invite error = %v, want broadcaster-not-started error", err)
-	}
-}
-
-func TestBroadcasterBuildsJSONRPCSignalingConnection(t *testing.T) {
-	pmid := uuid.MustParse("11111111-2222-3333-4444-555555555555")
-	b := &Broadcaster{}
-	connection, err := b.signalingConnection(&fakeSignaling{networkID: "123456789", pmid: pmid})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if connection.Type != p2p.ConnectionTypeSignalingOverJSONRPC || connection.NetherNetID != "123456789" || connection.PlayerMessagingID != pmid {
-		t.Fatalf("JSON-RPC connection = %#v", connection)
-	}
-}
-
-func TestBroadcasterRejectsInvalidNetworkID(t *testing.T) {
-	t.Parallel()
-
-	for _, networkID := range []string{"0", "01"} {
-		networkID := networkID
-		t.Run(networkID, func(t *testing.T) {
-			t.Parallel()
-			b := &Broadcaster{}
-			if _, err := b.signalingConnection(&fakeSignaling{networkID: networkID}); err == nil {
-				t.Fatalf("signalingConnection() accepted network ID %q", networkID)
-			}
-		})
 	}
 }
 
@@ -170,9 +36,9 @@ func TestBroadcasterUpdateLogsUpdatedSession(t *testing.T) {
 		announcer: &fakeAnnouncer{},
 		started:   true,
 		conf: Config{
-			JoinURL: "http://127.0.0.1:19132",
-			XUID:    "123",
-			Status:  Status{HostName: "Host", WorldName: "World"},
+			JoinURL:   "http://127.0.0.1:19132",
+			XBLClient: testXBLClient(t, "123"),
+			Status:    Status{HostName: "Host", WorldName: "World"},
 		},
 	}
 
@@ -188,9 +54,10 @@ func TestBroadcasterSignalingFactoryIsUsedOnceForSharedSignaling(t *testing.T) {
 	var calls int
 	sig := &fakeSignaling{networkID: "123456789"}
 	b := &Broadcaster{
+		log: testBroadcasterLogger(),
 		conf: Config{
 			JoinURL:              "http://127.0.0.1:19132",
-			XUID:                 "123",
+			XBLClient:            testXBLClient(t, "123"),
 			MinecraftTokenSource: minecraftTokenSourceWithPMID{pmid: uuid.New()},
 			Status:               Status{HostName: "Host", WorldName: "World"},
 			UpdateInterval:       30 * time.Second,
@@ -217,196 +84,283 @@ func TestBroadcasterSignalingFactoryIsUsedOnceForSharedSignaling(t *testing.T) {
 	}
 }
 
-func TestRetryWithBackoffSkipsOnErrorAfterContextCanceled(t *testing.T) {
-	t.Parallel()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	var onErrCalls int
-	err := retryWithBackoff(ctx, time.Millisecond, time.Millisecond, sessionRecoveryAttempts, func() error {
-		return errors.New("broadcaster is shut down")
-	}, func(error, time.Duration) {
-		onErrCalls++
-	})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("retryWithBackoff error = %v, want context.Canceled", err)
-	}
-	if onErrCalls != 0 {
-		t.Fatalf("onError called %d times after context cancel, want 0", onErrCalls)
-	}
-}
-
-type cancelableSignaling struct {
-	ctx       context.Context
-	networkID string
-}
-
-func (s *cancelableSignaling) Signal(context.Context, *nethernet.Signal) error { return nil }
-func (s *cancelableSignaling) Notify(nethernet.Notifier) func() {
-	return func() {}
-}
-func (s *cancelableSignaling) Context() context.Context { return s.ctx }
-func (s *cancelableSignaling) Credentials(context.Context) (*nethernet.Credentials, error) {
-	return nil, nil
-}
-func (s *cancelableSignaling) NetworkID() string { return s.networkID }
-func (s *cancelableSignaling) PongData([]byte)   {}
-
-// PlayerMessagingID returns the shared fake Player Messaging identity.
-func (s *cancelableSignaling) PlayerMessagingID() uuid.UUID { return fakePlayerMessagingID }
-
-type broadcasterRoundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f broadcasterRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
-	return f(req)
-}
-
-func broadcasterResponse(code int, body string) *http.Response {
-	return &http.Response{
-		StatusCode: code,
-		Status:     http.StatusText(code),
-		Body:       io.NopCloser(strings.NewReader(body)),
-		Header:     make(http.Header),
+func TestWaitConcurrentWithStart(t *testing.T) {
+	startErr := errors.New("signaling startup failed")
+	for range 100 {
+		b := &Broadcaster{
+			log: testBroadcasterLogger(),
+			conf: Config{SignalingFactory: func(context.Context, Config) (nethernet.Signaling, error) {
+				return nil, startErr
+			}},
+		}
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			if err := b.Start(t.Context()); !errors.Is(err, startErr) {
+				t.Errorf("Start() = %v, want startup failure", err)
+			}
+		})
+		wg.Go(func() {
+			if err := b.Wait(); err != nil {
+				t.Errorf("Wait() = %v, want no runtime recovery failure", err)
+			}
+		})
+		wg.Wait()
 	}
 }
 
-func testBroadcasterLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
-
-// Thresholds match MCXboxBroadcast: rotate at 28 of 30 members, retire after 30 s.
-func TestRotationThresholdsMatchJava(t *testing.T) {
-	if sessionRotateMembers != 28 || sessionRotateGrace != 30*time.Second {
-		t.Fatalf("rotate at %d members after %s, want 28 and 30s", sessionRotateMembers, sessionRotateGrace)
-	}
-	b := &Broadcaster{healthCheck: make(chan struct{}, 1)}
-	b.membersChanged(sessionRotateMembers - 1)
-	select {
-	case <-b.healthCheck:
-		t.Fatal("health check requested below the rotation threshold")
-	default:
-	}
-	b.membersChanged(sessionRotateMembers)
-	b.membersChanged(sessionRotateMembers + 1) // must not block on a pending request
-	select {
-	case <-b.healthCheck:
-	default:
-		t.Fatal("no health check requested at the rotation threshold")
+// A version without a protocol from the config file is rejected before anything is advertised.
+func TestNewRejectsHalfAdvertisedPair(t *testing.T) {
+	cfg := DefaultConfigFile()
+	cfg.Session.JoinURL = "https://bedrock.test:19132"
+	cfg.Session.SessionInfo.Version = "1.26.50"
+	if _, err := New(cfg.RuntimeConfig(RuntimeConfigInput{XBLClient: testXBLClient(t, "123")})); err == nil {
+		t.Fatal("New accepted a version without a protocol")
 	}
 }
 
-// Rotation publishes a new session on the same signaling and keeps the old one,
-// hiding it only after the grace period when configured.
-func TestRotateSessionRetiresOldSession(t *testing.T) {
-	for _, hide := range []bool{true, false} {
-		t.Run(fmt.Sprintf("hide=%v", hide), func(t *testing.T) {
+func TestStartAdvertisesJSONRPCForInjectedSignaling(t *testing.T) {
+	sig := &fakeSignaling{networkID: "123456789"}
+	announcer := &fakeAnnouncer{}
+	b := &Broadcaster{
+		log: testBroadcasterLogger(),
+		conf: Config{
+			JoinURL:        "http://127.0.0.1:19132",
+			XBLClient:      testXBLClient(t, "123"),
+			Signaling:      sig,
+			Status:         Status{HostName: "Host", WorldName: "World"},
+			UpdateInterval: 30 * time.Second,
+		},
+		announcerFactory: func(*Broadcaster) room.Announcer {
+			return announcer
+		},
+	}
+
+	if err := b.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+
+	status := announcer.Status()
+	if len(status.SupportedConnections) != 1 {
+		t.Fatalf("unexpected connections: %#v", status.SupportedConnections)
+	}
+	got := status.SupportedConnections[0]
+	if got.Type != p2p.ConnectionTypeSignalingOverJSONRPC {
+		t.Fatalf("connection type = %d, want %d", got.Type, p2p.ConnectionTypeSignalingOverJSONRPC)
+	}
+	if got.NetherNetID != p2p.NetherNetID("123456789") {
+		t.Fatalf("nethernet id = %q", got.NetherNetID)
+	}
+	if got.PlayerMessagingID != fakePlayerMessagingID {
+		t.Fatalf("pmsg id = %s, want %s", got.PlayerMessagingID, fakePlayerMessagingID)
+	}
+	if status.OwnerID != "123" {
+		t.Fatalf("owner id = %q", status.OwnerID)
+	}
+	if status.TransportLayer != p2p.TransportLayerNetherNet {
+		t.Fatalf("transport layer = %d", status.TransportLayer)
+	}
+	if status.TitleID != 0 {
+		t.Fatalf("title id = %d", status.TitleID)
+	}
+}
+
+func TestStartAdvertisesOpaqueNetherNetID(t *testing.T) {
+	pmsgID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
+	networkID := uuid.MustParse("11111111-2222-3333-4444-555555555555").String()
+	sig := &fakeSignaling{networkID: networkID}
+	announcer := &fakeAnnouncer{}
+	b := &Broadcaster{
+		log: testBroadcasterLogger(),
+		conf: Config{
+			JoinURL:              "http://127.0.0.1:19132",
+			XBLClient:            testXBLClient(t, "123"),
+			Signaling:            sig,
+			MinecraftTokenSource: minecraftTokenSourceWithPMID{pmid: pmsgID},
+			Status:               Status{HostName: "Host", WorldName: "World"},
+			UpdateInterval:       30 * time.Second,
+		},
+		announcerFactory: func(*Broadcaster) room.Announcer {
+			return announcer
+		},
+	}
+
+	if err := b.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+
+	status := announcer.Status()
+	if len(status.SupportedConnections) != 1 {
+		t.Fatalf("unexpected connections: %#v", status.SupportedConnections)
+	}
+	if got := status.SupportedConnections[0].NetherNetID; got != p2p.NetherNetID(networkID) {
+		t.Fatalf("nethernet id = %q, want %q", got, networkID)
+	}
+}
+
+// Signaling startup, including creating the Minecraft token source, gives up at the dial timeout.
+func TestStartTimesOutDefaultSignalingDial(t *testing.T) {
+	for name, tokens := range map[string]service.TokenSource{
+		"dial":         minecraftTokenSourceWithPMID{pmid: uuid.New()},
+		"token source": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				old := &hidingAnnouncer{}
-				next := &hidingAnnouncer{}
-				b := &Broadcaster{
-					log:     testBroadcasterLogger(),
-					started: true,
-					conf: Config{
-						XUID:            "123",
-						Status:          Status{HostName: "Host"},
-						HideOldSessions: hide,
-					},
-					announcerFactory: func(*Broadcaster) room.Announcer { return next },
-				}
-				b.ctx, b.cancel = context.WithCancel(t.Context())
-				defer b.cancel()
-				b.sessionConnection = &p2p.Connection{Type: p2p.ConnectionTypeSignalingOverJSONRPC, NetherNetID: "123456789", PlayerMessagingID: fakePlayerMessagingID}
-				b.announcer = b.wrapAnnouncer(old, b.log)
-
-				if err := b.rotateSession(t.Context()); err != nil {
+				var requests atomic.Int32
+				b, err := New(Config{
+					JoinURL:              "http://127.0.0.1:19132",
+					XBLClient:            testXBLClient(t, "123"),
+					MinecraftTokenSource: tokens,
+					HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+						requests.Add(1)
+						<-req.Context().Done()
+						return nil, req.Context().Err()
+					})},
+					Log: testBroadcasterLogger(),
+				})
+				if err != nil {
 					t.Fatal(err)
 				}
-				if unwrapAnnouncer(b.announcer) != next || next.Status().HostName != "Host" {
-					t.Fatal("rotation did not publish the new session")
+				start := time.Now()
+				if err := b.Start(t.Context()); !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("Start() error = %v, want context deadline exceeded", err)
 				}
-				if got := next.Status().SupportedConnections; len(got) != 1 || got[0].NetherNetID != "123456789" {
-					t.Fatalf("new session advertises %+v, want the same signaling connection", got)
+				if elapsed := time.Since(start); elapsed != defaultSignalingDialTimeout || requests.Load() == 0 {
+					t.Fatalf("gave up after %v and %d requests, want %v after a blocked request", elapsed, requests.Load(), defaultSignalingDialTimeout)
 				}
-				if old.Closed() || len(b.retiredSessions) != 1 {
-					t.Fatal("old session was closed instead of kept for its members")
-				}
-				time.Sleep(sessionRotateGrace - time.Nanosecond)
+				// Service discovery keeps retrying in a detached goroutine; let it give up.
+				time.Sleep(time.Hour)
 				synctest.Wait()
-				if old.hidden() {
-					t.Fatal("old session hidden before the grace period ended")
-				}
-				time.Sleep(time.Nanosecond)
-				synctest.Wait()
-				if old.hidden() != hide {
-					t.Fatalf("old session hidden = %v, want %v", old.hidden(), hide)
-				}
-				if err := b.cleanupPublishedSessions(true); err != nil {
-					t.Fatal(err)
-				}
-				if !old.Closed() || len(b.retiredSessions) != 0 {
-					t.Fatal("shutdown left a retired session open")
-				}
 			})
 		})
 	}
 }
 
-// A retired session is closed only once its grace period has passed and only the bot remains.
-func TestCloseDrainedSessionsKeepsPlayersAndGracePeriod(t *testing.T) {
+func TestSignalingStartupHTTPClientBoundsTimeout(t *testing.T) {
+	base := &http.Client{}
+	got := signalingStartupHTTPClient(base, 2*time.Second)
+	if got == base {
+		t.Fatal("expected a cloned client when adding a timeout")
+	}
+	if got.Timeout != 2*time.Second {
+		t.Fatalf("timeout = %s, want 2s", got.Timeout)
+	}
+	if base.Timeout != 0 {
+		t.Fatalf("base client was mutated: timeout = %s", base.Timeout)
+	}
+
+	existing := &http.Client{Timeout: time.Second}
+	if got := signalingStartupHTTPClient(existing, 2*time.Second); got != existing {
+		t.Fatal("expected existing tighter timeout to be reused")
+	}
+}
+
+func TestStartupFailureCleanupClosesSignaling(t *testing.T) {
+	sig := &fakeSignaling{}
+	b := &Broadcaster{signaling: sig}
+	if err := b.releaseSessions(); err != nil {
+		t.Fatal(err)
+	}
+	if !sig.closed.Load() {
+		t.Fatal("signaling was not closed")
+	}
+}
+
+func TestStartCleansUpWhenAnnounceFails(t *testing.T) {
+	announceErr := errors.New("announce failed")
+	sig := &fakeSignaling{}
+	announcer := &fakeAnnouncer{announceErr: announceErr}
+	b := &Broadcaster{
+		log: testBroadcasterLogger(),
+		conf: Config{
+			JoinURL:        "http://127.0.0.1:19132",
+			XBLClient:      testXBLClient(t, "123"),
+			Signaling:      sig,
+			StatusProvider: room.NewStatusProvider(room.Status{HostName: "Host", WorldName: "World"}),
+		},
+		announcerFactory: func(*Broadcaster) room.Announcer { return announcer },
+	}
+	if err := b.Start(context.Background()); !errors.Is(err, announceErr) {
+		t.Fatalf("Start() error = %v, want announce error", err)
+	}
+	if !announcer.Closed() || !sig.closed.Load() {
+		t.Fatalf("announcer closed = %v, signaling closed = %v, want both", announcer.Closed(), sig.closed.Load())
+	}
+}
+
+// A session whose close fails stays queued so a later Update retries it instead of leaving it advertised.
+func TestCleanupKeepsSessionWhoseCloseFailed(t *testing.T) {
+	failing := &fakeAnnouncer{closeErr: errors.New("mpsd unavailable")}
+	b := &Broadcaster{announcer: failing, log: testBroadcasterLogger()}
+	if err := b.cleanupPublishedSessions(); err == nil {
+		t.Fatal("cleanup hid the failed close")
+	}
+	if b.announcer != nil || len(b.staleAnnouncers) != 1 || b.staleAnnouncers[0] != failing {
+		t.Fatalf("announcer=%v stale=%v, want the failed session queued for retry", b.announcer, b.staleAnnouncers)
+	}
+	failing.closeErr = nil
+	b.closeStaleSessions()
+	if len(b.staleAnnouncers) != 0 {
+		t.Fatal("retry did not close the stale session")
+	}
+}
+
+// Close waits for goroutines that still use XBLClient, because the caller closes it right after.
+func TestCloseWaitsForWorkers(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		playing := &hidingAnnouncer{members: 5}
-		drained := &hidingAnnouncer{members: 1}
-		unpublished := &hidingAnnouncer{members: -1}
-		b := &Broadcaster{log: testBroadcasterLogger()}
-		for _, a := range []*hidingAnnouncer{playing, drained, unpublished} {
-			b.retire(b.wrapAnnouncer(a, b.log), b.log)
+		ctx, cancel := context.WithCancel(t.Context())
+		b := &Broadcaster{started: true, ctx: ctx, cancel: cancel, log: testBroadcasterLogger()}
+		var finished atomic.Bool
+		b.spawn(func() {
+			<-ctx.Done()
+			time.Sleep(time.Second)
+			finished.Store(true)
+		})
+		if err := b.Close(); err != nil {
+			t.Fatal(err)
 		}
-		time.Sleep(sessionRotateGrace - time.Nanosecond)
-		b.closeDrainedSessions()
-		if drained.Closed() || len(b.retiredSessions) != 3 {
-			t.Fatal("drained session closed during its grace period")
-		}
-		time.Sleep(time.Nanosecond)
-		b.closeDrainedSessions()
-		if !drained.Closed() || playing.Closed() || unpublished.Closed() || len(b.retiredSessions) != 2 {
-			t.Fatalf("closed playing=%v drained=%v unpublished=%v, want only the drained session", playing.Closed(), drained.Closed(), unpublished.Closed())
-		}
-		playing.setMembers(1)
-		b.closeDrainedSessions()
-		if !playing.Closed() || len(b.retiredSessions) != 1 {
-			t.Fatal("session was not closed after its players left")
+		if !finished.Load() {
+			t.Fatal("Close returned while a worker was still using the client")
 		}
 	})
 }
 
-// hidingAnnouncer records when a retired session is made invite-only.
-type hidingAnnouncer struct {
-	fakeAnnouncer
-	hid     bool
-	members int // negative means unpublished
+// A worker that ignores cancellation must not stop Close from returning, or the supervisor never restarts the process.
+func TestCloseBoundsWaitForStuckWorker(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		b := &Broadcaster{started: true, ctx: ctx, cancel: cancel, log: testBroadcasterLogger()}
+		stuck := make(chan struct{})
+		b.spawn(func() { <-stuck })
+		start := time.Now()
+		if err := b.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if waited := time.Since(start); waited != closeWorkersTimeout {
+			t.Fatalf("Close waited %v, want %v", waited, closeWorkersTimeout)
+		}
+		close(stuck)
+	})
 }
 
-func (a *hidingAnnouncer) memberCount() (int, bool) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.members, a.members >= 0
-}
-
-func (a *hidingAnnouncer) setMembers(n int) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.members = n
-}
-
-func (a *hidingAnnouncer) hide(context.Context) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.hid = true
-	return nil
-}
-
-func (a *hidingAnnouncer) hidden() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.hid
+// The signaling factory gets its own config copy, so a gallery upload storing a token source does not race recovery.
+func TestSignalingFactoryDoesNotRaceTokenStore(t *testing.T) {
+	var got service.TokenSource
+	b := &Broadcaster{log: testBroadcasterLogger()}
+	b.conf.SignalingFactory = func(_ context.Context, conf Config) (nethernet.Signaling, error) {
+		got = conf.MinecraftTokenSource
+		return nil, errors.New("no signaling")
+	}
+	stored := minecraftTokenSourceWithPMID{pmid: uuid.New()}
+	done := make(chan struct{})
+	go func() {
+		b.storeMinecraftTokens(stored)
+		close(done)
+	}()
+	_, _ = b.signalingFor(t.Context())
+	<-done
+	if _, err := b.signalingFor(t.Context()); err == nil || got != stored {
+		t.Fatalf("factory got %v, want the stored token source", got)
+	}
 }

@@ -8,7 +8,28 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"time"
 )
+
+type Notifier interface {
+	Notify(ctx context.Context, message string) error
+}
+
+// notify sends message to the configured notifier, if any. A spent ctx, such as an expired
+// upload deadline or a stopped broadcaster, must not drop the message.
+func (b *Broadcaster) notify(ctx context.Context, message string) {
+	if b.conf.Notifier == nil {
+		return
+	}
+	if ctx.Err() != nil {
+		ctx = context.WithoutCancel(ctx)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if err := b.conf.Notifier.Notify(ctx, message); err != nil {
+		b.log.Error("send notification", "err", err)
+	}
+}
 
 type SlackNotifier struct {
 	WebhookURL string

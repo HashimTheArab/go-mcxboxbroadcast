@@ -14,6 +14,78 @@ import (
 	"github.com/sandertv/gophertunnel/minecraft/room"
 )
 
+func TestXBLAnnouncerUnwrapsDiagnosticsWrappers(t *testing.T) {
+	inner := &room.XBLAnnouncer{}
+	wrapped := signalingConnectionAnnouncer{
+		Announcer: loggingAnnouncer{Announcer: inner},
+		connection: p2p.Connection{
+			Type: p2p.ConnectionTypeSignalingOverJSONRPC,
+		},
+	}
+	got, ok := xblAnnouncer(wrapped)
+	if !ok {
+		t.Fatal("xbl announcer was not found")
+	}
+	if got != inner {
+		t.Fatal("unexpected xbl announcer")
+	}
+}
+
+func TestBroadcasterBuildsJSONRPCSignalingConnection(t *testing.T) {
+	pmid := uuid.MustParse("11111111-2222-3333-4444-555555555555")
+	b := &Broadcaster{}
+	connection, err := b.signalingConnection(&fakeSignaling{networkID: "123456789", pmid: pmid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if connection.Type != p2p.ConnectionTypeSignalingOverJSONRPC || connection.NetherNetID != "123456789" || connection.PlayerMessagingID != pmid {
+		t.Fatalf("JSON-RPC connection = %#v", connection)
+	}
+}
+
+func TestBroadcasterRejectsInvalidNetworkID(t *testing.T) {
+	t.Parallel()
+
+	for _, networkID := range []string{"0", "01"} {
+		t.Run(networkID, func(t *testing.T) {
+			t.Parallel()
+			b := &Broadcaster{}
+			if _, err := b.signalingConnection(&fakeSignaling{networkID: networkID}); err == nil {
+				t.Fatalf("signalingConnection() accepted network ID %q", networkID)
+			}
+		})
+	}
+}
+
+func TestSignalingConnectionAnnouncerReplacesConnections(t *testing.T) {
+	inner := &fakeAnnouncer{}
+	announcer := signalingConnectionAnnouncer{
+		Announcer: inner,
+		connection: p2p.Connection{
+			Type:              p2p.ConnectionTypeSignalingOverJSONRPC,
+			NetherNetID:       p2p.NetherNetID("123456789"),
+			PlayerMessagingID: fakePlayerMessagingID,
+		},
+	}
+
+	err := announcer.Announce(context.Background(), room.Status{
+		SupportedConnections: []p2p.Connection{{
+			Type:        99,
+			NetherNetID: p2p.NetherNetID("old"),
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := inner.Status()
+	if len(status.SupportedConnections) != 1 {
+		t.Fatalf("unexpected connections: %#v", status.SupportedConnections)
+	}
+	if got := status.SupportedConnections[0]; got != announcer.connection {
+		t.Fatalf("connection = %+v, want %+v", got, announcer.connection)
+	}
+}
+
 func TestMarshalStatusWithNoncesIncludesJavaSessionFields(t *testing.T) {
 	custom, err := marshalStatusWithNonces(room.Status{
 		HostName:       "Host",
@@ -146,7 +218,7 @@ func TestSyncSessionNoncesMatchesActiveMembers(t *testing.T) {
 
 func TestSessionNonceAnnouncerUpdateNoncesWritesCustomProperties(t *testing.T) {
 	session := &mpsd.Session{}
-	announcer := newSessionNonceAnnouncer(&room.XBLAnnouncer{Session: session}, "100", nil, nil)
+	announcer := newSessionNonceAnnouncer(&room.XBLAnnouncer{Session: session}, "100", testBroadcasterLogger(), func(int) {})
 	announcer.lastStatus = room.Status{
 		OwnerID:   "100",
 		WorldName: "World",
@@ -196,7 +268,7 @@ func TestSessionNonceAnnouncerUpdateNoncesWritesCustomProperties(t *testing.T) {
 
 func TestSessionNonceAnnouncerRepublishClearsNonceState(t *testing.T) {
 	session := &mpsd.Session{}
-	announcer := newSessionNonceAnnouncer(&room.XBLAnnouncer{Session: session}, "100", nil, nil)
+	announcer := newSessionNonceAnnouncer(&room.XBLAnnouncer{Session: session}, "100", testBroadcasterLogger(), func(int) {})
 	announcer.Session = session
 	announcer.handledSession = session
 	announcer.custom = []byte("cached")
@@ -239,7 +311,7 @@ func TestSessionNonceAnnouncerDoesNotNoOpWithoutSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	announcer := newSessionNonceAnnouncer(&room.XBLAnnouncer{}, "100", nil, nil)
+	announcer := newSessionNonceAnnouncer(&room.XBLAnnouncer{}, "100", testBroadcasterLogger(), func(int) {})
 	announcer.custom = custom
 	announcer.readRestriction = mpsd.SessionRestrictionFollowed
 	announcer.joinRestriction = mpsd.SessionRestrictionFollowed
@@ -248,7 +320,7 @@ func TestSessionNonceAnnouncerDoesNotNoOpWithoutSession(t *testing.T) {
 	if err == nil {
 		t.Fatal("Announce returned nil without an active session")
 	}
-	if !strings.Contains(err.Error(), "XBLAnnouncer.Client is nil") {
+	if !strings.Contains(err.Error(), "mpsd client is nil") {
 		t.Fatalf("Announce error = %v, want missing client publish attempt", err)
 	}
 }

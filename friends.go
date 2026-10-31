@@ -16,13 +16,9 @@ type FriendClient struct {
 }
 
 type Person struct {
-	XUID        string `json:"xuid"`
-	Gamertag    string `json:"gamertag"`
-	DisplayName string `json:"displayName"`
+	XUID     string
+	Gamertag string
 }
-
-// MaxFriends is the Xbox friend list limit.
-const MaxFriends = 1000
 
 // friendListConfig matches the undecorated friend list request MCXboxBroadcast makes.
 var friendListConfig = xblsocial.PeopleListConfig{Undecorated: true}
@@ -144,9 +140,5 @@ func peopleFromSocialUsers(users []xblsocial.User) []Person {
 }
 
 func personFromSocialUser(user xblsocial.User) Person {
-	return Person{
-		XUID:        user.XUID,
-		Gamertag:    user.GamerTag,
-		DisplayName: user.DisplayName,
-	}
+	return Person{XUID: user.XUID, Gamertag: user.GamerTag}
 }

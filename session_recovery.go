@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/sandertv/gophertunnel/minecraft/room"
 )
 
 const (
@@ -55,7 +57,7 @@ func (b *Broadcaster) sessionLoop() {
 			}
 		}
 		if issue.rotate {
-			if b.rotatePrimarySession(issue) {
+			if b.rotate(issue) {
 				consecutiveFailures = 0
 				continue
 			}
@@ -76,7 +78,7 @@ func (b *Broadcaster) sessionLoop() {
 				consecutiveFailures = 0
 				continue
 			}
-			b.warn("session is unhealthy but signaling is statically configured; cannot re-create", "reason", issue.reason)
+			b.log.Warn("session is unhealthy but signaling is statically configured; cannot re-create", "reason", issue.reason)
 		}
 		err := b.refreshSession()
 		if err == nil {
@@ -89,7 +91,7 @@ func (b *Broadcaster) sessionLoop() {
 		consecutiveFailures++
 		b.log.Error("update session", "err", err)
 		if consecutiveFailures == 1 {
-			b.notifySessionUpdateFailure(b.ctx, err)
+			b.notify(b.ctx, "Xbox session update failed: "+err.Error())
 		}
 		if consecutiveFailures >= sessionUpdateFailureLimit {
 			if !b.recoverSession(sessionHealthIssue{reason: "repeated session update failures"}) {
@@ -100,17 +102,17 @@ func (b *Broadcaster) sessionLoop() {
 	}
 }
 
-// rotatePrimarySession reports whether the primary session rotated; on failure
-// the caller falls back to full recreation, as Java restarts.
-func (b *Broadcaster) rotatePrimarySession(issue sessionHealthIssue) bool {
-	b.info("rotating session", "reason", issue.reason)
+// rotate reports whether the session rotated; on failure the caller falls
+// back to full recreation, as Java restarts.
+func (b *Broadcaster) rotate(issue sessionHealthIssue) bool {
+	b.log.Info("rotating session", "reason", issue.reason)
 	ctx, cancel := context.WithTimeout(b.ctx, 30*time.Second)
 	defer cancel()
 	if err := b.rotateSession(ctx); err != nil {
 		b.log.Error("rotate session; re-creating instead", "err", err)
 		return false
 	}
-	b.info("rotated session")
+	b.log.Info("rotated session")
 	return true
 }
 
@@ -126,13 +128,13 @@ func (b *Broadcaster) canRecreateSignaling() bool {
 	return b.conf.Signaling == nil
 }
 
-// reportStaticActivityRecoveryFailure reports an unrecoverable primary activity
-// only if the probed publication is still current.
+// reportStaticActivityRecoveryFailure reports an unrecoverable activity only
+// if the probed publication is still current.
 func (b *Broadcaster) reportStaticActivityRecoveryFailure(issue sessionHealthIssue) {
-	if !b.primaryActivityCurrent(issue.activity) {
+	if !b.activityCurrent(issue.activity) {
 		return
 	}
-	err := errors.New("cannot recover the primary Xbox activity with Config.Signaling; provide SignalingFactory to enable session recovery")
+	err := errors.New("cannot recover the Xbox activity with Config.Signaling; provide SignalingFactory to enable session recovery")
 	b.log.Error("activity recovery failed", "reason", issue.reason, "err", err)
 	b.notify(b.ctx, err.Error())
 }
@@ -145,17 +147,17 @@ func (b *Broadcaster) recoverSession(issue sessionHealthIssue) bool {
 		return false
 	}
 	if !b.canRecreateSignaling() {
-		b.warn("session is unhealthy but signaling is statically configured; cannot re-create", "reason", issue.reason)
+		b.log.Warn("session is unhealthy but signaling is statically configured; cannot re-create", "reason", issue.reason)
 		return true
 	}
 	b.mu.Lock()
-	if issue.activity != nil && !b.primaryActivityCurrentLocked(issue.activity) {
+	if issue.activity != nil && !b.activityCurrentLocked(issue.activity) {
 		b.mu.Unlock()
 		return true
 	}
 	b.recovering = true
 	b.mu.Unlock()
-	b.warn("re-creating xbox live session", "reason", issue.reason)
+	b.log.Warn("re-creating xbox live session", "reason", issue.reason)
 	failures := 0
 	err := retryWithBackoff(b.ctx, reconnectBackoffBase, reconnectBackoffMax, sessionRecoveryAttempts, b.recreateSession, func(err error, next time.Duration) {
 		failures++
@@ -177,7 +179,7 @@ func (b *Broadcaster) recoverSession(issue sessionHealthIssue) bool {
 		}
 		return false
 	}
-	b.info("xbox live session recovered", "reason", issue.reason)
+	b.log.Info("xbox live session recovered", "reason", issue.reason)
 	if failures != 0 {
 		b.notify(b.ctx, "Xbox session recovered.")
 	}
@@ -218,4 +220,168 @@ func retryWithBackoff(ctx context.Context, base, max time.Duration, limit int, a
 		}
 	}
 	return errors.New("session recovery requires at least one attempt")
+}
+
+const (
+	sessionMemberCap = 30 // members the MinecraftLobby template allows
+	// sessionRotateMembers rotates before sessionMemberCap so joins in
+	// progress still fit; players stay members while they play.
+	sessionRotateMembers = 28
+	// sessionRotateGrace keeps a rotated-out session joinable for players mid-join.
+	sessionRotateGrace = 30 * time.Second
+	// sessionUpdateFailureLimit is how many consecutive update failures
+	// trigger a full session recreation.
+	sessionUpdateFailureLimit = 3
+)
+
+type sessionHealthIssue struct {
+	reason   string
+	activity *publishedActivity
+	rotate   bool // the session is nearly full rather than broken
+}
+
+// sessionHealthIssue reports why the current session needs rotation or
+// recovery, or an empty issue when it is healthy.
+func (b *Broadcaster) sessionHealthIssue() sessionHealthIssue {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	counter, ok := unwrapAnnouncer(b.announcer).(memberCounter)
+	if !ok {
+		return sessionHealthIssue{}
+	}
+	count, published, lost := counter.memberCount()
+	switch {
+	case !published:
+		return sessionHealthIssue{}
+	case lost:
+		return sessionHealthIssue{reason: "mpsd session lost"}
+	case count >= sessionRotateMembers:
+		return sessionHealthIssue{reason: fmt.Sprintf("session has %d/%d members", count, sessionMemberCap), rotate: true}
+	}
+	return sessionHealthIssue{}
+}
+
+// membersChanged requests an early health check once a session nears its member cap.
+func (b *Broadcaster) membersChanged(count int) {
+	if count < sessionRotateMembers {
+		return
+	}
+	select {
+	case b.healthCheck <- struct{}{}:
+	default:
+	}
+}
+
+// rotateSession moves the activity to a fresh session on the same signaling
+// connection and retires the old one, like the Java rotation.
+func (b *Broadcaster) rotateSession(ctx context.Context) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.started || b.recovering {
+		return errors.New("broadcaster is not running")
+	}
+	announcer, err := b.publishSession(ctx, "")
+	if err != nil {
+		return err
+	}
+	b.retire(b.announcer)
+	b.announcer = announcer
+	return nil
+}
+
+// retiredSession is a rotated-out session and when it was retired.
+type retiredSession struct {
+	announcer room.Announcer
+	at        time.Time
+}
+
+// retire keeps a rotated-out session for players mid-join, then hides it if
+// configured. Its members stay so they keep playing. The caller must hold b.mu.
+func (b *Broadcaster) retire(announcer room.Announcer) {
+	b.retiredSessions = append(b.retiredSessions, retiredSession{announcer: announcer, at: time.Now()})
+	if !b.conf.HideOldSessions {
+		return
+	}
+	hider, ok := unwrapAnnouncer(announcer).(sessionHider)
+	if !ok {
+		return
+	}
+	ctx, log := b.ctx, b.log
+	b.spawn(func() {
+		select {
+		case <-time.After(sessionRotateGrace):
+		case <-ctx.Done():
+			return
+		}
+		hideCtx, cancel := xboxOperationContext(ctx)
+		defer cancel()
+		if err := hider.hide(hideCtx); err != nil {
+			log.Warn("hide old session", "err", err)
+			return
+		}
+		log.Debug("hid old session")
+	})
+}
+
+// closeDrainedSessions closes retired sessions past their grace period that
+// only the bot still belongs to, so they stop holding RTA subscriptions.
+func (b *Broadcaster) closeDrainedSessions() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	kept := b.retiredSessions[:0]
+	for _, retired := range b.retiredSessions {
+		counter, ok := unwrapAnnouncer(retired.announcer).(memberCounter)
+		count, published := 0, false
+		if ok {
+			count, published, _ = counter.memberCount()
+		}
+		if !published || count > 1 || time.Since(retired.at) < sessionRotateGrace {
+			kept = append(kept, retired)
+			continue
+		}
+		if err := retired.announcer.Close(); err != nil {
+			b.log.Warn("close drained session", "err", err)
+			kept = append(kept, retired)
+			continue
+		}
+		b.log.Debug("closed drained session")
+	}
+	clear(b.retiredSessions[len(kept):])
+	b.retiredSessions = kept
+}
+
+// recreateSession tears down and rebuilds signaling, sessions and the relay after a drop.
+func (b *Broadcaster) recreateSession() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.ctx.Err() != nil || !b.started {
+		return errors.New("broadcaster is shut down")
+	}
+	_ = b.releaseSessions()
+
+	sig, err := b.signalingFor(b.ctx)
+	if err != nil {
+		return fmt.Errorf("re-create signaling: %w", err)
+	}
+	if sig.Context().Err() != nil {
+		_ = closeSignaling(sig)
+		return errors.New("re-create signaling: factory returned signaling with dead context")
+	}
+	b.signaling = sig
+	b.log.Debug("nethernet signaling re-created", "network_id", sig.NetworkID())
+
+	ctx, cancel := context.WithTimeout(b.ctx, 30*time.Second)
+	defer cancel()
+	if err := b.publishOn(ctx, sig); err != nil {
+		_ = closeSignaling(sig)
+		b.signaling = nil
+		return fmt.Errorf("re-create session: %w", err)
+	}
+	b.log.Debug("join relay restarted", "network_id", sig.NetworkID(), "target", b.conf.JoinURL)
+
+	// Re-showcase the gallery image so a swapped file does not require a
+	// process restart; the upload no-ops when the image is already set.
+	b.spawn(b.uploadGallery)
+	return nil
 }

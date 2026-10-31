@@ -2,71 +2,23 @@ package broadcaster
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"errors"
 	"io"
-	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
-	"github.com/df-mc/go-xsapi/v2/xal/xasd"
-	"github.com/df-mc/go-xsapi/v2/xal/xasu"
-	"github.com/df-mc/go-xsapi/v2/xal/xsts"
 	"github.com/sandertv/gophertunnel/minecraft/auth"
 	"github.com/sandertv/gophertunnel/minecraft/auth/authclient"
 	"github.com/sandertv/gophertunnel/minecraft/service"
 	"golang.org/x/oauth2"
 )
-
-type staticTokenSource struct {
-	xuid string
-}
-
-func (s staticTokenSource) XSTSToken(context.Context, string) (*xsts.Token, error) {
-	xuid := s.xuid
-	if xuid == "" {
-		xuid = "1"
-	}
-	return &xsts.Token{
-		Token:    "token",
-		NotAfter: time.Now().Add(time.Hour),
-		DisplayClaims: xsts.DisplayClaims{UserInfo: []xsts.UserInfo{{
-			UserInfo: xasu.UserInfo{UserHash: "user"},
-			XUID:     xuid,
-			GamerTag: "Tester",
-		}}},
-	}, nil
-}
-
-func (staticTokenSource) DeviceToken(context.Context) (*xasd.Token, error) {
-	return &xasd.Token{
-		Token:    "device",
-		NotAfter: time.Now().Add(time.Hour),
-		DisplayClaims: xasd.DisplayClaims{DeviceInfo: xasd.DeviceInfo{
-			DeviceID: "device",
-		}},
-	}, nil
-}
-
-func (staticTokenSource) ProofKey() *ecdsa.PrivateKey {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		panic(err)
-	}
-	return key
-}
-
-type staticMinecraftTokenSource struct{}
-
-func (staticMinecraftTokenSource) ServiceToken(context.Context) (*service.Token, error) {
-	return &service.Token{AuthorizationHeader: "Bearer minecraft", ValidUntil: time.Now().Add(time.Hour)}, nil
-}
 
 type failingMinecraftTokenSource struct {
 	err error
@@ -76,45 +28,10 @@ func (s failingMinecraftTokenSource) ServiceToken(context.Context) (*service.Tok
 	return nil, s.err
 }
 
-type contextCapturingTokenSource struct {
-	ctx context.Context
-}
-
-func (s *contextCapturingTokenSource) XSTSToken(ctx context.Context, _ string) (*xsts.Token, error) {
-	s.ctx = ctx
-	return nil, errors.New("stop before network")
-}
-
-func (*contextCapturingTokenSource) DeviceToken(context.Context) (*xasd.Token, error) {
-	return nil, errors.New("unexpected device token request")
-}
-
-func (*contextCapturingTokenSource) ProofKey() *ecdsa.PrivateKey { return nil }
-
-type blockingTokenSource struct {
-	started chan<- struct{}
-	unblock <-chan struct{}
-}
-
-func (s blockingTokenSource) XSTSToken(ctx context.Context, _ string) (*xsts.Token, error) {
-	select {
-	case s.started <- struct{}{}:
-	default:
-	}
-	<-s.unblock
-	return nil, ctx.Err()
-}
-
-func (blockingTokenSource) DeviceToken(context.Context) (*xasd.Token, error) {
-	return nil, errors.New("unexpected device token request")
-}
-
-func (blockingTokenSource) ProofKey() *ecdsa.PrivateKey { return nil }
-
 func TestNewLiveTokenSourceUsesContextHTTPClientForRefresh(t *testing.T) {
 	var called bool
 	var client *http.Client
-	client = &http.Client{Transport: tokenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+	client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		called = true
 		if req.URL.String() != "https://login.live.com/oauth20_token.srf" {
 			t.Fatalf("unexpected refresh URL %q", req.URL.String())
@@ -122,14 +39,14 @@ func TestNewLiveTokenSourceUsesContextHTTPClientForRefresh(t *testing.T) {
 		if got, _ := req.Context().Value(oauth2.HTTPClient).(*http.Client); got != client {
 			t.Fatal("refresh request did not retain context HTTP client")
 		}
-		return tokenTestResponse(http.StatusOK, `{"access_token":"new-access","token_type":"bearer","refresh_token":"new-refresh","expires_in":3600}`), nil
+		return response(http.StatusOK, `{"access_token":"new-access","token_type":"bearer","refresh_token":"new-refresh","expires_in":3600}`), nil
 	})}
 	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, client)
 	src := NewLiveTokenSource(ctx, &oauth2.Token{
 		AccessToken:  "old-access",
 		RefreshToken: "old-refresh",
 		Expiry:       time.Now().Add(-time.Hour),
-	}, io.Discard)
+	}, io.Discard, nil)
 
 	tok, err := src.Token()
 	if err != nil {
@@ -147,12 +64,12 @@ func TestNewLiveTokenSourceUsesContextHTTPClientForRefresh(t *testing.T) {
 }
 
 func TestLiveTokenSourcePersistsRotatedRefreshTokens(t *testing.T) {
-	client := &http.Client{Transport: tokenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		return tokenTestResponse(http.StatusOK, `{"access_token":"new-access","token_type":"bearer","refresh_token":"rotated-refresh","expires_in":3600}`), nil
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return response(http.StatusOK, `{"access_token":"new-access","token_type":"bearer","refresh_token":"rotated-refresh","expires_in":3600}`), nil
 	})}
 	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, client)
 	var persisted []*oauth2.Token
-	src := NewLiveTokenSourceWithPersist(ctx, &oauth2.Token{
+	src := NewLiveTokenSource(ctx, &oauth2.Token{
 		AccessToken:  "old-access",
 		RefreshToken: "old-refresh",
 		Expiry:       time.Now().Add(-time.Hour),
@@ -169,7 +86,7 @@ func TestLiveTokenSourcePersistsRotatedRefreshTokens(t *testing.T) {
 }
 
 func TestLiveTokenSourceDoesNotFallBackToDeviceCodeOnTransientRefreshError(t *testing.T) {
-	client := &http.Client{Transport: tokenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		return nil, errors.New("network down")
 	})}
 	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, client)
@@ -188,8 +105,8 @@ func TestLiveTokenSourceDoesNotFallBackToDeviceCodeOnTransientRefreshError(t *te
 func TestLiveTokenSourceDoesNotFallBackToDeviceCodeOnTransientServerError(t *testing.T) {
 	// A non-200 with an OAuth error other than invalid_grant (or none at all)
 	// means the refresh token may still be usable; no re-login should start.
-	client := &http.Client{Transport: tokenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		return tokenTestResponse(http.StatusServiceUnavailable, `{"error":"server_error","error_description":"try again"}`), nil
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return response(http.StatusServiceUnavailable, `{"error":"server_error","error_description":"try again"}`), nil
 	})}
 	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, client)
 	src := newLiveTokenSource(ctx, &oauth2.Token{
@@ -208,12 +125,12 @@ func TestLiveTokenSourceDoesNotFallBackToDeviceCodeOnTransientServerError(t *tes
 
 // A refresh response that omits refresh_token must keep the previous one, not force a device-code login later.
 func TestLiveTokenSourceKeepsRefreshTokenWhenResponseOmitsIt(t *testing.T) {
-	client := &http.Client{Transport: tokenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if req.URL.String() != "https://login.live.com/oauth20_token.srf" {
 			t.Errorf("unexpected request %s", req.URL)
 			return nil, errors.New("unexpected request")
 		}
-		return tokenTestResponse(http.StatusOK, `{"access_token":"new-access","token_type":"bearer","expires_in":3600}`), nil
+		return response(http.StatusOK, `{"access_token":"new-access","token_type":"bearer","expires_in":3600}`), nil
 	})}
 	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, client)
 	var persisted *oauth2.Token
@@ -312,7 +229,7 @@ func drainTokenTestTimers() {
 // deviceLoginTestClient rejects refresh tokens and completes device-code
 // polling once approved is set.
 func deviceLoginTestClient(t *testing.T, approved *atomic.Bool) *http.Client {
-	return &http.Client{Transport: tokenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+	return &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch req.URL.String() {
 		case "https://login.live.com/oauth20_connect.srf":
 			return tokenTestJSONResponse(http.StatusOK, `{"device_code":"device","user_code":"code","verification_uri":"https://www.microsoft.com/link","expires_in":900,"interval":1}`), nil
@@ -321,7 +238,7 @@ func deviceLoginTestClient(t *testing.T, approved *atomic.Bool) *http.Client {
 				return nil, err
 			}
 			if req.Form.Get("grant_type") == "refresh_token" {
-				return tokenTestResponse(http.StatusBadRequest, `{"error":"invalid_grant","error_description":"revoked"}`), nil
+				return response(http.StatusBadRequest, `{"error":"invalid_grant","error_description":"revoked"}`), nil
 			}
 			if !approved.Load() {
 				return tokenTestJSONResponse(http.StatusBadRequest, `{"error":"authorization_pending"}`), nil
@@ -338,10 +255,10 @@ func TestLiveTokenSourceFallsBackToDeviceCodeWhenRefreshRejected(t *testing.T) {
 	// The device-code flow starts with a POST to the device-code endpoint; the
 	// fallback is detected by observing that request after a refresh rejection.
 	var urls []string
-	client := &http.Client{Transport: tokenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		urls = append(urls, req.URL.String())
 		if req.URL.String() == "https://login.live.com/oauth20_token.srf" {
-			return tokenTestResponse(http.StatusBadRequest, `{"error":"invalid_grant","error_description":"expired"}`), nil
+			return response(http.StatusBadRequest, `{"error":"invalid_grant","error_description":"expired"}`), nil
 		}
 		return nil, errors.New("stop device-code flow")
 	})}
@@ -350,7 +267,7 @@ func TestLiveTokenSourceFallsBackToDeviceCodeWhenRefreshRejected(t *testing.T) {
 		AccessToken:  "old-access",
 		RefreshToken: "old-refresh",
 		Expiry:       time.Now().Add(-time.Hour),
-	}, io.Discard)
+	}, io.Discard, nil)
 
 	_, err := src.Token()
 	if err == nil {
@@ -369,7 +286,7 @@ func TestLiveTokenSourceFallsBackToDeviceCodeWhenRefreshRejected(t *testing.T) {
 func TestRequestLiveTokenWriterRetriesRejectedAndExpiredCodes(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var codes atomic.Int32
-		client := &http.Client{Transport: tokenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			switch req.URL.String() {
 			case "https://login.live.com/oauth20_connect.srf":
 				codes.Add(1)
@@ -442,53 +359,20 @@ func TestMinecraftTokenDiagnosticsFormatsPlayerBannedError(t *testing.T) {
 	}
 }
 
-func TestUploadGalleryUsesBroadcasterContextForLazyMinecraftTokenSource(t *testing.T) {
-	type contextKey struct{}
-	const want = "broadcaster"
-
-	src := &contextCapturingTokenSource{}
-	broadcasterCtx := context.WithValue(context.Background(), contextKey{}, want)
-	galleryCtx, cancel := context.WithCancel(context.WithValue(context.Background(), contextKey{}, "gallery"))
-	cancel()
-
-	b := &Broadcaster{
-		ctx: broadcasterCtx,
-		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		conf: Config{
-			XBLTokenSource: src,
-			Gallery: &GalleryConfig{
-				Enabled:   true,
-				ImagePath: testGalleryImageFile(t),
-			},
-		},
-	}
-	b.uploadGallery(galleryCtx)
-
-	if src.ctx == nil {
-		t.Fatal("xbox token source was not called")
-	}
-	if src.ctx.Err() != nil {
-		t.Fatalf("lazy token source used expired context: %v", src.ctx.Err())
-	}
-	if got := src.ctx.Value(contextKey{}); got != want {
-		t.Fatalf("lazy token source context value = %v, want %q", got, want)
-	}
-}
-
 func TestNewXBLTokenSourceCachesDeviceAndXSTSTokens(t *testing.T) {
 	var deviceRequests int
 	var sisuRequests int
 	validUntil := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
-	client := &http.Client{Transport: tokenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch req.URL.String() {
 		case "https://title.mgt.xboxlive.com/titles/default/endpoints?type=1":
-			return tokenTestResponse(http.StatusOK, `{"EndPoints":[{"Protocol":"https","Host":"*.xboxlive.com","HostType":"wildcard","RelyingParty":"http://xboxlive.com","TokenType":"JWT"}]}`), nil
+			return response(http.StatusOK, testTitleEndpoints), nil
 		case "https://device.auth.xboxlive.com/device/authenticate":
 			deviceRequests++
-			return tokenTestResponse(http.StatusOK, `{"IssueInstant":"`+validUntil+`","NotAfter":"`+validUntil+`","Token":"device","DisplayClaims":{"xdi":{"did":"device"}}}`), nil
+			return response(http.StatusOK, `{"IssueInstant":"`+validUntil+`","NotAfter":"`+validUntil+`","Token":"device","DisplayClaims":{"xdi":{"did":"device"}}}`), nil
 		case "https://sisu.xboxlive.com/authorize":
 			sisuRequests++
-			return tokenTestResponse(http.StatusOK, `{"TitleToken":{"IssueInstant":"`+validUntil+`","NotAfter":"`+validUntil+`","Token":"title","DisplayClaims":{"xti":{"tid":"1739947436"}}},"UserToken":{"IssueInstant":"`+validUntil+`","NotAfter":"`+validUntil+`","Token":"user","DisplayClaims":{"xui":[{"uhs":"user"}]}},"AuthorizationToken":{"IssueInstant":"`+validUntil+`","NotAfter":"`+validUntil+`","Token":"xsts","DisplayClaims":{"xui":[{"gtg":"Tester","xid":"1","uhs":"user"}]}}}`), nil
+			return response(http.StatusOK, `{"TitleToken":{"IssueInstant":"`+validUntil+`","NotAfter":"`+validUntil+`","Token":"title","DisplayClaims":{"xti":{"tid":"1739947436"}}},"UserToken":{"IssueInstant":"`+validUntil+`","NotAfter":"`+validUntil+`","Token":"user","DisplayClaims":{"xui":[{"uhs":"user"}]}},"AuthorizationToken":{"IssueInstant":"`+validUntil+`","NotAfter":"`+validUntil+`","Token":"xsts","DisplayClaims":{"xui":[{"gtg":"Tester","xid":"1","uhs":"user"}]}}}`), nil
 		default:
 			t.Fatalf("unexpected token request %s %s", req.Method, req.URL)
 		}
@@ -518,12 +402,12 @@ func TestNewXBLTokenSourceCachesDeviceAndXSTSTokens(t *testing.T) {
 }
 
 func TestNewXSAPIClientUsesLazyRTA(t *testing.T) {
-	client := &http.Client{Transport: tokenRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		t.Fatalf("unexpected HTTP request during xsapi client construction: %s %s", req.Method, req.URL)
 		return nil, nil
 	})}
 
-	xbl, err := NewXSAPIClient(context.Background(), staticTokenSource{}, client, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	xbl, err := NewXSAPIClient(context.Background(), staticTokenSource{}, client, testBroadcasterLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -535,23 +419,66 @@ func TestNewXSAPIClientUsesLazyRTA(t *testing.T) {
 // fastLiveRetry keeps the refresh retry budget but not its real backoff.
 var fastLiveRetry = authclient.RetryOptions{Attempts: 5, MinDelay: time.Millisecond, MaxDelay: time.Millisecond}
 
-type tokenRoundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f tokenRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
-	return f(req)
-}
-
-func tokenTestResponse(code int, body string) *http.Response {
-	return &http.Response{
-		StatusCode: code,
-		Status:     http.StatusText(code),
-		Body:       io.NopCloser(strings.NewReader(body)),
-		Header:     make(http.Header),
-	}
-}
-
 func tokenTestJSONResponse(code int, body string) *http.Response {
-	resp := tokenTestResponse(code, body)
+	resp := response(code, body)
 	resp.Header.Set("Content-Type", "application/json")
 	return resp
+}
+
+// Saving must replace a loosely-permissioned cache with an owner-only file and leave no temp files.
+func TestSaveLiveTokenReplacesFileOwnerOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "live_token.json")
+	if err := os.WriteFile(path, []byte(`{"access_token":"old"}`), 0o660); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveLiveToken(path, &oauth2.Token{AccessToken: "new", RefreshToken: "refresh"}); err != nil {
+		t.Fatal(err)
+	}
+	tok, err := LoadLiveToken(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.AccessToken != "new" || tok.RefreshToken != "refresh" {
+		t.Fatalf("loaded token %+v", tok)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); runtime.GOOS != "windows" && perm != 0o600 {
+		t.Fatalf("token cache mode = %v, want 0600", perm)
+	}
+	assertOnlyFiles(t, dir, "live_token.json")
+}
+
+// A failed save must keep the previous cache intact and clean up its temp file.
+func TestSaveLiveTokenFailureKeepsPreviousCache(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "live_token.json")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveLiveToken(path, &oauth2.Token{AccessToken: "new"}); err == nil {
+		t.Fatal("expected replacing a directory to fail")
+	}
+	if info, err := os.Stat(path); err != nil || !info.IsDir() {
+		t.Fatalf("previous entry was disturbed: %v", err)
+	}
+	assertOnlyFiles(t, dir, "live_token.json")
+}
+
+func assertOnlyFiles(t *testing.T, dir string, want ...string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != len(want) {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("directory holds %v, want %v", names, want)
+	}
 }

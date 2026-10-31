@@ -16,114 +16,144 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/sandertv/gophertunnel/minecraft/service"
 )
 
-const galleryURL = "https://persona.franchise.minecraft-services.net/api/v1.0/gallery"
+const (
+	galleryURL           = "https://persona.franchise.minecraft-services.net/api/v1.0/gallery"
+	galleryUploadTimeout = 30 * time.Second
+)
 
-type GalleryClient struct {
-	TokenSource service.TokenSource
-	Client      *http.Client
-	Log         *slog.Logger
+// uploadGallery sets the configured showcase image of the account's gallery.
+func (b *Broadcaster) uploadGallery() {
+	b.galleryMu.Lock()
+	defer b.galleryMu.Unlock()
+
+	cfg := b.conf.Gallery
+	if cfg == nil {
+		return
+	}
+	if _, err := os.Stat(cfg.ImagePath); errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(b.ctx, galleryUploadTimeout)
+	defer cancel()
+	tokens, err := b.minecraftTokenSource(ctx)
+	if err != nil {
+		b.log.Warn("minecraft services token source unavailable", "err", err)
+		b.notify(ctx, "Showcase image upload skipped: Minecraft services token source is unavailable.")
+		return
+	}
+	client := galleryClient{tokens: tokens, http: httpClient(b.conf.HTTPClient), log: b.log}
+	args := []any{"path", cfg.ImagePath, "delete_other", cfg.DeleteOtherImages, "xuid", b.xuid()}
+	b.log.Info("setting showcase image", args...)
+	result, err := client.setShowcase(ctx, b.xuid(), cfg.ImagePath, cfg.DeleteOtherImages)
+	if err != nil {
+		b.log.Error("set showcase image", append(args, "err", err)...)
+		b.notify(ctx, "Showcase image upload failed: "+err.Error())
+		return
+	}
+	b.log.Info("set showcase image", append(args, "image_id", result.ImageID, "uploaded", result.Uploaded, "already_set", result.AlreadySet)...)
 }
 
-type GalleryImage struct {
-	ID           string `json:"id"`
-	IsFeatured   bool   `json:"isFeatured"`
-	LastModified string `json:"lastModified"`
-	TakenTime    string `json:"takenTime"`
-	URL          string `json:"url"`
+// galleryClient manages the account's Minecraft profile showcase images.
+type galleryClient struct {
+	tokens service.TokenSource
+	http   *http.Client
+	log    *slog.Logger
+}
+
+type galleryImage struct {
+	ID  string `json:"id"`
+	URL string `json:"url"`
 }
 
 type galleryResponse struct {
 	Result struct {
-		ShowcasedImages []GalleryImage `json:"showcasedImages"`
+		ShowcasedImages []galleryImage `json:"showcasedImages"`
 	} `json:"result"`
 }
 
 type galleryUploadResponse struct {
-	Result GalleryImage `json:"result"`
+	Result galleryImage `json:"result"`
 }
 
-type SetShowcaseResult struct {
+type showcaseResult struct {
 	ImageID    string
 	Uploaded   bool
 	AlreadySet bool
 }
 
-func (g GalleryClient) SetShowcase(ctx context.Context, xuid, imagePath string, deleteOther bool) error {
-	_, err := g.SetShowcaseResult(ctx, xuid, imagePath, deleteOther)
-	return err
-}
-
-func (g GalleryClient) SetShowcaseResult(ctx context.Context, xuid, imagePath string, deleteOther bool) (SetShowcaseResult, error) {
+// setShowcase shows the image at imagePath, reusing a showcased copy with the same pixels.
+func (g galleryClient) setShowcase(ctx context.Context, xuid, imagePath string, deleteOther bool) (showcaseResult, error) {
 	if imagePath == "" {
-		return SetShowcaseResult{}, errors.New("image path is empty")
+		return showcaseResult{}, errors.New("image path is empty")
 	}
 	if _, err := os.Stat(imagePath); err != nil {
-		return SetShowcaseResult{}, err
+		return showcaseResult{}, err
 	}
-	images, err := g.Images(ctx, xuid)
+	images, err := g.images(ctx, xuid)
 	if err != nil {
-		return SetShowcaseResult{}, err
+		return showcaseResult{}, err
 	}
-	g.debug(ctx, "loaded gallery showcase images", "xuid", xuid, "count", len(images))
+	g.log.DebugContext(ctx, "loaded gallery showcase images", "xuid", xuid, "count", len(images))
 	newHash, err := fileHash(imagePath)
 	if err != nil {
-		return SetShowcaseResult{}, err
+		return showcaseResult{}, err
 	}
-	var result SetShowcaseResult
+	var result showcaseResult
 	for _, img := range images {
 		if img.URL == "" {
 			continue
 		}
 		hash, err := g.remoteImageHash(ctx, img.URL)
 		if err != nil {
-			g.debug(ctx, "failed to compare gallery image", "image_id", img.ID, "err", err)
+			g.log.DebugContext(ctx, "failed to compare gallery image", "image_id", img.ID, "err", err)
 			continue
 		}
 		if hash == newHash {
 			result.ImageID = img.ID
 			result.AlreadySet = true
-			g.debug(ctx, "gallery showcase image already set", "image_id", result.ImageID)
+			g.log.DebugContext(ctx, "gallery showcase image already set", "image_id", result.ImageID)
 			break
 		}
 	}
 	if result.ImageID == "" {
-		g.debug(ctx, "uploading gallery showcase image", "path", imagePath)
-		img, err := g.Upload(ctx, imagePath, true)
+		g.log.DebugContext(ctx, "uploading gallery showcase image", "path", imagePath)
+		img, err := g.upload(ctx, imagePath)
 		if err != nil {
-			return SetShowcaseResult{}, err
+			return showcaseResult{}, err
 		}
 		result.ImageID = img.ID
 		result.Uploaded = true
-		g.debug(ctx, "uploaded gallery showcase image", "image_id", result.ImageID)
+		g.log.DebugContext(ctx, "uploaded gallery showcase image", "image_id", result.ImageID)
 	}
 	if deleteOther {
 		var deleteErr error
 		deleted := 0
 		for _, img := range images {
 			if img.ID != "" && img.ID != result.ImageID {
-				g.debug(ctx, "deleting old gallery image", "image_id", img.ID)
-				deleteErr = errors.Join(deleteErr, g.Delete(ctx, img.ID))
+				g.log.DebugContext(ctx, "deleting old gallery image", "image_id", img.ID)
+				deleteErr = errors.Join(deleteErr, g.delete(ctx, img.ID))
 				deleted++
 			}
 		}
 		if deleteErr != nil {
-			return SetShowcaseResult{}, fmt.Errorf("delete old gallery images: %w", deleteErr)
+			return showcaseResult{}, fmt.Errorf("delete old gallery images: %w", deleteErr)
 		}
-		g.debug(ctx, "deleted old gallery images", "count", deleted)
+		g.log.DebugContext(ctx, "deleted old gallery images", "count", deleted)
 	}
 	return result, nil
 }
 
-func (g GalleryClient) Images(ctx context.Context, xuid string) ([]GalleryImage, error) {
+func (g galleryClient) images(ctx context.Context, xuid string) ([]galleryImage, error) {
 	req, err := g.request(ctx, http.MethodGet, galleryURL+"/xuid/"+xuid, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := g.client().Do(req)
+	resp, err := g.http.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -138,43 +168,44 @@ func (g GalleryClient) Images(ctx context.Context, xuid string) ([]GalleryImage,
 	return data.Result.ShowcasedImages, nil
 }
 
-func (g GalleryClient) Upload(ctx context.Context, imagePath string, featured bool) (GalleryImage, error) {
+// upload adds the image as the featured showcase image.
+func (g galleryClient) upload(ctx context.Context, imagePath string) (galleryImage, error) {
 	f, err := os.Open(imagePath)
 	if err != nil {
-		return GalleryImage{}, err
+		return galleryImage{}, err
 	}
 	defer f.Close()
 	req, err := g.request(ctx, http.MethodPost, galleryURL, f)
 	if err != nil {
-		return GalleryImage{}, err
+		return galleryImage{}, err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
-	req.Header.Set("X-Ms-Showcased-Featured", fmt.Sprint(featured))
+	req.Header.Set("X-Ms-Showcased-Featured", "true")
 	if stat, err := f.Stat(); err == nil {
 		// UTC with milliseconds, matching Java's Instant.toString().
 		req.Header.Set("X-Ms-Showcased-Timetaken", stat.ModTime().UTC().Format("2006-01-02T15:04:05.000Z"))
 	}
-	resp, err := g.client().Do(req)
+	resp, err := g.http.Do(req)
 	if err != nil {
-		return GalleryImage{}, err
+		return galleryImage{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusAccepted {
-		return GalleryImage{}, fmt.Errorf("%s %s: %s", req.Method, req.URL, resp.Status)
+		return galleryImage{}, fmt.Errorf("%s %s: %s", req.Method, req.URL, resp.Status)
 	}
 	var data galleryUploadResponse
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return GalleryImage{}, err
+		return galleryImage{}, err
 	}
 	return data.Result, nil
 }
 
-func (g GalleryClient) Delete(ctx context.Context, imageID string) error {
+func (g galleryClient) delete(ctx context.Context, imageID string) error {
 	req, err := g.request(ctx, http.MethodDelete, galleryURL+"/"+imageID, nil)
 	if err != nil {
 		return err
 	}
-	resp, err := g.client().Do(req)
+	resp, err := g.http.Do(req)
 	if err != nil {
 		return err
 	}
@@ -185,14 +216,14 @@ func (g GalleryClient) Delete(ctx context.Context, imageID string) error {
 	return nil
 }
 
-func (g GalleryClient) remoteImageHash(ctx context.Context, url string) (uint32, error) {
+func (g galleryClient) remoteImageHash(ctx context.Context, url string) (uint32, error) {
 	// The gallery image endpoint requires the Minecraft service token even for
 	// reads; an unauthenticated fetch returns 401 and forces a re-upload.
 	req, err := g.request(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return 0, err
 	}
-	resp, err := g.client().Do(req)
+	resp, err := g.http.Do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -207,36 +238,17 @@ func (g GalleryClient) remoteImageHash(ctx context.Context, url string) (uint32,
 	return hash, nil
 }
 
-func (g GalleryClient) request(ctx context.Context, method, url string, body io.Reader) (*http.Request, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if g.TokenSource == nil {
-		return nil, errors.New("minecraft token source is nil")
-	}
+func (g galleryClient) request(ctx context.Context, method, url string, body io.Reader) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
 		return nil, err
 	}
-	tok, err := g.TokenSource.ServiceToken(ctx)
+	tok, err := g.tokens.ServiceToken(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("request minecraft token: %w", err)
 	}
 	tok.SetAuthHeader(req)
 	return req, nil
-}
-
-func (g GalleryClient) client() *http.Client {
-	if g.Client != nil {
-		return g.Client
-	}
-	return http.DefaultClient
-}
-
-func (g GalleryClient) debug(ctx context.Context, msg string, args ...any) {
-	if g.Log != nil {
-		g.Log.DebugContext(ctx, msg, args...)
-	}
 }
 
 func fileHash(path string) (uint32, error) {
