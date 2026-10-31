@@ -343,3 +343,24 @@ func TestCloseBoundsWaitForStuckWorker(t *testing.T) {
 		close(stuck)
 	})
 }
+
+// The signaling factory gets its own config copy, so a gallery upload storing a token source does not race recovery.
+func TestSignalingFactoryDoesNotRaceTokenStore(t *testing.T) {
+	var got service.TokenSource
+	b := &Broadcaster{log: testBroadcasterLogger()}
+	b.conf.SignalingFactory = func(_ context.Context, conf Config) (nethernet.Signaling, error) {
+		got = conf.MinecraftTokenSource
+		return nil, errors.New("no signaling")
+	}
+	stored := minecraftTokenSourceWithPMID{pmid: uuid.New()}
+	done := make(chan struct{})
+	go func() {
+		b.storeMinecraftTokens(stored)
+		close(done)
+	}()
+	_, _ = b.signalingFor(t.Context())
+	<-done
+	if _, err := b.signalingFor(t.Context()); err == nil || got != stored {
+		t.Fatalf("factory got %v, want the stored token source", got)
+	}
+}

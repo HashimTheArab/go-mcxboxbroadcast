@@ -40,14 +40,15 @@ type Broadcaster struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu         sync.Mutex
-	galleryMu  sync.Mutex     // serializes uploads, since recovery starts one too
-	tokensMu   sync.Mutex     // guards conf.MinecraftTokenSource, which gallery uploads share with signaling dials
-	workers    sync.WaitGroup // goroutines using XBLClient, which the caller closes after Close
-	started    bool
-	failure    error
-	recovering bool
-	socialWg   sync.WaitGroup // social subscriptions not yet released
+	mu              sync.Mutex
+	galleryMu       sync.Mutex          // serializes uploads, since recovery starts one too
+	tokensMu        sync.Mutex          // guards minecraftTokens, which gallery uploads share with signaling dials
+	minecraftTokens service.TokenSource // created on first use when conf.MinecraftTokenSource is nil
+	workers         sync.WaitGroup      // goroutines using XBLClient, which the caller closes after Close
+	started         bool
+	failure         error
+	recovering      bool
+	socialWg        sync.WaitGroup // social subscriptions not yet released
 	// healthCheck asks the session loop for an early health check, such as
 	// when a session nears its member cap.
 	healthCheck chan struct{}
@@ -212,19 +213,25 @@ func (b *Broadcaster) minecraftTokenSource(ctx context.Context) (service.TokenSo
 }
 
 func (b *Broadcaster) cachedMinecraftTokens() service.TokenSource {
+	if b.conf.MinecraftTokenSource != nil {
+		return b.conf.MinecraftTokenSource
+	}
 	b.tokensMu.Lock()
 	defer b.tokensMu.Unlock()
-	return b.conf.MinecraftTokenSource
+	return b.minecraftTokens
 }
 
 // storeMinecraftTokens keeps the first token source created and returns the one to use.
 func (b *Broadcaster) storeMinecraftTokens(tokens service.TokenSource) service.TokenSource {
+	if b.conf.MinecraftTokenSource != nil {
+		return b.conf.MinecraftTokenSource
+	}
 	b.tokensMu.Lock()
 	defer b.tokensMu.Unlock()
-	if b.conf.MinecraftTokenSource == nil {
-		b.conf.MinecraftTokenSource = tokens
+	if b.minecraftTokens == nil {
+		b.minecraftTokens = tokens
 	}
-	return b.conf.MinecraftTokenSource
+	return b.minecraftTokens
 }
 
 func (b *Broadcaster) xuid() string {
@@ -266,7 +273,9 @@ func (b *Broadcaster) signalingFor(ctx context.Context) (nethernet.Signaling, er
 	}
 	if b.conf.SignalingFactory != nil {
 		b.log.Debug("creating nethernet signaling from factory")
-		sig, err := b.conf.SignalingFactory(ctx, b.conf)
+		conf := b.conf
+		conf.MinecraftTokenSource = b.cachedMinecraftTokens()
+		sig, err := b.conf.SignalingFactory(ctx, conf)
 		if err != nil {
 			return nil, err
 		}
