@@ -18,6 +18,9 @@ func TestHealthCollectorExportsAccount(t *testing.T) {
 # HELP mcxboxbroadcast_friend_limit Xbox friend list limit.
 # TYPE mcxboxbroadcast_friend_limit gauge
 mcxboxbroadcast_friend_limit{gamertag="Bot",xuid="1"} 1000
+# HELP mcxboxbroadcast_friend_list_full 1 while Xbox refuses the account's friend requests because its own list is full.
+# TYPE mcxboxbroadcast_friend_list_full gauge
+mcxboxbroadcast_friend_list_full{gamertag="Bot",xuid="1"} 0
 # HELP mcxboxbroadcast_relayed_joins_total Join offers relayed to the target since start.
 # TYPE mcxboxbroadcast_relayed_joins_total counter
 mcxboxbroadcast_relayed_joins_total{gamertag="Bot",xuid="1"} 7

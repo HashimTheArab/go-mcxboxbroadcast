@@ -50,7 +50,7 @@ func TestFriendSyncerCountsFriendsWithoutExpiry(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if friends, _ := count.snapshot(); client.lists != 1 || friends != 4 {
+	if friends, _, _ := count.snapshot(); client.lists != 1 || friends != 4 {
 		t.Fatalf("lists = %d, friends = %d; want one list and 3 listed + 1 accepted", client.lists, friends)
 	}
 	// An old count is listed again, so friends who left are dropped.
@@ -60,7 +60,7 @@ func TestFriendSyncerCountsFriendsWithoutExpiry(t *testing.T) {
 	if err := syncer.Sync(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if friends, _ := count.snapshot(); client.lists != 2 || friends != 2 {
+	if friends, _, _ := count.snapshot(); client.lists != 2 || friends != 2 {
 		t.Fatalf("after refresh lists = %d, friends = %d; want 2 and 2", client.lists, friends)
 	}
 }
@@ -132,16 +132,49 @@ func TestFriendSyncerDeclinesRestrictedRequests(t *testing.T) {
 func TestFriendSyncerStopsRetriesWhenFriendListIsFull(t *testing.T) {
 	client := &syncFriendClient{
 		accept: func(context.Context) ([]Person, error) {
-			return nil, &AcceptFriendRequestsError{Failed: []Person{{XUID: "1"}, {XUID: "2"}}}
+			return nil, &AcceptFriendRequestsError{Failed: []Person{{XUID: "1"}, {XUID: "2"}, {XUID: "3"}}}
 		},
 		add: func(context.Context, string) error {
 			return &xblsocial.ResponseError{StatusCode: 403, Code: 1028}
 		},
 	}
 	var result friendSyncResult
-	FriendSyncer{Client: client}.acceptPending(context.Background(), &result)
-	if !result.friendListFull || len(client.added) != 1 {
-		t.Fatalf("full=%v added=%v, want one attempt then stop", result.friendListFull, client.added)
+	FriendSyncer{Client: client}.acceptPending(context.Background(), friendSyncOptions{}, &result)
+	if len(result.fullPlayers) != fullListPlayers || len(client.added) != fullListPlayers {
+		t.Fatalf("refused=%v added=%v, want the pass to stop after %d refusals", result.fullPlayers, client.added, fullListPlayers)
+	}
+}
+
+// One player's full list must not stop the bot accepting everyone else, and their request waits.
+func TestFriendSyncerSkipsPlayerWithFullList(t *testing.T) {
+	client := &syncFriendClient{
+		accept: func(context.Context) ([]Person, error) {
+			return nil, &AcceptFriendRequestsError{Failed: []Person{{XUID: "full"}, {XUID: "2"}, {XUID: "3"}}}
+		},
+		add: func(_ context.Context, xuid string) error {
+			if xuid == "full" {
+				return &xblsocial.ResponseError{StatusCode: 403, Code: 1028}
+			}
+			return nil
+		},
+	}
+	syncer := FriendSyncer{Client: client, Config: FriendSyncConfig{AutoFriend: true}}
+	var state friendSyncRunState
+	now := time.Now()
+	for pass := range 2 {
+		result, err := syncer.syncWithOptions(context.Background(), state.options(now, false))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state.record(now, result) {
+			t.Fatalf("pass %d: one player's full list paused the bot", pass)
+		}
+	}
+	if !slices.Equal(client.added, []string{"full", "2", "3", "2", "3"}) {
+		t.Fatalf("attempts = %v, want the full player skipped on the second pass", client.added)
+	}
+	if opts := state.options(now, false); !opts.add {
+		t.Fatal("adds paused for one player's full list")
 	}
 }
 
@@ -248,12 +281,29 @@ func TestFriendSyncRunStateTracksSeparateAddAndRemoveBackoff(t *testing.T) {
 	if opts := state.options(now.Add(time.Second), false); opts.add || !opts.remove {
 		t.Fatalf("options = %+v, want adds paused and removals running", opts)
 	}
-	state.record(now, friendSyncResult{friendListFull: true})
+	if !state.record(now, friendSyncResult{fullPlayers: []string{"1", "2"}}) {
+		t.Fatal("two refused players with no accept did not mark the list full")
+	}
 	if opts := state.options(now.Add(2*time.Minute), false); opts.add {
 		t.Fatal("adds resumed while the friend list is full")
 	}
 	if opts := state.options(now.Add(friendListFullBackoff), false); !opts.add {
 		t.Fatal("adds did not resume after the full-list backoff")
+	}
+}
+
+// Refusals separated by a successful accept are separate players' full lists, not the bot's.
+func TestFriendSyncRunStateNeedsRefusalsSinceLastAccept(t *testing.T) {
+	now := time.Now()
+	var state friendSyncRunState
+	if state.record(now, friendSyncResult{fullPlayers: []string{"1"}}) {
+		t.Fatal("one refusal marked the list full")
+	}
+	if state.record(now.Add(time.Minute), friendSyncResult{accepted: 1}) {
+		t.Fatal("an accept marked the list full")
+	}
+	if state.record(now.Add(2*time.Minute), friendSyncResult{fullPlayers: []string{"2"}}) {
+		t.Fatal("refusals on both sides of an accept marked the list full")
 	}
 }
 

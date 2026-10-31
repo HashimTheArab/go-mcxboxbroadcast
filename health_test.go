@@ -30,13 +30,13 @@ func TestHealthAdvertisedAtExpires(t *testing.T) {
 func TestFriendCount(t *testing.T) {
 	var count friendCount
 	count.add(1)
-	if n, at := count.snapshot(); !at.IsZero() || n != 0 {
+	if n, at, _ := count.snapshot(); !at.IsZero() || n != 0 {
 		t.Fatalf("count before a full list = %d at %v, want unknown", n, at)
 	}
 	count.set(10)
 	count.add(2)
 	count.add(-1)
-	if n, at := count.snapshot(); n != 11 || at.IsZero() {
+	if n, at, _ := count.snapshot(); n != 11 || at.IsZero() {
 		t.Fatalf("count = %d, want 11", n)
 	}
 	count.countedAt = time.Now().Add(-friendCountRefresh - time.Minute)
