@@ -1,12 +1,16 @@
 package broadcaster
 
 import (
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/df-mc/go-xsapi/v2"
 )
+
+// friendCountRefresh re-lists friends when expiry scans do not, so removals by other players are seen.
+const friendCountRefresh = 30 * time.Minute
 
 // advertisedFreshness spans a new publication's unchecked grace period and a
 // few check intervals, so a session rotation does not read as a lost advertisement.
@@ -39,15 +43,10 @@ func (a AccountHealth) AdvertisedAt(now time.Time) bool {
 	return a.Advertised && !a.CheckedAt.IsZero() && now.Sub(a.CheckedAt) <= advertisedFreshness
 }
 
-// Health returns a snapshot of the broadcaster's published accounts.
+// Health returns a snapshot of the broadcaster's published accounts. It never waits on the
+// lifecycle lock, which Update holds across Xbox calls; accounts appear once the session loop runs.
 func (b *Broadcaster) Health() Health {
-	b.mu.Lock()
-	accounts := []AccountHealth{{XUID: b.primaryXUID(), Gamertag: clientGamertag(b.conf.XBLClient, b.xblClient)}}
-	subs, _ := b.enabledSubAccounts()
-	for _, account := range subs {
-		accounts = append(accounts, AccountHealth{ID: account.ID, XUID: accountXUID(*account), Gamertag: clientGamertag(account.XBLClient)})
-	}
-	b.mu.Unlock()
+	accounts := b.health.identities()
 	for i := range accounts {
 		b.health.account(accounts[i].ID).fill(&accounts[i])
 	}
@@ -57,6 +56,18 @@ func (b *Broadcaster) Health() Health {
 		RelayedJoins: b.health.joins.Load(),
 		Accounts:     accounts,
 	}
+}
+
+// recordHealthAccounts publishes the account identities Health reports, primary first.
+func (b *Broadcaster) recordHealthAccounts() {
+	b.mu.Lock()
+	accounts := []AccountHealth{{XUID: b.primaryXUID(), Gamertag: clientGamertag(b.conf.XBLClient, b.xblClient)}}
+	subs, _ := b.enabledSubAccounts()
+	for _, account := range subs {
+		accounts = append(accounts, AccountHealth{ID: account.ID, XUID: accountXUID(*account), Gamertag: clientGamertag(account.XBLClient)})
+	}
+	b.mu.Unlock()
+	b.health.setIdentities(accounts)
 }
 
 func clientGamertag(clients ...*xsapi.Client) string {
@@ -75,6 +86,19 @@ type healthState struct {
 	joins    atomic.Uint64
 	mu       sync.Mutex
 	accounts map[string]*accountHealthState
+	ids      []AccountHealth // identity fields only, primary first
+}
+
+func (h *healthState) setIdentities(ids []AccountHealth) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.ids = ids
+}
+
+func (h *healthState) identities() []AccountHealth {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.ids)
 }
 
 func (h *healthState) account(id string) *accountHealthState {
@@ -117,14 +141,14 @@ func (s *accountHealthState) setFriends(n int) {
 	s.friends, s.friendsAt = n, time.Now()
 }
 
-// needsFriends reports whether no full list has been counted yet; nil s never needs one.
+// needsFriends reports whether the count is missing or older than friendCountRefresh; nil s never needs one.
 func (s *accountHealthState) needsFriends() bool {
 	if s == nil {
 		return false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.friendsAt.IsZero()
+	return s.friendsAt.IsZero() || time.Since(s.friendsAt) > friendCountRefresh
 }
 
 // addFriends adjusts a known count between full lists.

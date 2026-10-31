@@ -87,6 +87,7 @@ func (b *Broadcaster) primaryActivityCurrent(activity *publishedActivity) bool {
 // publication, but cannot prove that another account can see or join the session.
 // The session loop owns observations and serializes any resulting recovery.
 func (b *Broadcaster) activityHealthIssue(observations map[string]activityObservation, now time.Time) sessionHealthIssue {
+	b.recordHealthAccounts()
 	publications := b.publishedActivities()
 	ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
 	defer cancel()
@@ -97,7 +98,7 @@ func (b *Broadcaster) activityHealthIssue(observations map[string]activityObserv
 			state.misses = 0
 			state.checkAfter = now.Add(activityGracePeriod)
 		}
-		if now.Before(state.checkAfter) || now.Before(state.recoverAfter) {
+		if now.Before(state.checkAfter) {
 			observations[publication.id] = state
 			continue
 		}
@@ -112,12 +113,15 @@ func (b *Broadcaster) activityHealthIssue(observations map[string]activityObserv
 		if err == nil && b.publicationCurrent(publication) {
 			b.health.account(publication.id).checked(found, now)
 		}
-		if err != nil || found {
+		switch {
+		case err != nil || found:
 			state.misses = 0
 			if err != nil && b.ctx.Err() == nil {
 				b.debug("check published activity", "sub_account", publication.id, "err", err)
 			}
-		} else {
+		case now.Before(state.recoverAfter):
+			// The cooldown only delays recovery; checks still update health, and misses count after it.
+		default:
 			state.misses++
 		}
 		observations[publication.id] = state

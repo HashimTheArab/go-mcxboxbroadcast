@@ -37,7 +37,7 @@ func TestFriendSyncerAcceptsPendingRequestsAndInvites(t *testing.T) {
 	}
 }
 
-// Without expiry the first pass still counts friends once; later accepts adjust that count.
+// Without expiry the syncer still counts friends, adjusts for accepts, and re-lists an old count.
 func TestFriendSyncerCountsFriendsWithoutExpiry(t *testing.T) {
 	client := &syncFriendClient{
 		people: []Person{{XUID: "1"}, {XUID: "2"}, {XUID: "3"}},
@@ -54,6 +54,17 @@ func TestFriendSyncerCountsFriendsWithoutExpiry(t *testing.T) {
 	count.fill(&health)
 	if client.lists != 1 || health.Friends != 4 {
 		t.Fatalf("lists = %d, friends = %d; want one list and 3 listed + 1 accepted", client.lists, health.Friends)
+	}
+	// An old count is listed again, so friends who left are dropped.
+	count.friendsAt = time.Now().Add(-friendCountRefresh - time.Minute)
+	client.people = client.people[:2]
+	client.accept = nil
+	if err := syncer.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	count.fill(&health)
+	if client.lists != 2 || health.Friends != 2 {
+		t.Fatalf("after refresh lists = %d, friends = %d; want 2 and 2", client.lists, health.Friends)
 	}
 }
 

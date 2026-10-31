@@ -122,24 +122,48 @@ func TestActivityHealthRequiresConsecutiveConfirmedMisses(t *testing.T) {
 			t.Fatalf("response %d (%s) gave health %+v", i, response, health)
 		}
 	}
-	queries := calls
-	b.activityHealthIssue(states, now.Add(12*time.Minute))
-	if calls != queries {
-		t.Fatal("queried again during recovery cooldown")
+	// During the cooldown checks keep updating health, so a recovered session reads as advertised.
+	result = "healthy"
+	if issue := b.activityHealthIssue(states, now.Add(12*time.Minute)); issue.reason != "" {
+		t.Fatalf("issue during recovery cooldown: %+v", issue)
 	}
+	if health := b.Health().Accounts[0]; !health.Advertised || !health.CheckedAt.Equal(now.Add(12*time.Minute)) {
+		t.Fatalf("health during cooldown = %+v, want the healthy check", health)
+	}
+	// Misses during the cooldown, even for a replacement session, do not count toward recovery.
+	result = "missing"
 	old := b.announcer.(*room.XBLAnnouncer)
 	b.announcer = &room.XBLAnnouncer{Client: old.Client, SessionReference: old.SessionReference}
 	for minute := 13; minute <= 20; minute++ {
-		b.activityHealthIssue(states, now.Add(time.Duration(minute)*time.Minute))
-	}
-	if calls != queries {
-		t.Fatal("replacing the announcer bypassed the recovery cooldown")
+		if issue := b.activityHealthIssue(states, now.Add(time.Duration(minute)*time.Minute)); issue.reason != "" {
+			t.Fatalf("replacing the announcer bypassed the recovery cooldown at minute %d", minute)
+		}
 	}
 	for minute := 21; minute <= 23; minute++ {
 		issue := b.activityHealthIssue(states, now.Add(time.Duration(minute)*time.Minute))
 		if (issue.reason != "") != (minute == 23) {
 			t.Fatalf("minute %d after cooldown gave issue %+v", minute, issue)
 		}
+	}
+}
+
+// A metrics scrape must not wait for Update, which holds the lifecycle lock across Xbox calls.
+func TestHealthDoesNotWaitForLifecycleLock(t *testing.T) {
+	b := activityTestBroadcaster(t, func(*http.Request) (*http.Response, error) {
+		return broadcasterResponse(http.StatusOK, `{"results":[]}`), nil
+	})
+	b.activityHealthIssue(make(map[string]activityObservation), time.Now())
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	done := make(chan Health, 1)
+	go func() { done <- b.Health() }()
+	select {
+	case health := <-done:
+		if len(health.Accounts) != 1 || health.Accounts[0].XUID == "" {
+			t.Fatalf("health = %+v, want the primary account", health)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Health blocked on the lifecycle lock")
 	}
 }
 
