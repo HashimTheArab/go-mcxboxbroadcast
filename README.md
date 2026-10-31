@@ -96,8 +96,13 @@ Minecraft only lets friends join a session, so friend sync works with friends
 alone. `friendSync.autoFriend` accepts incoming friend requests, and requests
 from accounts whose restrictions prevent a friendship are declined. Expiry
 removes friends that have not joined within `friendSync.expiry.days`; the
-broadcaster's own accounts are never expired. An account can have at most 1000
-friends.
+broadcaster's own accounts are never expired.
+
+Xbox does not publish the friend limit, and it is above 1000. When a player's
+own friend list is full, Xbox refuses that one request; their request waits an
+hour while everyone else is still accepted. Only when two different players are
+refused with no accept since does the broadcaster treat its own list as full and
+pause accepting for an hour.
 
 ### Session recovery
 
@@ -132,6 +137,8 @@ only on a network where just your scraper can reach it. It reports:
   size, counted on the first friend sync and each expiry scan (or, with expiry
   off, on the next friend sync once the count is 30 minutes old), and adjusted
   for adds and removals in between. It is missing until friend sync first runs.
+- `mcxboxbroadcast_friend_list_full`: 1 while Xbox refuses friend requests
+  because the account's own list is full.
 - `mcxboxbroadcast_relayed_joins_total`: join offers relayed since start.
 
 ### Signaling

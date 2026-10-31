@@ -34,6 +34,7 @@ type Health struct {
 	AttemptedAt      time.Time // last check, answered or not; Xbox errors keep the last answer
 	Friends          int
 	FriendsCheckedAt time.Time
+	FriendListFull   bool   // Xbox is refusing friend requests because the account's own list is full
 	RelayedJoins     uint64 // join offers answered since start
 }
 
@@ -48,7 +49,7 @@ func (h Health) AdvertisedAt(now time.Time) bool {
 // lock, which Update holds across Xbox calls; the identity is empty until Start succeeds.
 func (b *Broadcaster) Health() Health {
 	health := b.health.snapshot()
-	health.Friends, health.FriendsCheckedAt = b.health.friends.snapshot()
+	health.Friends, health.FriendsCheckedAt, health.FriendListFull = b.health.friends.snapshot()
 	health.Version, health.Protocol = b.advertisedVersion(), b.advertisedProtocol()
 	health.RelayedJoins = b.health.joins.Load()
 	return health
@@ -110,6 +111,16 @@ type friendCount struct {
 	friends    int
 	countedAt  time.Time
 	retryAfter time.Time // after a failed count-only list
+	full       bool      // the syncer's own-list-full backoff is active
+}
+
+func (c *friendCount) setFull(full bool) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.full = full
 }
 
 func (c *friendCount) set(n int) {
@@ -157,8 +168,8 @@ func (c *friendCount) add(delta int) {
 	}
 }
 
-func (c *friendCount) snapshot() (int, time.Time) {
+func (c *friendCount) snapshot() (int, time.Time, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.friends, c.countedAt
+	return c.friends, c.countedAt, c.full
 }
