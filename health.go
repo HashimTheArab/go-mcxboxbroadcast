@@ -55,15 +55,11 @@ func (b *Broadcaster) Health() Health {
 	return health
 }
 
-func clientGamertag(clients ...*xsapi.Client) string {
-	for _, client := range clients {
-		if client != nil {
-			if gamertag := client.UserInfo().GamerTag; gamertag != "" {
-				return gamertag
-			}
-		}
+func clientGamertag(client *xsapi.Client) string {
+	if client == nil {
+		return ""
 	}
-	return ""
+	return client.UserInfo().GamerTag
 }
 
 // healthState collects what Health reports, apart from config-derived fields.

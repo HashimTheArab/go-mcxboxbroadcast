@@ -9,3 +9,6 @@ tmp
 cache
 config.yml
 *.test
+worktrees
+.local-test
+.mcp.json

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -37,13 +38,12 @@ type Broadcaster struct {
 	relay             *httpRelay
 	tokens            *tokenVerifier
 	signaling         nethernet.Signaling
-	sessionRef        mpsd.SessionReference
 	sessionConnection *p2p.Connection
 	staleAnnouncers   []room.Announcer // sessions whose close failed, retried on Update
 	announcerFactory  func(*Broadcaster) room.Announcer
-	xblClient         *xsapi.Client
-	minecraftTokens   service.TokenSource
-	createdXBLClients []*xsapi.Client
+	// createdXBLClient is conf.XBLClient when the broadcaster created it, so Close also closes it.
+	createdXBLClient       *xsapi.Client
+	createdMinecraftTokens bool // conf.MinecraftTokenSource was created from conf.XBLClient
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -65,10 +65,7 @@ type Broadcaster struct {
 	// query failures fall back to real data instead of failing the update.
 	lastQuery *minecraft.ServerStatus
 
-	// rotationGrace overrides sessionRotateGrace in tests.
-	rotationGrace time.Duration
-	// galleryUploadTimeout bounds the gallery upload. Zero uses the default.
-	galleryUploadTimeout time.Duration
+	galleryUploadTimeout time.Duration // zero uses 30 seconds
 }
 
 // defaultSignalingResult holds the result of a default signaling dial.
@@ -103,11 +100,9 @@ func New(conf Config) (*Broadcaster, error) {
 		conf.Log = slog.Default()
 	}
 	if conf.UpdateInterval == 0 {
-		conf.UpdateInterval = 30 * time.Second
+		conf.UpdateInterval = defaultUpdateInterval
 	}
-	if conf.UpdateInterval < 20*time.Second {
-		conf.UpdateInterval = 20 * time.Second
-	}
+	conf.UpdateInterval = max(conf.UpdateInterval, minUpdateInterval)
 	return &Broadcaster{
 		conf:        conf,
 		log:         conf.Log.With("src", "broadcaster"),
@@ -133,44 +128,23 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 		"friend_sync", b.conf.FriendSync != nil,
 		"gallery", b.conf.Gallery != nil && b.conf.Gallery.Enabled,
 	)
+	fail := func(err error) error {
+		b.cancel()
+		return errors.Join(err, b.releaseSessions(), b.closeCreatedXBLClient())
+	}
 	sig, err := b.signalingFor(b.ctx)
 	if err != nil {
-		b.cancel()
-		return errors.Join(err, b.cleanupStartupFailure(false))
+		return fail(err)
 	}
 	b.signaling = sig
 	b.debug("nethernet signaling ready", "signaling_type", fmt.Sprintf("%T", sig), "network_id", signalingNetworkID(sig))
-
-	status, err := b.status(b.ctx)
-	if err != nil {
-		b.cancel()
-		return errors.Join(err, b.cleanupStartupFailure(false))
-	}
-	b.debugRoomStatus("resolved room status", status)
-	b.announcer, err = b.newAnnouncer(b.ctx, b.conf.SessionName)
-	if err != nil {
-		b.cancel()
-		return errors.Join(err, b.cleanupStartupFailure(false))
-	}
-	connection, err := b.signalingConnection(sig)
-	if err != nil {
-		b.cancel()
-		return errors.Join(err, b.cleanupStartupFailure(true))
-	}
-	b.sessionConnection = connection
-	b.announcer = b.wrapAnnouncer(b.announcer, b.log)
-	b.debug("using session signaling connection", "connection_type", connection.Type, "nethernet_id", connection.NetherNetID, "pmsg_id", connection.PlayerMessagingID)
 	b.info("creating xbox live session")
-	if err := b.announcer.Announce(b.ctx, status); err != nil {
-		b.cancel()
-		err = errors.Join(fmt.Errorf("announce session: %w", err), b.cleanupStartupFailure(true))
-		return err
+	if err := b.publishOn(b.ctx, sig); err != nil {
+		return fail(err)
 	}
 	b.info("created xbox live session")
-
-	b.relay = b.startRelay(sig)
 	b.started = true
-	b.health.setIdentity(b.primaryXUID(), clientGamertag(b.conf.XBLClient, b.xblClient))
+	b.health.setIdentity(b.xuid(), clientGamertag(b.conf.XBLClient))
 	b.info("nethernet broadcaster started", "network_id", signalingNetworkID(sig), "target", b.conf.JoinURL)
 
 	go b.sessionLoop()
@@ -178,39 +152,31 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 		b.debug("starting presence updates", "xuid", client.XUID)
 		go client.Run(b.ctx, b.log)
 	}
-	go b.uploadGalleryWithTimeout()
+	go b.uploadGallery()
 	if b.conf.FriendSync != nil && hasSocialClient(b.conf.XBLClient) {
-		b.debug("starting friend sync",
-			"auto_friend", b.conf.FriendSync.AutoFriend,
-			"initial_invite", b.conf.FriendSync.InitialInvite,
-			"expiry_enabled", b.conf.FriendSync.ExpiryEnabled,
-		)
-		syncer := b.friendSyncer()
-		syncer.Trigger = b.startSocialSubscription(b.conf.XBLClient, b.conf.FriendSync, b.log)
-		go syncer.Run(b.ctx)
+		b.startFriendSync()
 	}
 	go b.logSocialSummary()
 	return nil
 }
 
-// logSocialSummary logs the authenticated account and its friend usage at
-// startup, like MCXboxBroadcast's "N/2000 friends" line but against the 1000 limit. The count comes
-// from the friend list like MCXboxBroadcast; the social summary's
-// targetFollowingCount is unreliable for the caller's own profile.
+// logSocialSummary logs the account and its friend usage, like MCXboxBroadcast's "N/2000 friends"
+// line but against the 1000 limit. The social summary's targetFollowingCount is unreliable for the
+// caller's own profile, so the count comes from the friend list.
 func (b *Broadcaster) logSocialSummary() {
 	if !hasSocialClient(b.conf.XBLClient) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(b.ctx, 15*time.Second)
 	defer cancel()
-	friends, err := b.friendClientFor(b.conf.XBLClient).Friends(ctx)
+	friends, err := b.friendClient().Friends(ctx)
 	if err != nil {
 		b.debug("fetch friend list for summary", "err", err)
 		return
 	}
 	b.info("authenticated to xbox live",
 		"gamertag", b.hostNameFallback(),
-		"xuid", b.primaryXUID(),
+		"xuid", b.xuid(),
 		"friends", fmt.Sprintf("%d/%d", len(friends), MaxFriends),
 	)
 }
@@ -221,24 +187,34 @@ func (b *Broadcaster) presenceClient() (PresenceClient, bool) {
 	if b.conf.XBLClient == nil || b.conf.XBLClient.Presence() == nil {
 		return PresenceClient{}, false
 	}
-	return PresenceClient{XUID: b.primaryXUID(), Presence: b.conf.XBLClient.Presence()}, true
+	return PresenceClient{XUID: b.xuid(), Presence: b.conf.XBLClient.Presence()}, true
 }
 
-// friendSyncer creates a FriendSyncer from the broadcaster's current config.
-func (b *Broadcaster) friendSyncer() FriendSyncer {
+// startFriendSync runs friend sync until the broadcaster stops. Only accepting requests acts on
+// social events, so the RTA feed is subscribed only with AutoFriend.
+func (b *Broadcaster) startFriendSync() {
+	conf := b.conf.FriendSync
+	b.debug("starting friend sync",
+		"auto_friend", conf.AutoFriend,
+		"initial_invite", conf.InitialInvite,
+		"expiry_enabled", conf.ExpiryEnabled,
+	)
 	syncer := FriendSyncer{
-		Client:   b.friendClientFor(b.conf.XBLClient),
-		Config:   *b.conf.FriendSync,
+		Client:   b.friendClient(),
+		Config:   *conf,
 		History:  b.conf.FriendHistory,
 		Notifier: b.conf.Notifier,
 		Log:      b.log,
 
 		friendCount: &b.health.friends,
 	}
-	if b.conf.FriendSync.InitialInvite {
+	if conf.InitialInvite {
 		syncer.Inviter = &broadcasterInviter{b: b}
 	}
-	return syncer
+	if conf.AutoFriend {
+		syncer.Trigger = b.subscribeSocial(b.conf.XBLClient.Social())
+	}
+	go syncer.Run(b.ctx)
 }
 
 // startRelay relays offers received on sig until the next recreation or Close.
@@ -249,7 +225,7 @@ func (b *Broadcaster) startRelay(sig nethernet.Signaling) *httpRelay {
 		client: endpoint.ClientConfig{
 			HTTPClient: b.conf.HTTPClient,
 			Logger:     b.log,
-			ClientInfo: endpoint.ClientInfo{Version: b.advertisedVersion(), Protocol: int(b.advertisedProtocol()), Platform: relayClientPlatform},
+			ClientInfo: b.clientInfo(),
 		},
 		verify: func(ctx context.Context, sdp string) (offerIdentity, error) {
 			verifier, err := b.tokens.get(ctx)
@@ -266,21 +242,18 @@ func (b *Broadcaster) startRelay(sig nethernet.Signaling) *httpRelay {
 
 // wrapAnnouncer applies logging and the shared signaling connection to a
 // freshly created announcer.
-func (b *Broadcaster) wrapAnnouncer(announcer room.Announcer, log *slog.Logger) room.Announcer {
-	announcer = loggingAnnouncer{Announcer: announcer, log: log}
+func (b *Broadcaster) wrapAnnouncer(announcer room.Announcer) room.Announcer {
+	announcer = loggingAnnouncer{Announcer: announcer, log: b.log}
 	if b.sessionConnection != nil {
 		announcer = signalingConnectionAnnouncer{Announcer: announcer, connection: *b.sessionConnection}
 	}
 	return announcer
 }
 
-// primaryXBLClient returns or lazily creates the primary Xbox Live client.
-func (b *Broadcaster) primaryXBLClient(ctx context.Context) (*xsapi.Client, error) {
+// xblClient returns conf.XBLClient, creating it on first use.
+func (b *Broadcaster) xblClient(ctx context.Context) (*xsapi.Client, error) {
 	if b.conf.XBLClient != nil {
 		return b.conf.XBLClient, nil
-	}
-	if b.xblClient != nil {
-		return b.xblClient, nil
 	}
 	if b.conf.XBLTokenSource == nil {
 		return nil, errors.New("xbox live token source is required")
@@ -289,21 +262,17 @@ func (b *Broadcaster) primaryXBLClient(ctx context.Context) (*xsapi.Client, erro
 	if err != nil {
 		return nil, fmt.Errorf("create xbox live client: %w", err)
 	}
-	b.xblClient = client
-	b.conf.XBLClient = client
-	b.createdXBLClients = append(b.createdXBLClients, client)
+	b.conf.XBLClient, b.createdXBLClient = client, client
 	return client, nil
 }
 
-// minecraftTokenSource returns or lazily creates the Minecraft service token source.
+// minecraftTokenSource returns conf.MinecraftTokenSource, creating it on first use. The source
+// keeps ctx for later refreshes, so ctx must live as long as the broadcaster.
 func (b *Broadcaster) minecraftTokenSource(ctx context.Context) (service.TokenSource, error) {
 	if b.conf.MinecraftTokenSource != nil {
 		return b.conf.MinecraftTokenSource, nil
 	}
-	if b.minecraftTokens != nil {
-		return b.minecraftTokens, nil
-	}
-	client, err := b.primaryXBLClient(ctx)
+	client, err := b.xblClient(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -311,23 +280,18 @@ func (b *Broadcaster) minecraftTokenSource(ctx context.Context) (service.TokenSo
 	if err != nil {
 		return nil, err
 	}
-	b.minecraftTokens = tokens
-	b.conf.MinecraftTokenSource = tokens
+	b.conf.MinecraftTokenSource, b.createdMinecraftTokens = tokens, true
 	return tokens, nil
 }
 
-// primaryXUID returns the primary account's XUID from config or client.
-func (b *Broadcaster) primaryXUID() string {
+// xuid returns the account's XUID from config or client; empty before either knows it.
+func (b *Broadcaster) xuid() string {
 	if b.conf.XUID != "" {
 		return b.conf.XUID
 	}
-	if xuid := clientXUID(b.conf.XBLClient); xuid != "" {
-		return xuid
-	}
-	return clientXUID(b.xblClient)
+	return clientXUID(b.conf.XBLClient)
 }
 
-// clientXUID extracts the XUID from an xsapi.Client, returning empty if nil.
 func clientXUID(client *xsapi.Client) string {
 	if client == nil {
 		return ""
@@ -340,9 +304,8 @@ func hasSocialClient(client *xsapi.Client) bool {
 	return client != nil && client.Social() != nil
 }
 
-// friendClientFor wraps an Xbox client into a FriendClient for social API calls.
-func (b *Broadcaster) friendClientFor(client *xsapi.Client) FriendClient {
-	return FriendClient{Social: client.Social()}
+func (b *Broadcaster) friendClient() FriendClient {
+	return FriendClient{Social: b.conf.XBLClient.Social()}
 }
 
 // broadcasterInviter resolves the current MPSD session dynamically for friend invites.
@@ -467,20 +430,12 @@ func (b *Broadcaster) signalingFor(ctx context.Context) (nethernet.Signaling, er
 
 // defaultSignalingConfig builds the signaling config from the broadcaster's current state.
 func (b *Broadcaster) defaultSignalingConfig() defaultSignalingConfig {
-	client := b.conf.XBLClient
-	if client == nil {
-		client = b.xblClient
-	}
-	tokens := b.conf.MinecraftTokenSource
-	if tokens == nil {
-		tokens = b.minecraftTokens
-	}
 	return defaultSignalingConfig{
 		log:             b.log,
 		httpClient:      b.conf.HTTPClient,
-		xblClient:       client,
+		xblClient:       b.conf.XBLClient,
 		xblTokenSource:  b.conf.XBLTokenSource,
-		minecraftTokens: tokens,
+		minecraftTokens: b.conf.MinecraftTokenSource,
 	}
 }
 
@@ -528,23 +483,16 @@ func (conf defaultSignalingConfig) minecraftTokenSource(ctx context.Context) (se
 // cacheDefaultSignalingResult stores lazily-created clients and tokens from signaling dial.
 func (b *Broadcaster) cacheDefaultSignalingResult(result defaultSignalingResult) {
 	if result.createdClient != nil {
-		b.xblClient = result.createdClient
-		b.conf.XBLClient = result.createdClient
-		b.createdXBLClients = append(b.createdXBLClients, result.createdClient)
+		b.conf.XBLClient, b.createdXBLClient = result.createdClient, result.createdClient
 	}
-	if b.conf.MinecraftTokenSource == nil && b.minecraftTokens == nil && result.minecraft != nil {
-		b.minecraftTokens = result.minecraft
-		b.conf.MinecraftTokenSource = result.minecraft
+	if b.conf.MinecraftTokenSource == nil && result.minecraft != nil {
+		b.conf.MinecraftTokenSource, b.createdMinecraftTokens = result.minecraft, true
 	}
 }
 
 // closeDefaultSignalingResult closes resources from a signaling dial result.
 func closeDefaultSignalingResult(result defaultSignalingResult) {
-	if result.signaling != nil {
-		if c, ok := result.signaling.(interface{ Close() error }); ok {
-			_ = c.Close()
-		}
-	}
+	_ = closeSignaling(result.signaling)
 	if result.createdClient != nil {
 		_ = result.createdClient.Close()
 	}
@@ -574,13 +522,56 @@ func signalingStartupHTTPClient(client *http.Client, timeout time.Duration) *htt
 	return &clone
 }
 
-// newAnnouncer creates the primary MPSD session announcer; an empty name picks a random one.
+// closeSignaling closes sig if its implementation can be closed; nethernet.Signaling has no Close.
+func closeSignaling(sig nethernet.Signaling) error {
+	if c, ok := sig.(io.Closer); ok {
+		return c.Close()
+	}
+	return nil
+}
+
+// publishOn publishes a new session that advertises sig, then relays the offers sig receives.
+func (b *Broadcaster) publishOn(ctx context.Context, sig nethernet.Signaling) error {
+	connection, err := b.signalingConnection(sig)
+	if err != nil {
+		return err
+	}
+	b.sessionConnection = connection
+	b.debug("using session signaling connection", "connection_type", connection.Type, "nethernet_id", connection.NetherNetID, "pmsg_id", connection.PlayerMessagingID)
+	announcer, err := b.publishSession(ctx, b.conf.SessionName)
+	if err != nil {
+		return err
+	}
+	b.announcer = announcer
+	b.relay = b.startRelay(sig)
+	return nil
+}
+
+// publishSession announces a new session on the current signaling connection and closes it
+// again if the announcement fails.
+func (b *Broadcaster) publishSession(ctx context.Context, name string) (room.Announcer, error) {
+	status, err := b.status(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolve session status: %w", err)
+	}
+	announcer, err := b.newAnnouncer(ctx, name)
+	if err != nil {
+		return nil, fmt.Errorf("create announcer: %w", err)
+	}
+	announcer = b.wrapAnnouncer(announcer)
+	if err := announcer.Announce(ctx, status); err != nil {
+		return nil, errors.Join(fmt.Errorf("announce session: %w", err), announcer.Close())
+	}
+	return announcer, nil
+}
+
+// newAnnouncer creates the MPSD session announcer; an empty name picks a random one.
 func (b *Broadcaster) newAnnouncer(ctx context.Context, name string) (room.Announcer, error) {
 	if b.announcerFactory != nil {
 		b.debug("using configured xbox live announcer factory")
 		return b.announcerFactory(b), nil
 	}
-	client, err := b.primaryXBLClient(ctx)
+	client, err := b.xblClient(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -596,7 +587,6 @@ func (b *Broadcaster) newAnnouncer(ctx context.Context, name string) (room.Annou
 	if ref.Name == "" {
 		ref.Name = strings.ToUpper(uuid.NewString())
 	}
-	b.sessionRef = ref
 	pub := b.conf.PublishConfig
 	b.debug("configured xbox live session",
 		"service_config_id", ref.ServiceConfigID.String(),
@@ -604,13 +594,13 @@ func (b *Broadcaster) newAnnouncer(ctx context.Context, name string) (room.Annou
 		"session_name", ref.Name,
 		"join_restriction", defaultString(pub.JoinRestriction, mpsd.SessionRestrictionFollowed),
 		"read_restriction", defaultString(pub.ReadRestriction, mpsd.SessionRestrictionFollowed),
-		"xuid", b.primaryXUID(),
+		"xuid", b.xuid(),
 	)
 	return newSessionNonceAnnouncer(&room.XBLAnnouncer{
 		Client:           mpsdClient,
 		SessionReference: ref,
 		PublishConfig:    pub,
-	}, b.primaryXUID(), b.log, b.membersChanged), nil
+	}, b.xuid(), b.log, b.membersChanged), nil
 }
 
 // membersChanged requests an early health check once a session nears its member cap.
@@ -624,8 +614,8 @@ func (b *Broadcaster) membersChanged(count int) {
 	}
 }
 
-// uploadGallery uploads the configured showcase image for the account.
-func (b *Broadcaster) uploadGallery(ctx context.Context) {
+// uploadGallery sets the configured showcase image of the account's gallery.
+func (b *Broadcaster) uploadGallery() {
 	b.galleryMu.Lock()
 	defer b.galleryMu.Unlock()
 
@@ -636,11 +626,11 @@ func (b *Broadcaster) uploadGallery(ctx context.Context) {
 	if _, err := os.Stat(cfg.ImagePath); errors.Is(err, os.ErrNotExist) {
 		return
 	}
-	src := cfg.TokenSource
-	ctx, cancel := b.galleryContext(ctx)
+	ctx, cancel := b.galleryContext(b.ctx)
 	defer cancel()
+	src := cfg.TokenSource
 	if src == nil {
-		tokens, err := b.minecraftTokenSource(b.sharedTokenSourceContext(ctx))
+		tokens, err := b.minecraftTokenSource(b.ctx)
 		if err != nil {
 			b.log.Warn("minecraft services token source unavailable", "err", err)
 			b.notify(ctx, "Showcase image upload skipped: Minecraft services token source is unavailable.")
@@ -648,29 +638,12 @@ func (b *Broadcaster) uploadGallery(ctx context.Context) {
 		}
 		src = tokens
 	}
-	xuid := b.primaryXUID()
+	xuid := b.xuid()
 	if xuid == "" {
 		b.log.Warn("gallery skipped because token XUID is empty")
 		b.notify(ctx, "Showcase image upload skipped: Xbox profile XUID is empty.")
 		return
 	}
-	b.uploadGalleryImage(ctx, cfg, xuid, src)
-}
-
-// galleryContext bounds one gallery upload.
-func (b *Broadcaster) galleryContext(parent context.Context) (context.Context, context.CancelFunc) {
-	if parent == nil {
-		parent = context.Background()
-	}
-	timeout := b.galleryUploadTimeout
-	if timeout <= 0 {
-		timeout = 30 * time.Second
-	}
-	return context.WithTimeout(parent, timeout)
-}
-
-// uploadGalleryImage sets the showcase image of xuid's gallery.
-func (b *Broadcaster) uploadGalleryImage(ctx context.Context, cfg *GalleryConfig, xuid string, src service.TokenSource) {
 	client := GalleryClient{TokenSource: src, Client: cfg.Client, Log: b.log}
 	if client.Client == nil {
 		client.Client = b.conf.HTTPClient
@@ -689,46 +662,38 @@ func (b *Broadcaster) uploadGalleryImage(ctx context.Context, cfg *GalleryConfig
 	b.info("successfully set showcase image", append(args, "image_id", result.ImageID, "uploaded", result.Uploaded)...)
 }
 
-// sharedTokenSourceContext returns the broadcaster's context or the fallback if unavailable.
-func (b *Broadcaster) sharedTokenSourceContext(fallback context.Context) context.Context {
-	if b.ctx != nil && b.ctx.Err() == nil {
-		return b.ctx
+// galleryContext bounds one gallery upload.
+func (b *Broadcaster) galleryContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
 	}
-	if fallback != nil {
-		return fallback
+	timeout := b.galleryUploadTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
 	}
-	return context.Background()
+	return context.WithTimeout(parent, timeout)
 }
 
-// debug logs a message at debug level if the logger is set.
 func (b *Broadcaster) debug(msg string, args ...any) {
 	debugLog(b.log, msg, args...)
 }
 
-// debugLog logs a message at debug level using the given logger if non-nil.
 func debugLog(log *slog.Logger, msg string, args ...any) {
 	if log != nil {
 		log.Debug(msg, args...)
 	}
 }
 
-// info logs a message at info level if the logger is set.
 func (b *Broadcaster) info(msg string, args ...any) {
 	if b.log != nil {
 		b.log.Info(msg, args...)
 	}
 }
 
-// warn logs a message at warn level if the logger is set.
 func (b *Broadcaster) warn(msg string, args ...any) {
 	if b.log != nil {
 		b.log.Warn(msg, args...)
 	}
-}
-
-// debugRoomStatus logs the room status at debug level.
-func (b *Broadcaster) debugRoomStatus(msg string, status room.Status) {
-	debugRoomStatus(b.log, msg, status)
 }
 
 // debugRoomStatus logs the room status at debug level using the given logger.
@@ -796,17 +761,12 @@ func roomConnectionLogValues(connections []p2p.Connection) []roomConnectionLogVa
 	return values
 }
 
-// signalingNetworkID returns the network ID from the signaling or an empty string if nil.
+// signalingNetworkID tolerates the nil signaling a SignalingFactory may return.
 func signalingNetworkID(sig nethernet.Signaling) string {
 	if sig == nil {
 		return ""
 	}
 	return sig.NetworkID()
-}
-
-// uploadGalleryWithTimeout runs the gallery upload under its own timeout.
-func (b *Broadcaster) uploadGalleryWithTimeout() {
-	b.uploadGallery(b.ctx)
 }
 
 // notify sends a notification via the configured notifier, if any.
@@ -828,14 +788,10 @@ func (b *Broadcaster) notify(ctx context.Context, message string) {
 	}
 }
 
-// notifySessionUpdateFailure notifies about a session update failure.
-func (b *Broadcaster) notifySessionUpdateFailure(ctx context.Context, err error) {
-	b.notify(ctx, "Xbox session update failed: "+err.Error())
-}
-
 const (
-	// sessionRotateMembers rotates before the 30-member template cap so joins
-	// in progress still fit; players stay members while they play.
+	sessionMemberCap = 30 // members the MinecraftLobby template allows
+	// sessionRotateMembers rotates before sessionMemberCap so joins in
+	// progress still fit; players stay members while they play.
 	sessionRotateMembers = 28
 	// sessionRotateGrace keeps a rotated-out session joinable for players mid-join.
 	sessionRotateGrace = 30 * time.Second
@@ -850,8 +806,8 @@ type sessionHealthIssue struct {
 	rotate   bool // the session is nearly full rather than broken
 }
 
-// sessionHealthIssue reports which published session needs recovery, or an
-// empty issue when every session is healthy.
+// sessionHealthIssue reports why the current session needs rotation or
+// recovery, or an empty issue when it is healthy.
 func (b *Broadcaster) sessionHealthIssue() sessionHealthIssue {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -869,7 +825,7 @@ func (b *Broadcaster) sessionHealthIssue() sessionHealthIssue {
 		return sessionHealthIssue{reason: "mpsd session lost"}
 	}
 	if count := sessionMemberCount(session); count >= sessionRotateMembers {
-		return sessionHealthIssue{reason: fmt.Sprintf("session has %d/30 members", count), rotate: true}
+		return sessionHealthIssue{reason: fmt.Sprintf("session has %d/%d members", count, sessionMemberCap), rotate: true}
 	}
 	return sessionHealthIssue{}
 }
@@ -882,28 +838,19 @@ func sessionMemberCount(session *mpsd.Session) int {
 	return count
 }
 
-// rotateSession moves the primary activity to a fresh session on the same
-// signaling connection and retires the old one, like the Java rotation.
+// rotateSession moves the activity to a fresh session on the same signaling
+// connection and retires the old one, like the Java rotation.
 func (b *Broadcaster) rotateSession(ctx context.Context) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !b.started || b.recovering {
 		return errors.New("broadcaster is not running")
 	}
-	status, err := b.status(ctx)
+	announcer, err := b.publishSession(ctx, "")
 	if err != nil {
-		return fmt.Errorf("resolve session status: %w", err)
+		return err
 	}
-	announcer, err := b.newAnnouncer(ctx, "")
-	if err != nil {
-		return fmt.Errorf("create announcer: %w", err)
-	}
-	announcer = b.wrapAnnouncer(announcer, b.log)
-	if err := announcer.Announce(ctx, status); err != nil {
-		_ = announcer.Close()
-		return fmt.Errorf("announce session: %w", err)
-	}
-	b.retire(b.announcer, b.log)
+	b.retire(b.announcer)
 	b.announcer = announcer
 	return nil
 }
@@ -927,7 +874,7 @@ type memberCounter interface {
 
 // retire keeps a rotated-out session for players mid-join, then hides it if
 // configured. Its members stay so they keep playing. The caller must hold b.mu.
-func (b *Broadcaster) retire(announcer room.Announcer, log *slog.Logger) {
+func (b *Broadcaster) retire(announcer room.Announcer) {
 	b.retiredSessions = append(b.retiredSessions, retiredSession{announcer: announcer, at: time.Now()})
 	if !b.conf.HideOldSessions {
 		return
@@ -936,14 +883,10 @@ func (b *Broadcaster) retire(announcer room.Announcer, log *slog.Logger) {
 	if !ok {
 		return
 	}
-	grace := b.rotationGrace
-	if grace <= 0 {
-		grace = sessionRotateGrace
-	}
-	ctx := b.ctx
+	ctx, log := b.ctx, b.log
 	go func() {
 		select {
-		case <-time.After(grace):
+		case <-time.After(sessionRotateGrace):
 		case <-ctx.Done():
 			return
 		}
@@ -962,10 +905,6 @@ func (b *Broadcaster) retire(announcer room.Announcer, log *slog.Logger) {
 func (b *Broadcaster) closeDrainedSessions() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	grace := b.rotationGrace
-	if grace <= 0 {
-		grace = sessionRotateGrace
-	}
 	kept := b.retiredSessions[:0]
 	for _, retired := range b.retiredSessions {
 		counter, ok := unwrapAnnouncer(retired.announcer).(memberCounter)
@@ -973,7 +912,7 @@ func (b *Broadcaster) closeDrainedSessions() {
 		if ok {
 			count, published = counter.memberCount()
 		}
-		if !published || count > 1 || time.Since(retired.at) < grace {
+		if !published || count > 1 || time.Since(retired.at) < sessionRotateGrace {
 			kept = append(kept, retired)
 			continue
 		}
@@ -996,68 +935,31 @@ func (b *Broadcaster) recreateSession() error {
 	if b.ctx.Err() != nil || !b.started {
 		return errors.New("broadcaster is shut down")
 	}
-	if b.relay != nil {
-		b.relay.close()
-		b.relay = nil
-	}
-	_ = b.cleanupPublishedSessions(true)
-	if b.signaling != nil {
-		if c, ok := b.signaling.(interface{ Close() error }); ok {
-			_ = c.Close()
-		}
-	}
-	b.signaling = nil
+	_ = b.releaseSessions()
 
 	sig, err := b.signalingFor(b.ctx)
 	if err != nil {
 		return fmt.Errorf("re-create signaling: %w", err)
 	}
 	if sig.Context().Err() != nil {
-		if c, ok := sig.(interface{ Close() error }); ok {
-			_ = c.Close()
-		}
+		_ = closeSignaling(sig)
 		return errors.New("re-create signaling: factory returned signaling with dead context")
 	}
 	b.signaling = sig
 	b.debug("nethernet signaling re-created", "network_id", signalingNetworkID(sig))
 
-	closeSignaling := func() {
-		if c, ok := sig.(interface{ Close() error }); ok {
-			_ = c.Close()
-		}
-		b.signaling = nil
-	}
-
 	ctx, cancel := context.WithTimeout(b.ctx, 30*time.Second)
 	defer cancel()
-	status, err := b.status(ctx)
-	if err != nil {
-		closeSignaling()
-		return fmt.Errorf("re-create session status: %w", err)
+	if err := b.publishOn(ctx, sig); err != nil {
+		_ = closeSignaling(sig)
+		b.signaling = nil
+		return fmt.Errorf("re-create session: %w", err)
 	}
-	announcer, err := b.newAnnouncer(ctx, b.conf.SessionName)
-	if err != nil {
-		closeSignaling()
-		return fmt.Errorf("re-create announcer: %w", err)
-	}
-	connection, err := b.signalingConnection(sig)
-	if err != nil {
-		closeSignaling()
-		return fmt.Errorf("re-create signaling connection: %w", err)
-	}
-	b.sessionConnection = connection
-	b.announcer = b.wrapAnnouncer(announcer, b.log)
-	if err := b.announcer.Announce(ctx, status); err != nil {
-		closeSignaling()
-		return fmt.Errorf("re-announce session: %w", err)
-	}
-
-	b.relay = b.startRelay(sig)
 	b.debug("join relay restarted", "network_id", signalingNetworkID(sig), "target", b.conf.JoinURL)
 
 	// Re-showcase the gallery image so a swapped file does not require a
 	// process restart; the upload no-ops when the image is already set.
-	go b.uploadGalleryWithTimeout()
+	go b.uploadGallery()
 	return nil
 }
 
@@ -1071,11 +973,13 @@ func (b *Broadcaster) Update(ctx context.Context) error {
 	if b.recovering {
 		return errors.New("session recovery is in progress")
 	}
+	if b.announcer == nil {
+		return errors.New("no published session")
+	}
 	status, err := b.status(ctx)
 	if err != nil {
 		return err
 	}
-	b.debugRoomStatus("resolved room status update", status)
 	if err := b.announcer.Announce(ctx, status); err != nil {
 		return err
 	}
@@ -1106,9 +1010,8 @@ func (b *Broadcaster) closeStaleSessions() {
 	b.staleAnnouncers = remaining
 }
 
-// cleanupPublishedSessions closes retired and stale sessions and optionally
-// the current announcer.
-func (b *Broadcaster) cleanupPublishedSessions(closeAnnouncer bool) error {
+// cleanupPublishedSessions closes the current, retired and stale sessions.
+func (b *Broadcaster) cleanupPublishedSessions() error {
 	var err error
 	var failed []room.Announcer
 	stale := b.staleAnnouncers
@@ -1123,76 +1026,44 @@ func (b *Broadcaster) cleanupPublishedSessions(closeAnnouncer bool) error {
 	}
 	b.retiredSessions = nil
 	b.staleAnnouncers = failed
-	if closeAnnouncer && b.announcer != nil {
+	if b.announcer != nil {
 		err = errors.Join(err, b.announcer.Close())
+		b.announcer = nil
 	}
 	b.sessionConnection = nil
 	return err
 }
 
-// cleanupStartupFailure cleans up all resources after a failed Start.
-func (b *Broadcaster) cleanupStartupFailure(closeAnnouncer bool) error {
-	err := b.cleanupPublishedSessions(closeAnnouncer)
-	if b.signaling != nil {
-		if c, ok := b.signaling.(interface{ Close() error }); ok {
-			err = errors.Join(err, c.Close())
-		}
+// releaseSessions stops the relay and closes every session and the signaling connection.
+func (b *Broadcaster) releaseSessions() error {
+	if b.relay != nil {
+		b.relay.close()
+		b.relay = nil
 	}
-	err = errors.Join(err, b.closeCreatedXBLClients())
+	err := errors.Join(b.cleanupPublishedSessions(), closeSignaling(b.signaling))
+	b.signaling = nil
 	return err
 }
 
-// closeCreatedXBLClients closes Xbox Live clients that were created during startup.
-func (b *Broadcaster) closeCreatedXBLClients() error {
-	if len(b.createdXBLClients) == 0 {
+// closeCreatedXBLClient closes the Xbox Live client the broadcaster created and forgets it,
+// with the token source derived from it, so a later Start creates fresh ones.
+func (b *Broadcaster) closeCreatedXBLClient() error {
+	client := b.createdXBLClient
+	if client == nil {
 		return nil
 	}
-	created := createdXBLClientSet(b.createdXBLClients)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	var err error
-	for client := range created {
-		err = errors.Join(err, client.CloseContext(ctx))
-	}
-	b.clearCreatedXBLClientReferences(created)
-	b.createdXBLClients = nil
-	return err
-}
+	err := client.CloseContext(ctx)
 
-// createdXBLClientSet builds a set of created clients for reference clearing.
-func createdXBLClientSet(clients []*xsapi.Client) map[*xsapi.Client]struct{} {
-	created := make(map[*xsapi.Client]struct{}, len(clients))
-	for _, client := range clients {
-		if client != nil {
-			created[client] = struct{}{}
-		}
-	}
-	return created
-}
-
-// clearCreatedXBLClientReferences nils out config references to closed clients.
-func (b *Broadcaster) clearCreatedXBLClientReferences(created map[*xsapi.Client]struct{}) {
+	// A running gallery upload still uses the client's token source.
 	b.galleryMu.Lock()
 	defer b.galleryMu.Unlock()
-
-	primaryCreated := xblClientCreated(b.conf.XBLClient, created) || xblClientCreated(b.xblClient, created)
-	if primaryCreated {
-		b.conf.XBLClient = nil
-		b.xblClient = nil
-		if b.minecraftTokens != nil {
-			b.minecraftTokens = nil
-			b.conf.MinecraftTokenSource = nil
-		}
+	b.conf.XBLClient, b.createdXBLClient = nil, nil
+	if b.createdMinecraftTokens {
+		b.conf.MinecraftTokenSource, b.createdMinecraftTokens = nil, false
 	}
-}
-
-// xblClientCreated reports whether a client was created by the broadcaster.
-func xblClientCreated(client *xsapi.Client, created map[*xsapi.Client]struct{}) bool {
-	if client == nil {
-		return false
-	}
-	_, ok := created[client]
-	return ok
+	return err
 }
 
 // Close stops the relay and removes the Xbox sessions.
@@ -1205,17 +1076,7 @@ func (b *Broadcaster) Close() error {
 	b.cancel()
 	// Release only our social handlers before closing any owned clients.
 	b.socialWg.Wait()
-	if b.relay != nil {
-		b.relay.close()
-		b.relay = nil
-	}
-	err := b.cleanupPublishedSessions(true)
-	if b.signaling != nil {
-		if c, ok := b.signaling.(interface{ Close() error }); ok {
-			err = errors.Join(err, c.Close())
-		}
-	}
-	err = errors.Join(err, b.closeCreatedXBLClients())
+	err := errors.Join(b.releaseSessions(), b.closeCreatedXBLClient())
 	b.started = false
 	return err
 }

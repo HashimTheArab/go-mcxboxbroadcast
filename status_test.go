@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/sandertv/gophertunnel/minecraft"
-
 	"github.com/sandertv/gophertunnel/minecraft/p2p"
+	"github.com/sandertv/gophertunnel/minecraft/protocol"
 	"github.com/sandertv/gophertunnel/minecraft/room"
 )
 
@@ -161,7 +161,7 @@ func TestStatusResetsToConfigWhenQueryFailsWithConfigFallback(t *testing.T) {
 	}
 }
 
-// A session advertises exactly one pair: the configured override, else 1.26.60/2225, never a provider's.
+// A session advertises exactly one pair: the configured override, else gophertunnel's, never a provider's.
 func TestStatusAdvertisesOnePair(t *testing.T) {
 	provider := room.NewStatusProvider(room.Status{HostName: "Host", Protocol: 2168, Version: "1.26.44"})
 	for name, tc := range map[string]struct {
@@ -169,8 +169,8 @@ func TestStatusAdvertisesOnePair(t *testing.T) {
 		version  string
 		protocol int32
 	}{
-		"default":           {Config{Status: Status{HostName: "Host"}}, "1.26.60", 2225},
-		"provider":          {Config{StatusProvider: provider}, "1.26.60", 2225},
+		"default":           {Config{Status: Status{HostName: "Host"}}, protocol.CurrentVersion, protocol.CurrentProtocol},
+		"provider":          {Config{StatusProvider: provider}, protocol.CurrentVersion, protocol.CurrentProtocol},
 		"override":          {Config{Status: Status{HostName: "Host", Version: "1.26.50", Protocol: 2193}}, "1.26.50", 2193},
 		"provider override": {Config{StatusProvider: provider, Status: Status{Version: "1.26.50", Protocol: 2193}}, "1.26.50", 2193},
 	} {

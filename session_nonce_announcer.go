@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/df-mc/go-xsapi/v2/mpsd"
-	"github.com/google/uuid"
 	"github.com/sandertv/gophertunnel/minecraft/p2p"
 	"github.com/sandertv/gophertunnel/minecraft/room"
 )
@@ -104,7 +103,7 @@ func (a *sessionNonceAnnouncer) Announce(ctx context.Context, status room.Status
 	restrictionsChanged := read != a.readRestriction || join != a.joinRestriction
 	if a.Session != nil && restrictionsChanged {
 		if a.Client == nil {
-			return errors.New("room: XBLAnnouncer.Client is nil and MPSD restrictions changed")
+			return errors.New("republish session: mpsd client is nil")
 		}
 		if err := a.Session.CloseContext(ctx); err != nil {
 			return fmt.Errorf("close stale session: %w", err)
@@ -120,16 +119,7 @@ func (a *sessionNonceAnnouncer) Announce(ctx context.Context, status room.Status
 
 	if a.Session == nil {
 		if a.Client == nil {
-			return errors.New("room: XBLAnnouncer.Client is nil")
-		}
-		if a.SessionReference.ServiceConfigID == uuid.Nil {
-			a.SessionReference.ServiceConfigID = uuid.MustParse("4fc10100-5f7a-4470-899b-280835760c07")
-		}
-		if a.SessionReference.TemplateName == "" {
-			a.SessionReference.TemplateName = "MinecraftLobby"
-		}
-		if a.SessionReference.Name == "" {
-			a.SessionReference.Name = strings.ToUpper(uuid.NewString())
+			return errors.New("publish session: mpsd client is nil")
 		}
 		session, err := a.Client.Publish(ctx, a.SessionReference, config)
 		if err != nil {

@@ -79,29 +79,24 @@ func newTestXSAPIClient(t *testing.T, client *http.Client, xuid string) *xsapi.C
 	return xbl
 }
 
-func TestBroadcasterClearCreatedXBLClientReferences(t *testing.T) {
-	primary := &xsapi.Client{}
-	tokens := staticMinecraftTokenSource{}
+func TestBroadcasterForgetsCreatedXBLClient(t *testing.T) {
+	client := newTestXSAPIClient(t, &http.Client{Transport: broadcasterRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("offline")
+	})}, "123")
 	b := &Broadcaster{
-		xblClient:         primary,
-		minecraftTokens:   tokens,
-		createdXBLClients: []*xsapi.Client{primary},
+		createdXBLClient:       client,
+		createdMinecraftTokens: true,
 		conf: Config{
-			XBLClient:            primary,
-			MinecraftTokenSource: tokens,
+			XBLClient:            client,
+			MinecraftTokenSource: staticMinecraftTokenSource{},
 		},
 	}
-
-	b.clearCreatedXBLClientReferences(createdXBLClientSet(b.createdXBLClients))
-
-	if b.xblClient != nil {
-		t.Fatal("created primary client cache was not cleared")
+	_ = b.closeCreatedXBLClient()
+	if b.conf.XBLClient != nil || b.createdXBLClient != nil {
+		t.Fatal("created client was not cleared")
 	}
-	if b.conf.XBLClient != nil {
-		t.Fatal("created primary config client was not cleared")
-	}
-	if b.minecraftTokens != nil || b.conf.MinecraftTokenSource != nil {
-		t.Fatal("minecraft token source derived from created primary client was not cleared")
+	if b.conf.MinecraftTokenSource != nil {
+		t.Fatal("minecraft token source derived from the created client was not cleared")
 	}
 }
 
@@ -152,7 +147,6 @@ func TestBroadcasterRejectsInvalidNetworkID(t *testing.T) {
 	t.Parallel()
 
 	for _, networkID := range []string{"0", "01"} {
-		networkID := networkID
 		t.Run(networkID, func(t *testing.T) {
 			t.Parallel()
 			b := &Broadcaster{}
@@ -316,7 +310,7 @@ func TestRotateSessionRetiresOldSession(t *testing.T) {
 				b.ctx, b.cancel = context.WithCancel(t.Context())
 				defer b.cancel()
 				b.sessionConnection = &p2p.Connection{Type: p2p.ConnectionTypeSignalingOverJSONRPC, NetherNetID: "123456789", PlayerMessagingID: fakePlayerMessagingID}
-				b.announcer = b.wrapAnnouncer(old, b.log)
+				b.announcer = b.wrapAnnouncer(old)
 
 				if err := b.rotateSession(t.Context()); err != nil {
 					t.Fatal(err)
@@ -340,7 +334,7 @@ func TestRotateSessionRetiresOldSession(t *testing.T) {
 				if old.hidden() != hide {
 					t.Fatalf("old session hidden = %v, want %v", old.hidden(), hide)
 				}
-				if err := b.cleanupPublishedSessions(true); err != nil {
+				if err := b.cleanupPublishedSessions(); err != nil {
 					t.Fatal(err)
 				}
 				if !old.Closed() || len(b.retiredSessions) != 0 {
@@ -359,7 +353,7 @@ func TestCloseDrainedSessionsKeepsPlayersAndGracePeriod(t *testing.T) {
 		unpublished := &hidingAnnouncer{members: -1}
 		b := &Broadcaster{log: testBroadcasterLogger()}
 		for _, a := range []*hidingAnnouncer{playing, drained, unpublished} {
-			b.retire(b.wrapAnnouncer(a, b.log), b.log)
+			b.retire(b.wrapAnnouncer(a))
 		}
 		time.Sleep(sessionRotateGrace - time.Nanosecond)
 		b.closeDrainedSessions()

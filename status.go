@@ -22,7 +22,7 @@ import (
 var defaultRoomStatus = room.DefaultStatus()
 
 func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
-	ownerID, err := b.primaryXUIDForStatus(ctx)
+	ownerID, err := b.resolveXUID(ctx)
 	if err != nil {
 		return room.Status{}, err
 	}
@@ -37,7 +37,7 @@ func (b *Broadcaster) status(ctx context.Context) (room.Status, error) {
 			Timeout:            st.QueryTimeout,
 			WebFallbackEnabled: st.WebQueryFallback,
 			Client:             st.WebQueryClient,
-			ClientInfo:         endpoint.ClientInfo{Version: b.advertisedVersion(), Protocol: int(b.advertisedProtocol()), Platform: relayClientPlatform},
+			ClientInfo:         b.clientInfo(),
 		}); err == nil {
 			b.debug("queried target server status",
 				"server_name", queried.ServerName,
@@ -93,6 +93,11 @@ func (b *Broadcaster) advertisedProtocol() int32 {
 	return protocol.CurrentProtocol
 }
 
+// clientInfo identifies the broadcaster to the target's HTTP signaling as a client of the advertised version.
+func (b *Broadcaster) clientInfo() endpoint.ClientInfo {
+	return endpoint.ClientInfo{Version: b.advertisedVersion(), Protocol: int(b.advertisedProtocol()), Platform: relayClientPlatform}
+}
+
 // applyQueriedStatus overlays a queried server status onto the announced one.
 func applyQueriedStatus(st *Status, queried minecraft.ServerStatus) {
 	st.WorldName = queried.ServerName
@@ -104,14 +109,15 @@ func applyQueriedStatus(st *Status, queried minecraft.ServerStatus) {
 // hostNameFallback returns the account gamertag for empty host names, matching
 // MCXboxBroadcast, with a static fallback when no profile is available.
 func (b *Broadcaster) hostNameFallback() string {
-	if gamertag := clientGamertag(b.conf.XBLClient, b.xblClient); gamertag != "" {
+	if gamertag := clientGamertag(b.conf.XBLClient); gamertag != "" {
 		return gamertag
 	}
 	return "MCXboxBroadcast"
 }
 
-func (b *Broadcaster) primaryXUIDForStatus(ctx context.Context) (string, error) {
-	if xuid := b.primaryXUID(); xuid != "" {
+// resolveXUID returns the account's XUID, asking XBLTokenSource when neither config nor client knows it.
+func (b *Broadcaster) resolveXUID(ctx context.Context) (string, error) {
+	if xuid := b.xuid(); xuid != "" {
 		return xuid, nil
 	}
 	if b.conf.XBLTokenSource == nil {

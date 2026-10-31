@@ -24,7 +24,7 @@ func TestBroadcasterFriendClientUsesXSAPIOwnedSocialClient(t *testing.T) {
 	xbl := newTestXSAPIClient(t, &http.Client{}, "primary")
 	b := &Broadcaster{conf: Config{XBLClient: xbl, HTTPClient: &http.Client{}}}
 
-	client := b.friendClientFor(xbl)
+	client := b.friendClient()
 	if client.Social == nil || client.Social != xbl.Social() {
 		t.Fatal("friend client did not use xsapi-owned social subclient")
 	}
@@ -251,7 +251,7 @@ func TestFriendClientFriendsReadsFriendList(t *testing.T) {
 	if got := strings.Join(requests, ","); got != peopleHubFriendsURL {
 		t.Fatalf("requests = %s, want %s", got, peopleHubFriendsURL)
 	}
-	if len(people) != 1 || people[0] != (Person{XUID: "1", Gamertag: "One", DisplayName: "Display"}) {
+	if len(people) != 1 || people[0] != (Person{XUID: "1", Gamertag: "One"}) {
 		t.Fatalf("people = %#v", people)
 	}
 }

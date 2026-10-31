@@ -44,8 +44,8 @@ func TestRunBroadcasterCommandStartsAndClosesBroadcaster(t *testing.T) {
 			return nil
 		},
 		NewXSAPIClient: testNewXSAPIClient,
-		CloseXSAPIClients: func(_ *slog.Logger, clients []*xsapi.Client) {
-			closedClients = len(clients)
+		CloseXSAPIClient: func(*slog.Logger, *xsapi.Client) {
+			closedClients++
 		},
 		NewBroadcaster: func(broadcaster.Config) (commandBroadcaster, error) {
 			return fakeCommandBroadcaster{
@@ -104,8 +104,8 @@ func TestRunBroadcasterCommandClosesXSAPIClientsWhenStartFails(t *testing.T) {
 			return nil
 		},
 		NewXSAPIClient: testNewXSAPIClient,
-		CloseXSAPIClients: func(_ *slog.Logger, clients []*xsapi.Client) {
-			closedClients = len(clients)
+		CloseXSAPIClient: func(*slog.Logger, *xsapi.Client) {
+			closedClients++
 		},
 		NewBroadcaster: func(broadcaster.Config) (commandBroadcaster, error) {
 			return fakeCommandBroadcaster{
@@ -162,8 +162,8 @@ func TestRunBroadcasterCommandClosesAfterInternalFailure(t *testing.T) {
 						return nil
 					},
 					NewXSAPIClient: testNewXSAPIClient,
-					CloseXSAPIClients: func(_ *slog.Logger, clients []*xsapi.Client) {
-						closedClients = len(clients)
+					CloseXSAPIClient: func(*slog.Logger, *xsapi.Client) {
+						closedClients++
 					},
 					NewBroadcaster: func(broadcaster.Config) (commandBroadcaster, error) {
 						return fakeCommandBroadcaster{

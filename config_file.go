@@ -104,6 +104,14 @@ type NotificationConfig struct {
 	WebhookURL string `yaml:"webhookUrl" toml:"webhookUrl"`
 }
 
+// Notifier returns the configured webhook notifier, or nil when notifications are off.
+func (n NotificationConfig) Notifier(client *http.Client) Notifier {
+	if !n.Enabled {
+		return nil
+	}
+	return SlackNotifier{WebhookURL: n.WebhookURL, Client: client}
+}
+
 type GalleryFileConfig struct {
 	Enabled           bool   `yaml:"enabled" toml:"enabled"`
 	ImagePath         string `yaml:"imagePath" toml:"imagePath"`
@@ -130,7 +138,7 @@ func DefaultConfigFile() ConfigFile {
 		DebugMode:     false,
 		Session: SessionFileConfig{
 			JoinURL:          "https://" + exampleServerHost + ":19132",
-			UpdateInterval:   30,
+			UpdateInterval:   int(defaultUpdateInterval / time.Second),
 			QueryServer:      true,
 			WebQueryFallback: false,
 			ConfigFallback:   false,
@@ -150,7 +158,7 @@ func DefaultConfigFile() ConfigFile {
 			InitialInvite:  true,
 			Expiry: FriendExpiryFile{
 				Enabled:     true,
-				Days:        15,
+				Days:        defaultFriendExpiryDays,
 				Check:       1800,
 				HistoryPath: "cache/player_history.json",
 			},
@@ -258,15 +266,15 @@ var configMigrations = map[int]func(doc map[string]any) []string{
 	7: migrateDropSubAccounts,
 }
 
-// migrateDropSessionOverrides removes keys this broadcaster never honours or
-// no longer supports: the advertised version override, which can advertise a
-// version the listener rejects, and the Geyser-extension-only target keys.
+// migrateDropSessionOverrides removes the version 3 advertised-version
+// override, which predates the target it must match, and the
+// Geyser-extension-only target keys.
 func migrateDropSessionOverrides(doc map[string]any) []string {
 	var notes []string
 	protocol := deleteConfigKey(doc, "session", "sessionInfo", "protocol")
 	version := deleteConfigKey(doc, "session", "sessionInfo", "version")
 	if protocol || version {
-		notes = append(notes, "removed session.sessionInfo.protocol/version: sessions now always advertise the version this build accepts")
+		notes = append(notes, "removed session.sessionInfo.protocol/version from the version 3 config; set both again to advertise another pair")
 	}
 	for _, key := range []string{"remoteAddress", "remotePort"} {
 		if deleteConfigKey(doc, "session", key) {
@@ -387,31 +395,32 @@ func deleteConfigKey(doc map[string]any, path ...string) bool {
 	return true
 }
 
+// migrate brings the version current and replaces out-of-range values with the minimum or default.
 func (c *ConfigFile) migrate() {
-	if c.ConfigVersion == 0 || c.ConfigVersion < CurrentConfigVersion {
-		c.ConfigVersion = CurrentConfigVersion
+	c.ConfigVersion = max(c.ConfigVersion, CurrentConfigVersion)
+	minInterval := int(minUpdateInterval / time.Second)
+	if c.Session.UpdateInterval < minInterval {
+		c.note("session.updateInterval %d is below the %d second minimum; using %[2]d", c.Session.UpdateInterval, minInterval)
+		c.Session.UpdateInterval = minInterval
 	}
-	if c.Session.UpdateInterval < 20 {
-		c.note("session.updateInterval %d is below the 20 second minimum; using 20", c.Session.UpdateInterval)
-		c.Session.UpdateInterval = 20
+	if c.FriendSync.UpdateInterval < minInterval {
+		c.note("friendSync.updateInterval %d is below the %d second minimum; using %[2]d", c.FriendSync.UpdateInterval, minInterval)
+		c.FriendSync.UpdateInterval = minInterval
 	}
-	if c.FriendSync.UpdateInterval < 20 {
-		c.note("friendSync.updateInterval %d is below the 20 second minimum; using 20", c.FriendSync.UpdateInterval)
-		c.FriendSync.UpdateInterval = 20
-	}
+	def := DefaultConfigFile()
 	if c.FriendSync.Expiry.Days <= 0 {
-		c.note("friendSync.expiry.days %d is invalid; using 15", c.FriendSync.Expiry.Days)
-		c.FriendSync.Expiry.Days = 15
+		c.note("friendSync.expiry.days %d is invalid; using %d", c.FriendSync.Expiry.Days, def.FriendSync.Expiry.Days)
+		c.FriendSync.Expiry.Days = def.FriendSync.Expiry.Days
 	}
 	if c.FriendSync.Expiry.Check <= 0 {
-		c.note("friendSync.expiry.check %d is invalid; using 1800", c.FriendSync.Expiry.Check)
-		c.FriendSync.Expiry.Check = 1800
+		c.note("friendSync.expiry.check %d is invalid; using %d", c.FriendSync.Expiry.Check, def.FriendSync.Expiry.Check)
+		c.FriendSync.Expiry.Check = def.FriendSync.Expiry.Check
 	}
 	if c.FriendSync.Expiry.HistoryPath == "" {
-		c.FriendSync.Expiry.HistoryPath = "cache/player_history.json"
+		c.FriendSync.Expiry.HistoryPath = def.FriendSync.Expiry.HistoryPath
 	}
 	if c.Gallery.ImagePath == "" {
-		c.Gallery.ImagePath = "screenshot.jpg"
+		c.Gallery.ImagePath = def.Gallery.ImagePath
 	}
 }
 
@@ -462,12 +471,7 @@ func (c ConfigFile) RuntimeConfig(in RuntimeConfigInput) (Config, error) {
 			Client:            in.HTTPClient,
 		}
 	}
-	if c.Notifications.Enabled {
-		cfg.Notifier = SlackNotifier{
-			WebhookURL: c.Notifications.WebhookURL,
-			Client:     in.HTTPClient,
-		}
-	}
+	cfg.Notifier = c.Notifications.Notifier(in.HTTPClient)
 	return cfg, nil
 }
 

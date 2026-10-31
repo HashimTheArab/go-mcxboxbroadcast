@@ -55,7 +55,7 @@ func (b *Broadcaster) sessionLoop() {
 			}
 		}
 		if issue.rotate {
-			if b.rotatePrimarySession(issue) {
+			if b.rotate(issue) {
 				consecutiveFailures = 0
 				continue
 			}
@@ -89,7 +89,7 @@ func (b *Broadcaster) sessionLoop() {
 		consecutiveFailures++
 		b.log.Error("update session", "err", err)
 		if consecutiveFailures == 1 {
-			b.notifySessionUpdateFailure(b.ctx, err)
+			b.notify(b.ctx, "Xbox session update failed: "+err.Error())
 		}
 		if consecutiveFailures >= sessionUpdateFailureLimit {
 			if !b.recoverSession(sessionHealthIssue{reason: "repeated session update failures"}) {
@@ -100,9 +100,9 @@ func (b *Broadcaster) sessionLoop() {
 	}
 }
 
-// rotatePrimarySession reports whether the primary session rotated; on failure
-// the caller falls back to full recreation, as Java restarts.
-func (b *Broadcaster) rotatePrimarySession(issue sessionHealthIssue) bool {
+// rotate reports whether the session rotated; on failure the caller falls
+// back to full recreation, as Java restarts.
+func (b *Broadcaster) rotate(issue sessionHealthIssue) bool {
 	b.info("rotating session", "reason", issue.reason)
 	ctx, cancel := context.WithTimeout(b.ctx, 30*time.Second)
 	defer cancel()
@@ -126,13 +126,13 @@ func (b *Broadcaster) canRecreateSignaling() bool {
 	return b.conf.Signaling == nil
 }
 
-// reportStaticActivityRecoveryFailure reports an unrecoverable primary activity
-// only if the probed publication is still current.
+// reportStaticActivityRecoveryFailure reports an unrecoverable activity only
+// if the probed publication is still current.
 func (b *Broadcaster) reportStaticActivityRecoveryFailure(issue sessionHealthIssue) {
-	if !b.primaryActivityCurrent(issue.activity) {
+	if !b.activityCurrent(issue.activity) {
 		return
 	}
-	err := errors.New("cannot recover the primary Xbox activity with Config.Signaling; provide SignalingFactory to enable session recovery")
+	err := errors.New("cannot recover the Xbox activity with Config.Signaling; provide SignalingFactory to enable session recovery")
 	b.log.Error("activity recovery failed", "reason", issue.reason, "err", err)
 	b.notify(b.ctx, err.Error())
 }
@@ -149,7 +149,7 @@ func (b *Broadcaster) recoverSession(issue sessionHealthIssue) bool {
 		return true
 	}
 	b.mu.Lock()
-	if issue.activity != nil && !b.primaryActivityCurrentLocked(issue.activity) {
+	if issue.activity != nil && !b.activityCurrentLocked(issue.activity) {
 		b.mu.Unlock()
 		return true
 	}

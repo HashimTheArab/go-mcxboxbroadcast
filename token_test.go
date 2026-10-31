@@ -442,14 +442,13 @@ func TestMinecraftTokenDiagnosticsFormatsPlayerBannedError(t *testing.T) {
 	}
 }
 
+// The lazily created token source outlives one upload, so it must not get the upload's deadline.
 func TestUploadGalleryUsesBroadcasterContextForLazyMinecraftTokenSource(t *testing.T) {
 	type contextKey struct{}
 	const want = "broadcaster"
 
 	src := &contextCapturingTokenSource{}
 	broadcasterCtx := context.WithValue(context.Background(), contextKey{}, want)
-	galleryCtx, cancel := context.WithCancel(context.WithValue(context.Background(), contextKey{}, "gallery"))
-	cancel()
 
 	b := &Broadcaster{
 		ctx: broadcasterCtx,
@@ -462,13 +461,13 @@ func TestUploadGalleryUsesBroadcasterContextForLazyMinecraftTokenSource(t *testi
 			},
 		},
 	}
-	b.uploadGallery(galleryCtx)
+	b.uploadGallery()
 
 	if src.ctx == nil {
 		t.Fatal("xbox token source was not called")
 	}
-	if src.ctx.Err() != nil {
-		t.Fatalf("lazy token source used expired context: %v", src.ctx.Err())
+	if _, ok := src.ctx.Deadline(); ok {
+		t.Fatal("lazy token source got the upload deadline")
 	}
 	if got := src.ctx.Value(contextKey{}); got != want {
 		t.Fatalf("lazy token source context value = %v, want %q", got, want)

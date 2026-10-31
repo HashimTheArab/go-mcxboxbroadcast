@@ -121,7 +121,7 @@ func TestBroadcasterClosePreservesSharedSocialSubscriber(t *testing.T) {
 	b := &Broadcaster{log: log, started: true}
 	b.ctx, b.cancel = context.WithCancel(ctx)
 	defer b.cancel()
-	trigger := b.subscribeSocial(social, log)
+	trigger := b.subscribeSocial(social)
 	select {
 	case <-subscribed:
 	case <-ctx.Done():

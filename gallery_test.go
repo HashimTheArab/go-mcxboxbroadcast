@@ -3,6 +3,7 @@ package broadcaster
 import (
 	"bytes"
 	"context"
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
@@ -15,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/df-mc/go-xsapi/v2"
 	"github.com/sandertv/gophertunnel/minecraft/service"
 )
 
@@ -23,10 +23,13 @@ func TestGalleryClientCleanupWaitsForActiveUpload(t *testing.T) {
 	imagePath := testGalleryImageFile(t)
 	requestStarted := make(chan struct{})
 	releaseRequest := make(chan struct{})
-	client := &xsapi.Client{}
+	client := newTestXSAPIClient(t, &http.Client{Transport: galleryRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("offline")
+	})}, "primary")
 	b := &Broadcaster{
-		ctx: context.Background(),
-		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		createdXBLClient: client,
+		ctx:              context.Background(),
+		log:              slog.New(slog.NewTextHandler(io.Discard, nil)),
 		conf: Config{
 			XBLClient: client,
 			XUID:      "primary",
@@ -48,14 +51,14 @@ func TestGalleryClientCleanupWaitsForActiveUpload(t *testing.T) {
 	uploadDone := make(chan struct{})
 	go func() {
 		defer close(uploadDone)
-		b.uploadGallery(context.Background())
+		b.uploadGallery()
 	}()
 	<-requestStarted
 
 	cleanupDone := make(chan struct{})
 	go func() {
 		defer close(cleanupDone)
-		b.clearCreatedXBLClientReferences(map[*xsapi.Client]struct{}{client: {}})
+		_ = b.closeCreatedXBLClient()
 	}()
 
 	select {
@@ -100,7 +103,7 @@ func TestGalleryUploadStopsAtTimeout(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		b.uploadGalleryWithTimeout()
+		b.uploadGallery()
 	}()
 	select {
 	case <-done:

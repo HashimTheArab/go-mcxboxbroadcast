@@ -39,7 +39,7 @@ func (b *Broadcaster) publishedActivity() (publishedActivity, bool) {
 	if !b.started || b.recovering {
 		return publishedActivity{}, false
 	}
-	xuid := b.primaryXUID()
+	xuid := b.xuid()
 	xbl, ok := xblAnnouncer(b.announcer)
 	if !ok || xuid == "" {
 		return publishedActivity{}, false
@@ -52,9 +52,9 @@ func (b *Broadcaster) publishedActivity() (publishedActivity, bool) {
 	return publishedActivity{xuid: xuid, ref: xbl.SessionReference, announcer: xbl, session: xbl.Session, client: xbl.Client}, true
 }
 
-// primaryActivityCurrentLocked reports whether activity still identifies the
-// primary publication. The caller must hold b.mu so Update cannot replace it.
-func (b *Broadcaster) primaryActivityCurrentLocked(activity *publishedActivity) bool {
+// activityCurrentLocked reports whether activity still identifies the current
+// publication. The caller must hold b.mu so Update cannot replace it.
+func (b *Broadcaster) activityCurrentLocked(activity *publishedActivity) bool {
 	if activity == nil {
 		return true
 	}
@@ -67,12 +67,12 @@ func (b *Broadcaster) primaryActivityCurrentLocked(activity *publishedActivity) 
 	return xbl.Session == activity.session && xbl.SessionReference == activity.ref
 }
 
-// primaryActivityCurrent reports whether activity still identifies the primary
+// activityCurrent reports whether activity still identifies the current
 // publication without holding the broadcaster lock during later network work.
-func (b *Broadcaster) primaryActivityCurrent(activity *publishedActivity) bool {
+func (b *Broadcaster) activityCurrent(activity *publishedActivity) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.primaryActivityCurrentLocked(activity)
+	return b.activityCurrentLocked(activity)
 }
 
 // activityHealthIssue checks the account's own directory handle. This detects lost

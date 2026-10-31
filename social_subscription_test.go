@@ -141,7 +141,7 @@ func TestSocialSubscriptionSetupTimesOut(t *testing.T) {
 		b.ctx, b.cancel = context.WithCancel(t.Context())
 		defer b.cancel()
 		result := make(chan error, 1)
-		b.subscribeSocial(waitingSocialSubscriber{result}, b.log)
+		b.subscribeSocial(waitingSocialSubscriber{result})
 		synctest.Wait()
 		time.Sleep(defaultXboxOperationTimeout - time.Nanosecond)
 		synctest.Wait()
@@ -178,7 +178,7 @@ func TestSubscribeSocialUnsubscribesOnShutdown(t *testing.T) {
 		subscribed: make(chan xblsocial.SubscriptionHandler, 1),
 	}
 
-	trigger := b.subscribeSocial(fake, b.log)
+	trigger := b.subscribeSocial(fake)
 	if trigger == nil {
 		t.Fatal("subscribeSocial returned a nil trigger")
 	}
@@ -210,26 +210,6 @@ func TestSubscribeSocialUnsubscribesOnShutdown(t *testing.T) {
 	}
 }
 
-// TestReactiveFriendSyncApplicable verifies which configurations warrant a
-// reactive social subscription.
-func TestReactiveFriendSyncApplicable(t *testing.T) {
-	cases := []struct {
-		name string
-		conf *FriendSyncConfig
-		want bool
-	}{
-		{"nil", nil, false},
-		{"neither", &FriendSyncConfig{}, false},
-		{"auto-friend", &FriendSyncConfig{AutoFriend: true}, true},
-		{"expiry only", &FriendSyncConfig{ExpiryEnabled: true}, false},
-	}
-	for _, tc := range cases {
-		if got := reactiveFriendSyncApplicable(tc.conf); got != tc.want {
-			t.Errorf("%s: reactiveFriendSyncApplicable = %v, want %v", tc.name, got, tc.want)
-		}
-	}
-}
-
 func TestSocialSubscriptionFailureKeepsPolling(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		b := &Broadcaster{log: testBroadcasterLogger()}
@@ -246,7 +226,7 @@ func TestSocialSubscriptionFailureKeepsPolling(t *testing.T) {
 				return nil, nil
 			}},
 			Config:  FriendSyncConfig{AutoFriend: true, UpdateInterval: 20 * time.Second},
-			Trigger: b.subscribeSocial(sub, b.log),
+			Trigger: b.subscribeSocial(sub),
 		}
 		go syncer.Run(b.ctx)
 		synctest.Wait()

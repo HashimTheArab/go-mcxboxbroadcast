@@ -44,7 +44,7 @@ type commandDeps struct {
 	SaveLiveToken      func(string, *oauth2.Token) error
 	NewXBLTokenSource  func(context.Context, oauth2.TokenSource) xsapi.TokenSource
 	NewXSAPIClient     func(context.Context, xsapi.TokenSource, *http.Client, *slog.Logger) (*xsapi.Client, error)
-	CloseXSAPIClients  func(*slog.Logger, []*xsapi.Client)
+	CloseXSAPIClient   func(*slog.Logger, *xsapi.Client)
 	NewBroadcaster     func(broadcaster.Config) (commandBroadcaster, error)
 }
 
@@ -113,24 +113,15 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 		}
 		defer stopMetrics()
 	}
-	var xblClients []*xsapi.Client
-	defer func() {
-		deps.CloseXSAPIClients(log, xblClients)
-	}()
-
 	baseDir, err := filepath.Abs(filepath.Dir(opts.ConfigPath))
 	if err != nil {
 		return fmt.Errorf("resolve config directory: %w", err)
 	}
 	cachePath := resolveConfigPath(baseDir, cfg.Accounts.PrimaryCachePath)
 
-	var notifier broadcaster.Notifier
-	if cfg.Notifications.Enabled {
-		notifier = broadcaster.SlackNotifier{WebhookURL: cfg.Notifications.WebhookURL, Client: httpClient}
-	}
 	// Sign-in prompts (device-code URL and code) also go to the webhook so a
 	// headless instance whose token dies can still be recovered.
-	authOut := signInWriter(deps.Stdout, notifier, log)
+	authOut := signInWriter(deps.Stdout, cfg.Notifications.Notifier(httpClient), log)
 
 	tok, err := deps.LoadLiveToken(cachePath)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -149,7 +140,7 @@ func runBroadcasterCommand(ctx context.Context, opts commandOptions, deps comman
 	if err != nil {
 		return fmt.Errorf("authenticate xbox live: %w", err)
 	}
-	xblClients = append(xblClients, xblClient)
+	defer deps.CloseXSAPIClient(log, xblClient)
 
 	runtime, err := cfg.RuntimeConfig(broadcaster.RuntimeConfigInput{
 		XBLClient:      xblClient,
@@ -211,8 +202,8 @@ func (d commandDeps) withDefaults() commandDeps {
 	if d.NewXSAPIClient == nil {
 		d.NewXSAPIClient = broadcaster.NewXSAPIClient
 	}
-	if d.CloseXSAPIClients == nil {
-		d.CloseXSAPIClients = closeXSAPIClients
+	if d.CloseXSAPIClient == nil {
+		d.CloseXSAPIClient = closeXSAPIClient
 	}
 	if d.NewBroadcaster == nil {
 		d.NewBroadcaster = func(conf broadcaster.Config) (commandBroadcaster, error) {
@@ -222,19 +213,14 @@ func (d commandDeps) withDefaults() commandDeps {
 	return d
 }
 
-func closeXSAPIClients(log *slog.Logger, clients []*xsapi.Client) {
+func closeXSAPIClient(log *slog.Logger, client *xsapi.Client) {
+	if client.HTTPClient() == nil && client.MPSD() == nil && client.TokenSource() == nil {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	for _, client := range clients {
-		if client == nil {
-			continue
-		}
-		if client.HTTPClient() == nil && client.MPSD() == nil && client.TokenSource() == nil {
-			continue
-		}
-		if err := client.CloseContext(ctx); err != nil && log != nil {
-			log.Warn("close xbox live client", "err", err)
-		}
+	if err := client.CloseContext(ctx); err != nil {
+		log.Warn("close xbox live client", "err", err)
 	}
 }
 
@@ -285,7 +271,7 @@ func (w *notifyingWriter) Write(p []byte) (int, error) {
 	return w.out.Write(p)
 }
 
-// resolveConfigPath returns a clean path so equivalent spellings compare equal.
+// resolveConfigPath resolves a relative path against the config directory.
 func resolveConfigPath(base, path string) string {
 	if path == "" {
 		return defaultCachePath()

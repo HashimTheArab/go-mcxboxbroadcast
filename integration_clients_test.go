@@ -99,7 +99,7 @@ func TestSessionUpdateFailureNotificationIgnoresSuppressFlag(t *testing.T) {
 			}},
 		},
 	}
-	b.notifySessionUpdateFailure(context.Background(), errors.New("boom"))
+	b.notify(context.Background(), "Xbox session update failed: boom")
 	if !notified {
 		t.Fatal("session update failure notification should not be suppressed")
 	}
@@ -119,7 +119,7 @@ func TestSessionUpdateFailureNotificationUsesLiveContext(t *testing.T) {
 			}},
 		},
 	}
-	b.notifySessionUpdateFailure(ctx, errors.New("boom"))
+	b.notify(ctx, "Xbox session update failed: boom")
 	if !notified {
 		t.Fatal("session update failure was not notified")
 	}
@@ -431,7 +431,7 @@ func TestSignalingStartupHTTPClientBoundsTimeout(t *testing.T) {
 func TestStartupFailureCleanupClosesSignaling(t *testing.T) {
 	sig := &fakeSignaling{}
 	b := &Broadcaster{signaling: sig}
-	if err := b.cleanupStartupFailure(false); err != nil {
+	if err := b.releaseSessions(); err != nil {
 		t.Fatal(err)
 	}
 	if !sig.closed {

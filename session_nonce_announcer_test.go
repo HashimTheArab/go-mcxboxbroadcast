@@ -248,7 +248,7 @@ func TestSessionNonceAnnouncerDoesNotNoOpWithoutSession(t *testing.T) {
 	if err == nil {
 		t.Fatal("Announce returned nil without an active session")
 	}
-	if !strings.Contains(err.Error(), "XBLAnnouncer.Client is nil") {
+	if !strings.Contains(err.Error(), "mpsd client is nil") {
 		t.Fatalf("Announce error = %v, want missing client publish attempt", err)
 	}
 }

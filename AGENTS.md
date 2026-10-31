@@ -43,7 +43,7 @@ without contacting Xbox. Preserve these checks when changing recovery:
   or ability to join. Keep that limitation clear in operator documentation.
 - Do not close and reuse an injected `Config.Signaling` connection during
   recovery. `SignalingFactory` allows recreation. When static signaling prevents
-  primary activity recovery, report the failure and preserve the cooldown.
+  activity recovery, report the failure and preserve the cooldown.
 
 ## Joins and session rotation
 
@@ -58,7 +58,7 @@ Players stay session members while they play. Every member counts toward the
 signaling connection and the old one is kept, then hidden after 30 seconds when
 `HideOldSessions` is set. The session loop closes a retired session once its
 grace period has passed and only the bot remains, so retired sessions do not
-pile up RTA subscriptions. A failed primary rotation falls back to full recovery.
+pile up RTA subscriptions. A failed rotation falls back to full recovery.
 These thresholds mirror MCXboxBroadcast; keep them in sync with it.
 
 Friend sync manages friends only. Do not reintroduce follower handling.
