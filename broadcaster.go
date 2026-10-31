@@ -198,16 +198,25 @@ func (b *Broadcaster) startRelay(sig nethernet.Signaling) *httpRelay {
 }
 
 // minecraftTokenSource returns conf.MinecraftTokenSource, creating it from XBLClient on first use.
+// It takes b.mu only around the field, since the signaling dial sets it under b.mu during
+// Start and recovery while gallery uploads run concurrently.
 func (b *Broadcaster) minecraftTokenSource(ctx context.Context) (service.TokenSource, error) {
-	if b.conf.MinecraftTokenSource != nil {
-		return b.conf.MinecraftTokenSource, nil
+	b.mu.Lock()
+	tokens := b.conf.MinecraftTokenSource
+	b.mu.Unlock()
+	if tokens != nil {
+		return tokens, nil
 	}
 	tokens, err := NewMinecraftTokenSource(ctx, b.conf.XBLClient, b.conf.HTTPClient, b.log)
 	if err != nil {
 		return nil, err
 	}
-	b.conf.MinecraftTokenSource = tokens
-	return tokens, nil
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.conf.MinecraftTokenSource == nil {
+		b.conf.MinecraftTokenSource = tokens
+	}
+	return b.conf.MinecraftTokenSource, nil
 }
 
 func (b *Broadcaster) xuid() string {
