@@ -95,13 +95,12 @@ func TestFriendSyncerStopsRetriesWhenFriendListIsFull(t *testing.T) {
 
 func TestFriendSyncerExpiresInactiveFriendsOnly(t *testing.T) {
 	old := time.Now().Add(-48 * time.Hour)
-	history := &syncHistoryStore{lastSeen: map[string]time.Time{"old": old, "recent": time.Now(), "own": old}}
-	client := &syncFriendClient{people: []Person{{XUID: "old"}, {XUID: "recent"}, {XUID: "own"}, {XUID: "new"}, {XUID: "4503599627370497"}}}
+	history := &syncHistoryStore{lastSeen: map[string]time.Time{"old": old, "recent": time.Now()}}
+	client := &syncFriendClient{people: []Person{{XUID: "old"}, {XUID: "recent"}, {XUID: "new"}, {XUID: "4503599627370497"}}}
 	syncer := FriendSyncer{
-		Client:   client,
-		History:  history,
-		OwnXUIDs: func() []string { return []string{"own"} },
-		Config:   FriendSyncConfig{ExpiryEnabled: true, ExpiryDays: 1},
+		Client:  client,
+		History: history,
+		Config:  FriendSyncConfig{ExpiryEnabled: true, ExpiryDays: 1},
 	}
 	if err := syncer.Sync(context.Background()); err != nil {
 		t.Fatal(err)
@@ -157,10 +156,9 @@ func TestFriendSyncerStopsExpiryWhenRemovalsAreRateLimited(t *testing.T) {
 func TestFriendSyncerPrunesHistoryForExFriends(t *testing.T) {
 	history := &syncHistoryStore{lastSeen: map[string]time.Time{"gone": time.Now(), "kept": time.Now()}}
 	syncer := FriendSyncer{
-		Client:       &syncFriendClient{people: []Person{{XUID: "kept"}}},
-		History:      history,
-		PruneHistory: true,
-		Config:       FriendSyncConfig{ExpiryEnabled: true},
+		Client:  &syncFriendClient{people: []Person{{XUID: "kept"}}},
+		History: history,
+		Config:  FriendSyncConfig{ExpiryEnabled: true},
 	}
 	if err := syncer.Sync(context.Background()); err != nil {
 		t.Fatal(err)

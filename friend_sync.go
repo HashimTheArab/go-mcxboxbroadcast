@@ -49,13 +49,6 @@ type FriendSyncer struct {
 	// Notifier receives operator-facing notifications such as friend
 	// restriction removals. It may be nil.
 	Notifier Notifier
-	// PruneHistory removes history entries for people missing from this
-	// syncer's friend list. Enable it on exactly one syncer per shared
-	// HistoryStore, or entries maintained by other accounts get dropped.
-	PruneHistory bool
-	// OwnXUIDs returns the broadcaster's own accounts, which never join and
-	// so are never expired.
-	OwnXUIDs func() []string
 	// Trigger requests an early sync, subject to scan spacing and Retry-After.
 	// A nil Trigger leaves the syncer purely periodic.
 	Trigger <-chan struct{}
@@ -142,18 +135,12 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 		return result, err
 	}
 	s.debug(ctx, "friend expiry scan", "friends", fmt.Sprintf("%d/%d", len(friends), MaxFriends))
-	own := make(map[string]struct{})
-	if s.OwnXUIDs != nil {
-		for _, xuid := range s.OwnXUIDs() {
-			own[xuid] = struct{}{}
-		}
-	}
 	expired := 0
 	for _, p := range friends {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
-		if _, ok := own[p.XUID]; ok || isGuestXUID(p.XUID) {
+		if isGuestXUID(p.XUID) {
 			continue
 		}
 		if !opts.remove || result.removeRetryAfter > 0 {
@@ -163,9 +150,7 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 			expired++
 		}
 	}
-	if s.PruneHistory {
-		s.pruneHistory(ctx, friends)
-	}
+	s.pruneHistory(ctx, friends)
 	s.debug(ctx, "friend expiry scan done", "expired", expired)
 	return result, nil
 }

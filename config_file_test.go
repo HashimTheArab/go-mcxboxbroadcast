@@ -162,10 +162,6 @@ gallery:
 
 accounts:
   primaryCachePath: cache/upstream_live_token.json
-  subAccounts:
-    - id: alt
-      enabled: true
-      cachePath: cache/alt_live_token.json
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -205,8 +201,46 @@ accounts:
 	if cfg.Gallery.ImagePath != "images/upstream.jpg" || cfg.Gallery.DeleteOtherImages {
 		t.Fatalf("canonical gallery keys were not loaded: %#v", cfg.Gallery)
 	}
-	if cfg.Accounts.PrimaryCachePath != "cache/upstream_live_token.json" || len(cfg.Accounts.SubAccounts) != 1 || cfg.Accounts.SubAccounts[0].CachePath != "cache/alt_live_token.json" {
+	if cfg.Accounts.PrimaryCachePath != "cache/upstream_live_token.json" {
 		t.Fatalf("canonical account keys were not loaded: %#v", cfg.Accounts)
+	}
+}
+
+// Configs listing sub-accounts keep loading without them, including ones already saved at version 6.
+func TestLoadConfigFileDropsSubAccounts(t *testing.T) {
+	for name, tc := range map[string]struct{ file, data, enabled string }{
+		"v3 empty":     {"config.yml", "configVersion: 3\nsession:\n  sessionInfo:\n    ip: bedrock.test\naccounts:\n  primaryCachePath: cache/live_token.json\n  subAccounts: []\n", ""},
+		"v6 empty":     {"config.yml", "configVersion: 6\nsession:\n  joinUrl: https://bedrock.test:19132\naccounts:\n  primaryCachePath: cache/live_token.json\n  subAccounts: []\n", ""},
+		"v6 enabled":   {"config.yml", "configVersion: 6\nsession:\n  joinUrl: https://bedrock.test:19132\naccounts:\n  subAccounts:\n    - id: alt\n      enabled: true\n    - id: off\n      enabled: false\n", `"alt"`},
+		"toml enabled": {"config.toml", "configVersion = 6\n[session]\njoinUrl = \"https://bedrock.test:19132\"\n[[accounts.subAccounts]]\nid = \"alt\"\nenabled = true\n", `"alt"`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), tc.file)
+			if err := os.WriteFile(path, []byte(tc.data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadConfigFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			note := slices.IndexFunc(cfg.Notes, func(n string) bool { return strings.Contains(n, "accounts.subAccounts") })
+			if note < 0 {
+				t.Fatalf("notes = %v, want the removed sub-accounts reported", cfg.Notes)
+			}
+			if got := cfg.Notes[note]; tc.enabled != "" && (!strings.Contains(got, tc.enabled) || strings.Contains(got, `"off"`)) {
+				t.Fatalf("note = %q, want it to name only the enabled sub-account %s", got, tc.enabled)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(data, []byte("subAccounts")) {
+				t.Fatalf("migrated file still carries subAccounts:\n%s", data)
+			}
+			if _, err := LoadConfigFile(path); err != nil {
+				t.Fatalf("migrated file does not reload: %v", err)
+			}
+		})
 	}
 }
 

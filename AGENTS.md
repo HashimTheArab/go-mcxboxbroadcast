@@ -37,9 +37,8 @@ without contacting Xbox. Preserve these checks when changing recovery:
 - Keep a grace period for a new publication and a per-account cooldown that
   survives session replacement. Timing constants live in `session_activity.go`.
 - Bound the total lookup time and make HTTP requests outside the broadcaster
-  mutex. Discard stale results and revalidate a sub-account's identity under the
-  recovery lock before replacing its session.
-- A missing sub-account advertisement must only replace that sub-account.
+  mutex. Discard stale results and revalidate the session's identity under the
+  recovery lock before replacing it.
 - Querying the publishing account does not verify another player's permissions
   or ability to join. Keep that limitation clear in operator documentation.
 - Do not close and reuse an injected `Config.Signaling` connection during
@@ -69,9 +68,9 @@ Friend sync manages friends only. Do not reintroduce follower handling.
 Joinability is `joinable_by_friends`, matching MCXboxBroadcast.
 
 Sessions advertise JSON-RPC signaling, connection type `7` with `PmsgId` and
-`NetherNetId`; vanilla clients join through no other signaling. JSON-RPC cannot
-share its Player Messaging identity across independently owned sub-account
-sessions, so enabled sub-accounts are rejected at startup.
+`NetherNetId`; vanilla clients join through no other signaling. Its Player
+Messaging identity belongs to one account, so the broadcaster publishes from a
+single account; there are no sub-accounts.
 
 ## Validation
 
