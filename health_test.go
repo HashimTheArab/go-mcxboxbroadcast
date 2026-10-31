@@ -13,12 +13,12 @@ func TestHealthAdvertisedAtExpires(t *testing.T) {
 		at     time.Time
 		want   bool
 	}{
-		"never checked":       {Health{Advertised: true}, checked, false},
-		"found missing":       {Health{Advertised: false, CheckedAt: checked, AttemptedAt: checked}, checked, false},
-		"found open":          {Health{Advertised: true, CheckedAt: checked, AttemptedAt: checked}, checked, true},
-		"checks stopped":      {Health{Advertised: true, CheckedAt: checked, AttemptedAt: checked}, checked.Add(advertisedFreshness + time.Second), false},
-		"brief xbox errors":   {Health{Advertised: true, CheckedAt: checked, AttemptedAt: checked.Add(10 * time.Minute)}, checked.Add(10 * time.Minute), true},
-		"long xbox errors":    {Health{Advertised: true, CheckedAt: checked, AttemptedAt: checked.Add(time.Hour)}, checked.Add(time.Hour), false},
+		"never checked":     {Health{Advertised: true}, checked, false},
+		"found missing":     {Health{Advertised: false, CheckedAt: checked, AttemptedAt: checked}, checked, false},
+		"found open":        {Health{Advertised: true, CheckedAt: checked, AttemptedAt: checked}, checked, true},
+		"checks stopped":    {Health{Advertised: true, CheckedAt: checked, AttemptedAt: checked}, checked.Add(advertisedFreshness + time.Second), false},
+		"brief xbox errors": {Health{Advertised: true, CheckedAt: checked, AttemptedAt: checked.Add(10 * time.Minute)}, checked.Add(10 * time.Minute), true},
+		"long xbox errors":  {Health{Advertised: true, CheckedAt: checked, AttemptedAt: checked.Add(time.Hour)}, checked.Add(time.Hour), false},
 	} {
 		if got := tc.health.AdvertisedAt(tc.at); got != tc.want {
 			t.Errorf("%s: AdvertisedAt = %v, want %v", name, got, tc.want)

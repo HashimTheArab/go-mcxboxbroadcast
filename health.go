@@ -14,8 +14,9 @@ const friendCountRefresh = 30 * time.Minute
 // friendCountRetry spaces out a failing list taken only for the count, which must not spam sync errors.
 const friendCountRetry = 5 * time.Minute
 
-// advertisedFreshness is how long checks may stop before the gauge drops, a few check intervals.
-const advertisedFreshness = 3 * activityCheckInterval
+// advertisedFreshness is how long checks may stop before the gauge drops. It allows for the
+// session loop running slow updates or rotations between checks.
+const advertisedFreshness = 5 * activityCheckInterval
 
 // answerTolerance bounds how long Xbox errors may keep the last answer.
 const answerTolerance = 15 * time.Minute

@@ -102,11 +102,9 @@ func (b *Broadcaster) activityHealthIssue(state *activityObservation, now time.T
 	// Checks run through grace and the recovery cooldown so a rotating or recovered session reads as advertised.
 	settling := now.Before(state.checkAfter)
 	// An external Update can replace the session while the query runs; its old result no longer applies.
-	current := func() bool {
-		published, ok := b.publishedActivity()
-		return ok && published == publication
-	}
-	if current() {
+	published, ok := b.publishedActivity()
+	current := ok && published == publication
+	if current {
 		b.health.checked(err == nil && (found || !settling), found, now)
 	}
 	switch {
@@ -124,7 +122,7 @@ func (b *Broadcaster) activityHealthIssue(state *activityObservation, now time.T
 		return sessionHealthIssue{}
 	}
 	// Discard a replaced session's result rather than replacing the new session again.
-	if !current() {
+	if !current {
 		return sessionHealthIssue{}
 	}
 	state.misses = 0
