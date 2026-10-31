@@ -19,7 +19,7 @@ import (
 // activityTestBroadcaster uses the real MPSD HTTP adapter with a controlled directory response.
 func activityTestBroadcaster(t *testing.T, respond func(*http.Request) (*http.Response, error)) *Broadcaster {
 	t.Helper()
-	client := mpsd.New(&http.Client{Transport: broadcasterRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+	client := mpsd.New(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if req.Method != http.MethodPost || req.URL.Path != "/handles/query" {
 			t.Fatalf("unexpected activity request: %s %s", req.Method, req.URL)
 		}
@@ -55,7 +55,7 @@ func activityResponse(t *testing.T, owner string, ref mpsd.SessionReference) *ht
 	if err != nil {
 		t.Fatal(err)
 	}
-	return broadcasterResponse(http.StatusOK, string(data))
+	return response(http.StatusOK, string(data))
 }
 
 func TestActivityHealthRequiresConsecutiveConfirmedMisses(t *testing.T) {
@@ -75,7 +75,7 @@ func TestActivityHealthRequiresConsecutiveConfirmedMisses(t *testing.T) {
 		ref := b.announcer.(*room.XBLAnnouncer).SessionReference
 		switch result {
 		case "error":
-			return broadcasterResponse(http.StatusForbidden, "forbidden"), nil
+			return response(http.StatusForbidden, "forbidden"), nil
 		case "healthy":
 			ref.Name = strings.ToLower(ref.Name)
 			ref.TemplateName = strings.ToLower(ref.TemplateName)
@@ -90,9 +90,9 @@ func TestActivityHealthRequiresConsecutiveConfirmedMisses(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			return broadcasterResponse(http.StatusOK, string(data)), nil
+			return response(http.StatusOK, string(data)), nil
 		default:
-			return broadcasterResponse(http.StatusOK, `{"results":[]}`), nil
+			return response(http.StatusOK, `{"results":[]}`), nil
 		}
 	})
 	var state activityObservation
@@ -160,26 +160,6 @@ func TestActivityHealthRecordsFoundHandleDuringGrace(t *testing.T) {
 	}
 }
 
-// A metrics scrape must not wait for Update, which holds the lifecycle lock across Xbox calls.
-func TestHealthDoesNotWaitForLifecycleLock(t *testing.T) {
-	b := activityTestBroadcaster(t, func(*http.Request) (*http.Response, error) {
-		return broadcasterResponse(http.StatusOK, `{"results":[]}`), nil
-	})
-	b.health.setIdentity("123", "Bot")
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	done := make(chan Health, 1)
-	go func() { done <- b.Health() }()
-	select {
-	case health := <-done:
-		if health.XUID == "" {
-			t.Fatalf("health = %+v, want the account identity", health)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Health blocked on the lifecycle lock")
-	}
-}
-
 func TestActivityHealthResetsForReplacementAndDiscardsOldQuery(t *testing.T) {
 	var b *Broadcaster
 	replaceDuringQuery := false
@@ -190,7 +170,7 @@ func TestActivityHealthResetsForReplacementAndDiscardsOldQuery(t *testing.T) {
 			b.announcer = &room.XBLAnnouncer{Client: old.Client, SessionReference: old.SessionReference}
 			b.mu.Unlock()
 		}
-		return broadcasterResponse(http.StatusOK, `{"results":[]}`), nil
+		return response(http.StatusOK, `{"results":[]}`), nil
 	})
 	var state activityObservation
 	now := time.Now()
@@ -218,7 +198,7 @@ func TestActivityHealthResetsForReplacementAndDiscardsOldQuery(t *testing.T) {
 func TestSessionLoopRecoversMissingPublishedActivity(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		b := activityTestBroadcaster(t, func(*http.Request) (*http.Response, error) {
-			return broadcasterResponse(http.StatusOK, `{"results":[]}`), nil
+			return response(http.StatusOK, `{"results":[]}`), nil
 		})
 		b.ctx, b.cancel = context.WithCancel(context.Background())
 		defer b.cancel()
@@ -239,7 +219,7 @@ func TestSessionLoopRecoversMissingPublishedActivity(t *testing.T) {
 func TestSessionLoopReportsMissingActivityWithStaticSignaling(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		b := activityTestBroadcaster(t, func(*http.Request) (*http.Response, error) {
-			return broadcasterResponse(http.StatusOK, `{"results":[]}`), nil
+			return response(http.StatusOK, `{"results":[]}`), nil
 		})
 		b.ctx, b.cancel = context.WithCancel(context.Background())
 		defer b.cancel()
@@ -260,7 +240,7 @@ func TestSessionLoopReportsMissingActivityWithStaticSignaling(t *testing.T) {
 		if len(notices) != 2 || notices[0] != 4*time.Minute || notices[1] != 16*time.Minute {
 			t.Fatalf("recovery failure times = %v, want 4m and 16m with cooldown", notices)
 		}
-		if b.signaling != sig || sig.closed {
+		if b.signaling != sig || sig.closed.Load() {
 			t.Fatal("activity recovery replaced or closed the injected signaling")
 		}
 	})
@@ -286,7 +266,7 @@ func TestActivityProbeTimeoutBreaksMissStreak(t *testing.T) {
 	})
 }
 
-func TestActivityRecoveryIgnoresReplacedPrimaryAccount(t *testing.T) {
+func TestActivityRecoveryIgnoresReplacedSession(t *testing.T) {
 	b := activityTestBroadcaster(t, nil)
 	publication, _ := b.publishedActivity()
 	rebuilds := 0
@@ -304,7 +284,7 @@ func TestActivityRecoveryIgnoresReplacedPrimaryAccount(t *testing.T) {
 	}
 }
 
-func TestStaticActivityFailureIgnoresReplacedPrimaryAccount(t *testing.T) {
+func TestStaticActivityFailureIgnoresReplacedSession(t *testing.T) {
 	b := activityTestBroadcaster(t, nil)
 	publication, _ := b.publishedActivity()
 	b.conf.Signaling = &fakeSignaling{}

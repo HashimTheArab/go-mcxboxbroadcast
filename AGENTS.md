@@ -83,6 +83,6 @@ go test -race ./...
 go vet ./...
 ```
 
-Use the existing HTTP test adapters and `testing/synctest` for directory failures,
+Use the shared fakes in `fakes_test.go` and `testing/synctest` for directory failures,
 grace periods, and retry timing. Keep tests independent of live Xbox accounts.
 Documentation-only edits need link and diff checks, not another full test run.

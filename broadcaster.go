@@ -600,20 +600,17 @@ type sessionHealthIssue struct {
 func (b *Broadcaster) sessionHealthIssue() sessionHealthIssue {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	announcer, ok := xblAnnouncer(b.announcer)
+	counter, ok := unwrapAnnouncer(b.announcer).(memberCounter)
 	if !ok {
 		return sessionHealthIssue{}
 	}
-	announcer.Lock()
-	session := announcer.Session
-	announcer.Unlock()
-	if session == nil {
+	count, published, lost := counter.memberCount()
+	switch {
+	case !published:
 		return sessionHealthIssue{}
-	}
-	if session.Context().Err() != nil {
+	case lost:
 		return sessionHealthIssue{reason: "mpsd session lost"}
-	}
-	if count := sessionMemberCount(session); count >= sessionRotateMembers {
+	case count >= sessionRotateMembers:
 		return sessionHealthIssue{reason: fmt.Sprintf("session has %d/%d members", count, sessionMemberCap), rotate: true}
 	}
 	return sessionHealthIssue{}
@@ -655,10 +652,10 @@ type retiredSession struct {
 	at        time.Time
 }
 
-// memberCounter reports a published session's member count; ok is false
-// before the session is published.
+// memberCounter is implemented by announcers that publish an MPSD session.
 type memberCounter interface {
-	memberCount() (count int, ok bool)
+	// memberCount is zero for a lost session, whose MPSD context has ended.
+	memberCount() (count int, published, lost bool)
 }
 
 // retire keeps a rotated-out session for players mid-join, then hides it if
@@ -699,7 +696,7 @@ func (b *Broadcaster) closeDrainedSessions() {
 		counter, ok := unwrapAnnouncer(retired.announcer).(memberCounter)
 		count, published := 0, false
 		if ok {
-			count, published = counter.memberCount()
+			count, published, _ = counter.memberCount()
 		}
 		if !published || count > 1 || time.Since(retired.at) < sessionRotateGrace {
 			kept = append(kept, retired)

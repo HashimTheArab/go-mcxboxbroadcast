@@ -3,9 +3,13 @@ package broadcaster
 import (
 	"context"
 	"encoding/base64"
+	"errors"
+	"net/http"
+	"net/url"
 	"testing"
 	"time"
 
+	"github.com/df-mc/go-nethernet/endpoint"
 	"github.com/sandertv/gophertunnel/minecraft"
 	"github.com/sandertv/gophertunnel/minecraft/p2p"
 	"github.com/sandertv/gophertunnel/minecraft/protocol"
@@ -47,6 +51,27 @@ func TestStatusDefaults(t *testing.T) {
 	}
 	if status.TitleID != 0 {
 		t.Fatalf("unexpected title id %d", status.TitleID)
+	}
+}
+
+func TestStatusUsesConfiguredProvider(t *testing.T) {
+	b, err := New(Config{
+		XBLClient:      testXBLClient(t, "123"),
+		JoinURL:        "http://127.0.0.1:19132",
+		StatusProvider: staticStatusProvider{host: "Provider Host", world: "Provider World", titleID: TitleID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := b.status(context.Background())
+	if status.HostName != "Provider Host" || status.WorldName != "Provider World" {
+		t.Fatalf("provider not used: %#v", status)
+	}
+	if status.OwnerID != "123" {
+		t.Fatalf("provider owner id = %q", status.OwnerID)
+	}
+	if status.TitleID != 0 {
+		t.Fatalf("provider title id = %d", status.TitleID)
 	}
 }
 
@@ -168,5 +193,65 @@ func TestStatusAdvertisesOnePair(t *testing.T) {
 				t.Fatalf("advertised %s/%d, want %s/%d", status.Version, status.Protocol, tc.version, tc.protocol)
 			}
 		})
+	}
+}
+
+func TestQueryStatusFallsBackToWeb(t *testing.T) {
+	status, err := queryStatusWithFallback(context.Background(), queryOptions{
+		JoinURL:            "http://127.0.0.1:1",
+		Timeout:            time.Nanosecond,
+		WebFallbackEnabled: true,
+		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Host != "checker.geysermc.org" || req.URL.Query().Get("hostname") != "127.0.0.1" || req.URL.Query().Get("port") != "1" {
+				return nil, errors.New("endpoint unreachable")
+			}
+			return response(http.StatusOK, `{"success":true,"ping":{"pong":{"motd":"World","subMotd":"Host","playerCount":3,"maximumPlayerCount":10}}}`), nil
+		})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.ServerName != "World" || status.ServerSubName != "Host" || status.PlayerCount != 3 {
+		t.Fatalf("unexpected status %#v", status)
+	}
+}
+
+// Status queries read the target's /v1/join status document and send the advertised client info.
+func TestQueryStatusReadsHTTPSignalingStatus(t *testing.T) {
+	var query url.Values
+	status, err := queryStatus(context.Background(), queryOptions{
+		JoinURL:    "https://bedrock.test:19132",
+		ClientInfo: endpoint.ClientInfo{Version: "1.26.60", Protocol: 2225, Platform: relayClientPlatform},
+		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method != http.MethodGet || req.URL.Path != "/v1/join" {
+				t.Fatalf("unexpected request %s %s", req.Method, req.URL)
+			}
+			query = req.URL.Query()
+			return response(http.StatusOK, `{"name":"World","level":"Host","players":3,"maxPlayers":10,"protocol":2225,"version":"1.26.60"}`), nil
+		})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.ServerName != "World" || status.ServerSubName != "Host" || status.PlayerCount != 3 || status.MaxPlayers != 10 {
+		t.Fatalf("unexpected status %#v", status)
+	}
+	if query.Get("version") != "1.26.60" || query.Get("protocol") != "2225" || query.Get("platform") != "-1" || query.Get("id") == "" {
+		t.Fatalf("probe query = %v", query)
+	}
+}
+
+type staticStatusProvider struct {
+	host, world string
+	titleID     int64
+}
+
+func (s staticStatusProvider) RoomStatus() room.Status {
+	return room.Status{
+		HostName:       s.host,
+		WorldName:      s.world,
+		MemberCount:    1,
+		MaxMemberCount: 2,
+		TitleID:        s.titleID,
 	}
 }

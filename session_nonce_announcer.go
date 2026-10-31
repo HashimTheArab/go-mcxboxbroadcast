@@ -43,17 +43,17 @@ func newSessionNonceAnnouncer(announcer *room.XBLAnnouncer, ownerXUID string, lo
 	}
 }
 
-func (a *sessionNonceAnnouncer) memberCount() (int, bool) {
+func (a *sessionNonceAnnouncer) memberCount() (count int, published, lost bool) {
 	a.Lock()
 	session := a.Session
 	a.Unlock()
 	if session == nil {
-		return 0, false
+		return 0, false, false
 	}
 	if session.Context().Err() != nil {
-		return 0, true
+		return 0, true, true
 	}
-	return sessionMemberCount(session), true
+	return sessionMemberCount(session), true, false
 }
 
 // hide makes the published session invite-only so its members no longer

@@ -2,90 +2,30 @@ package broadcaster
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"io"
-	"log/slog"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
+	"github.com/df-mc/go-xsapi/v2/rta"
 	xblsocial "github.com/df-mc/go-xsapi/v2/social"
+	"github.com/df-mc/go-xsapi/v2/xal/xsts"
 )
-
-// TestFriendSyncerRunSyncsOnTrigger checks that events can run ahead of polling.
-func TestFriendSyncerRunSyncsOnTrigger(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		accepts := 0
-		client := &syncFriendClient{
-			accept: func(context.Context) ([]Person, error) {
-				accepts++
-				return nil, nil
-			},
-		}
-		trigger := make(chan struct{}, 1)
-		syncer := FriendSyncer{
-			Client:  client,
-			Config:  FriendSyncConfig{AutoFriend: true, UpdateInterval: time.Hour},
-			Trigger: trigger,
-		}
-		ctx, cancel := context.WithCancel(t.Context())
-		defer cancel()
-		go syncer.Run(ctx)
-		synctest.Wait()
-		if accepts != 1 {
-			t.Fatalf("initial passes = %d, want 1", accepts)
-		}
-		time.Sleep(30 * time.Second)
-		trigger <- struct{}{}
-		synctest.Wait()
-		if accepts != 2 {
-			t.Fatalf("passes after event = %d, want 2", accepts)
-		}
-	})
-}
-
-// TestFriendSyncerRunHandlesClosedTrigger verifies that a closed Trigger channel
-// does not make Run busy-loop over runSync (a closed channel receives forever).
-func TestFriendSyncerRunHandlesClosedTrigger(t *testing.T) {
-	accepted := make(chan struct{}, 16)
-	client := &syncFriendClient{
-		accept: func(context.Context) ([]Person, error) {
-			accepted <- struct{}{}
-			return nil, nil
-		},
-	}
-	trigger := make(chan struct{})
-	syncer := FriendSyncer{
-		Client:  client,
-		Config:  FriendSyncConfig{AutoFriend: true, UpdateInterval: time.Hour},
-		Trigger: trigger,
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go syncer.Run(ctx)
-
-	// Initial sync on startup.
-	select {
-	case <-accepted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("no initial sync pass")
-	}
-	// Closing the trigger must not spin Run into repeated sync passes.
-	close(trigger)
-	select {
-	case <-accepted:
-		t.Fatal("closed trigger caused an extra sync pass (busy loop)")
-	case <-time.After(200 * time.Millisecond):
-	}
-}
 
 // TestFriendRequestSubscriptionHandlerCoalescesEvents verifies that rapid social
 // events collapse into a single pending sync (non-blocking), and that a lost
 // subscription does not enqueue work.
 func TestFriendRequestSubscriptionHandlerCoalescesEvents(t *testing.T) {
 	trigger := make(chan struct{}, 1)
-	h := friendRequestSubscriptionHandler{trigger: trigger, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	h := friendRequestSubscriptionHandler{trigger: trigger, log: testBroadcasterLogger()}
 
 	h.HandleIncomingFriendRequestCountChange(2)
 	h.HandleIncomingFriendRequestCountChange(3)
@@ -102,37 +42,6 @@ func TestFriendRequestSubscriptionHandlerCoalescesEvents(t *testing.T) {
 		t.Fatal("HandleSubscriptionLost enqueued a sync")
 	default:
 	}
-}
-
-// fakeSocialSubscriber records subscription ownership and can fail setup.
-type fakeSocialSubscriber struct {
-	subscribeErr error
-	subscribed   chan xblsocial.SubscriptionHandler
-	cleanupCalls atomic.Int32
-}
-
-// Subscribe records the handler and returns its cleanup or the configured error.
-func (f *fakeSocialSubscriber) Subscribe(_ context.Context, h xblsocial.SubscriptionHandler) (func(context.Context) error, error) {
-	f.subscribed <- h
-	if f.subscribeErr != nil {
-		return nil, f.subscribeErr
-	}
-	return func(context.Context) error {
-		f.cleanupCalls.Add(1)
-		return nil
-	}, nil
-}
-
-// waitingSocialSubscriber leaves setup waiting until its context ends.
-type waitingSocialSubscriber struct {
-	result chan error
-}
-
-// Subscribe simulates an RTA subscription that never receives an acknowledgment.
-func (s waitingSocialSubscriber) Subscribe(ctx context.Context, _ xblsocial.SubscriptionHandler) (func(context.Context) error, error) {
-	<-ctx.Done()
-	s.result <- ctx.Err()
-	return nil, ctx.Err()
 }
 
 func TestSocialSubscriptionSetupTimesOut(t *testing.T) {
@@ -167,47 +76,26 @@ func TestSocialSubscriptionSetupTimesOut(t *testing.T) {
 	})
 }
 
-// TestSubscribeSocialUnsubscribesOnShutdown verifies that a social subscription
-// is undone when the broadcaster shuts down and that the shutdown waits for it,
-// so a reused xsapi client does not accumulate stale handlers across restarts.
+// Shutdown releases the social subscription and waits for it, so a reused client keeps no stale handler.
 func TestSubscribeSocialUnsubscribesOnShutdown(t *testing.T) {
-	b := &Broadcaster{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	b.ctx, b.cancel = context.WithCancel(context.Background())
-	defer b.cancel()
-	fake := &fakeSocialSubscriber{
-		subscribed: make(chan xblsocial.SubscriptionHandler, 1),
-	}
-
-	trigger := b.subscribeSocial(fake)
-	if trigger == nil {
-		t.Fatal("subscribeSocial returned a nil trigger")
-	}
-	// The registered handler drives the returned trigger channel.
-	var h xblsocial.SubscriptionHandler
-	select {
-	case h = <-fake.subscribed:
-	case <-time.After(2 * time.Second):
-		t.Fatal("social handler was not registered")
-	}
-	h.HandleIncomingFriendRequestCountChange(1)
-	select {
-	case <-trigger:
-	case <-time.After(2 * time.Second):
-		t.Fatal("social event did not reach the trigger")
-	}
-
-	// The broadcaster's wait group tracks the returned cleanup through shutdown.
-	b.cancel()
-	done := make(chan struct{})
-	go func() { b.socialWg.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("socialWg.Wait did not return after shutdown")
-	}
-	if got := fake.cleanupCalls.Load(); got != 1 {
-		t.Fatalf("subscription cleanup calls = %d, want 1", got)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		b := &Broadcaster{log: testBroadcasterLogger()}
+		b.ctx, b.cancel = context.WithCancel(t.Context())
+		fake := &fakeSocialSubscriber{subscribed: make(chan xblsocial.SubscriptionHandler, 1)}
+		trigger := b.subscribeSocial(fake)
+		synctest.Wait()
+		(<-fake.subscribed).HandleIncomingFriendRequestCountChange(1)
+		select {
+		case <-trigger:
+		default:
+			t.Fatal("social event did not reach the trigger")
+		}
+		b.cancel()
+		b.socialWg.Wait()
+		if got := fake.cleanupCalls.Load(); got != 1 {
+			t.Fatalf("subscription cleanup calls = %d, want 1", got)
+		}
+	})
 }
 
 func TestSocialSubscriptionFailureKeepsPolling(t *testing.T) {
@@ -246,54 +134,213 @@ func TestSocialSubscriptionFailureKeepsPolling(t *testing.T) {
 	})
 }
 
-// A social event during add backoff must not accept requests early, while expiry keeps running.
-func TestReactiveFriendSyncPreservesAddBackoff(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		var accepts atomic.Int32
-		old := time.Now().Add(-48 * time.Hour)
-		client := &syncFriendClient{
-			people: []Person{{XUID: "123"}},
-			accept: func(context.Context) ([]Person, error) {
-				accepts.Add(1)
-				return nil, &xblsocial.ResponseError{StatusCode: 429, RetryAfter: time.Minute}
-			},
+// TestBroadcasterClosePreservesSharedSocialSubscriber exercises the real social
+// client over RTA and verifies that broadcaster shutdown removes only its handler.
+func TestBroadcasterClosePreservesSharedSocialSubscriber(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	log := testBroadcasterLogger()
+	peers := make(chan *websocket.Conn, 1)
+	subscribed := make(chan struct{}, 1)
+	var unsubscribes atomic.Int32
+	const subscriptionID = 41
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		peer, err := websocket.Accept(w, req, &websocket.AcceptOptions{Subprotocols: []string{"rta.xboxlive.com.V2"}})
+		if err != nil {
+			t.Errorf("accept local RTA websocket: %v", err)
+			return
 		}
-		history := inactiveHistory{seen: old}
-		trigger := make(chan struct{}, 1)
-		syncer := FriendSyncer{
-			Client:  client,
-			History: history,
-			Config: FriendSyncConfig{AutoFriend: true, ExpiryEnabled: true, ExpiryDays: 1,
-				UpdateInterval: time.Hour, ExpiryCheck: 20 * time.Second},
-			Trigger: trigger,
+		defer peer.CloseNow()
+		select {
+		case peers <- peer:
+		case <-ctx.Done():
+			return
 		}
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		go syncer.Run(ctx)
-		synctest.Wait()
-		if accepts.Load() != 1 || len(client.removals()) != 1 {
-			t.Fatalf("initial accepts=%d removals=%v, want 1 each", accepts.Load(), client.removals())
+		for {
+			var frame []json.RawMessage
+			if err := wsjson.Read(ctx, peer, &frame); err != nil {
+				return
+			}
+			if len(frame) != 3 {
+				t.Errorf("unexpected RTA request: %s", frame)
+				return
+			}
+			var operation, sequence uint32
+			if err := json.Unmarshal(frame[0], &operation); err != nil {
+				t.Errorf("decode RTA operation: %v", err)
+				return
+			}
+			if err := json.Unmarshal(frame[1], &sequence); err != nil {
+				t.Errorf("decode RTA sequence: %v", err)
+				return
+			}
+			var reply []any
+			switch operation {
+			case 1:
+				var resource string
+				if err := json.Unmarshal(frame[2], &resource); err != nil || resource != "https://social.xboxlive.com/users/xuid(100)/friends" {
+					t.Errorf("unexpected social resource %s: %v", frame[2], err)
+					return
+				}
+				select {
+				case subscribed <- struct{}{}:
+				default:
+				}
+				reply = []any{1, sequence, 0, subscriptionID, map[string]any{}}
+			case 2:
+				unsubscribes.Add(1)
+				reply = []any{2, sequence, 0}
+			default:
+				t.Errorf("unexpected RTA operation %d", operation)
+				return
+			}
+			if err := wsjson.Write(ctx, peer, reply); err != nil {
+				return
+			}
 		}
-		trigger <- struct{}{}
-		time.Sleep(20 * time.Second)
-		synctest.Wait()
-		if accepts.Load() != 1 || len(client.removals()) != 2 {
-			t.Fatalf("during backoff accepts=%d removals=%v, want 1 and 2", accepts.Load(), client.removals())
+	}))
+	defer func() {
+		cancel()
+		server.Close()
+	}()
+	localURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &http.Transport{}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host != "rta.xboxlive.com" {
+			return nil, fmt.Errorf("unexpected external request: %s", req.URL)
 		}
-		time.Sleep(40 * time.Second)
-		trigger <- struct{}{}
-		synctest.Wait()
-		if accepts.Load() != 2 {
-			t.Fatalf("after backoff accepts=%d, want 2", accepts.Load())
+		local := req.Clone(req.Context())
+		local.URL.Scheme, local.URL.Host, local.Host = localURL.Scheme, localURL.Host, localURL.Host
+		return transport.RoundTrip(local)
+	})}
+	conn, err := rta.Dial(ctx, client, log)
+	if err != nil {
+		t.Fatalf("dial local RTA websocket: %v", err)
+	}
+	defer conn.Close()
+	var peer *websocket.Conn
+	select {
+	case peer = <-peers:
+	case <-ctx.Done():
+		t.Fatal("local RTA server did not accept the connection")
+	}
+	defer func() {
+		// Stop the RTA reconnect loop before forcibly closing its local peer.
+		_ = conn.Close()
+		_ = peer.CloseNow()
+	}()
+	social := xblsocial.New(client, conn, xsts.UserInfo{XUID: "100"}, log)
+	b := &Broadcaster{log: log, started: true}
+	b.ctx, b.cancel = context.WithCancel(ctx)
+	defer b.cancel()
+	trigger := b.subscribeSocial(social)
+	select {
+	case <-subscribed:
+	case <-ctx.Done():
+		t.Fatal("broadcaster did not subscribe to social RTA")
+	}
+	// The first wire subscribe holds the social client's registration lock.
+	// Registering this handler waits for the broadcaster's registration to finish.
+	other := &sharedSocialEventHandler{counts: make(chan int, 2)}
+	unsubscribeOther, err := social.Subscribe(ctx, other)
+	if err != nil {
+		t.Fatalf("register other shared-client handler: %v", err)
+	}
+	for _, count := range []int{1, 2} {
+		if err := wsjson.Write(ctx, peer, []any{3, subscriptionID, map[string]any{
+			"NotificationType": "IncomingFriendRequestCountChanged", "Count": count,
+		}}); err != nil {
+			t.Fatalf("send social event: %v", err)
 		}
-	})
+		select {
+		case got := <-other.counts:
+			if got != count {
+				t.Fatalf("shared-client handler received count %d, want %d", got, count)
+			}
+		case <-ctx.Done():
+			t.Fatal("shared-client handler did not receive the social event")
+		}
+		if count == 1 {
+			select {
+			case <-trigger:
+			case <-ctx.Done():
+				t.Fatal("social event did not reach the broadcaster")
+			}
+			closed := make(chan error, 1)
+			go func() { closed <- b.Close() }()
+			select {
+			case err := <-closed:
+				if err != nil {
+					t.Fatalf("close broadcaster: %v", err)
+				}
+			case <-ctx.Done():
+				t.Fatal("broadcaster shutdown did not release its social handler")
+			}
+			if got := unsubscribes.Load(); got != 0 {
+				t.Fatalf("broadcaster removed the shared RTA subscription: %d unsubscribe requests", got)
+			}
+		}
+	}
+	select {
+	case <-trigger:
+		t.Fatal("removed broadcaster handler received a later social event")
+	case <-time.After(100 * time.Millisecond):
+	case <-ctx.Done():
+		t.Fatal("timed out checking broadcaster handler removal")
+	}
+	if err := unsubscribeOther(ctx); err != nil {
+		t.Fatalf("remove final shared-client handler: %v", err)
+	}
+	if got := unsubscribes.Load(); got != 1 {
+		t.Fatalf("final handler removal sent %d RTA unsubscribe requests, want 1", got)
+	}
 }
 
-// inactiveHistory reports every friend as last seen at the same old time.
-type inactiveHistory struct{ seen time.Time }
-
-func (h inactiveHistory) LastSeen(context.Context, string) (time.Time, bool, error) {
-	return h.seen, true, nil
+// fakeSocialSubscriber records subscription ownership and can fail setup.
+type fakeSocialSubscriber struct {
+	subscribeErr error
+	subscribed   chan xblsocial.SubscriptionHandler
+	cleanupCalls atomic.Int32
 }
 
-func (inactiveHistory) Clear(context.Context, string) error { return nil }
+// Subscribe records the handler and returns its cleanup or the configured error.
+func (f *fakeSocialSubscriber) Subscribe(_ context.Context, h xblsocial.SubscriptionHandler) (func(context.Context) error, error) {
+	f.subscribed <- h
+	if f.subscribeErr != nil {
+		return nil, f.subscribeErr
+	}
+	return func(context.Context) error {
+		f.cleanupCalls.Add(1)
+		return nil
+	}, nil
+}
+
+// waitingSocialSubscriber leaves setup waiting until its context ends.
+type waitingSocialSubscriber struct {
+	result chan error
+}
+
+// Subscribe simulates an RTA subscription that never receives an acknowledgment.
+func (s waitingSocialSubscriber) Subscribe(ctx context.Context, _ xblsocial.SubscriptionHandler) (func(context.Context) error, error) {
+	<-ctx.Done()
+	s.result <- ctx.Err()
+	return nil, ctx.Err()
+}
+
+// sharedSocialEventHandler records friend-request events for an independent owner.
+type sharedSocialEventHandler struct {
+	xblsocial.NopSubscriptionHandler
+	counts chan int
+}
+
+// HandleIncomingFriendRequestCountChange records each event without blocking RTA.
+func (h *sharedSocialEventHandler) HandleIncomingFriendRequestCountChange(count int) {
+	select {
+	case h.counts <- count:
+	default:
+	}
+}

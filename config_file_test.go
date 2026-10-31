@@ -119,7 +119,8 @@ func TestLoadConfigFileDropsSignalingMode(t *testing.T) {
 	}
 }
 
-func TestLoadConfigFileAcceptsCanonicalYAMLKeys(t *testing.T) {
+// A version 2 file keeps its values and moves its target to joinUrl.
+func TestLoadConfigFileMigratesVersion2(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yml")
 	if err := os.WriteFile(path, []byte(`
 configVersion: 2
@@ -269,7 +270,7 @@ func TestLoadConfigFileRejectsUnknownKeys(t *testing.T) {
 	}
 }
 
-// Configs written before the advertised-version override was removed keep loading, minus that override.
+// Version 3 configs drop their advertised-version override, which predates joinUrl.
 func TestLoadConfigFileMigratesAdvertisedVersionOverride(t *testing.T) {
 	for _, tc := range []struct{ file, data string }{
 		{"config.yml", "configVersion: 3\nsession:\n  sessionInfo:\n    ip: bedrock.test\n    protocol: 2168\n    version: 1.26.44\n"},
@@ -331,6 +332,7 @@ func TestConfigFileToConfigMapsOperatorSettings(t *testing.T) {
 	cfg.Session.QueryServer = false
 	cfg.Gallery.Enabled = true
 	cfg.Gallery.ImagePath = "images/showcase.jpg"
+	cfg.SuppressSessionUpdateMessage = true
 
 	runtime := cfg.RuntimeConfig(RuntimeConfigInput{})
 	if runtime.JoinURL != "https://bedrock.example.net:19133" || !runtime.HideOldSessions {
@@ -342,8 +344,8 @@ func TestConfigFileToConfigMapsOperatorSettings(t *testing.T) {
 	if runtime.UpdateInterval != 45*time.Second {
 		t.Fatalf("unexpected runtime interval %s", runtime.UpdateInterval)
 	}
-	if runtime.SuppressSessionUpdateMessage {
-		t.Fatal("unexpected suppressed session update message")
+	if !runtime.SuppressSessionUpdateMessage {
+		t.Fatal("suppress session update message was not mapped")
 	}
 	if runtime.Status.Broadcast != int32(p2p.BroadcastSettingFriendsOnly) {
 		t.Fatalf("unexpected broadcast setting %d", runtime.Status.Broadcast)
@@ -353,16 +355,6 @@ func TestConfigFileToConfigMapsOperatorSettings(t *testing.T) {
 	}
 	if runtime.FriendHistory == nil {
 		t.Fatal("friend history store not mapped")
-	}
-}
-
-func TestConfigFileMapsSuppressSessionUpdateMessage(t *testing.T) {
-	cfg := DefaultConfigFile()
-	cfg.SuppressSessionUpdateMessage = true
-
-	runtime := cfg.RuntimeConfig(RuntimeConfigInput{})
-	if !runtime.SuppressSessionUpdateMessage {
-		t.Fatal("suppress session update message was not mapped")
 	}
 }
 
@@ -501,15 +493,5 @@ func TestRuntimeConfigTrimsJoinURLSlash(t *testing.T) {
 	}
 	if err := validateJoinURL(runtime.JoinURL); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestRuntimeConfigRejectsHalfAdvertisedPair(t *testing.T) {
-	cfg := DefaultConfigFile()
-	cfg.Session.JoinURL = "https://bedrock.test:19132"
-	cfg.Session.SessionInfo.Version = "1.26.50"
-	runtime := cfg.RuntimeConfig(RuntimeConfigInput{XBLClient: testXBLClient(t, "123")})
-	if _, err := New(runtime); err == nil {
-		t.Fatal("New accepted a version without a protocol")
 	}
 }
