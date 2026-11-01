@@ -151,15 +151,15 @@ func TestFriendSyncerStopsRetriesWhenFriendListIsFull(t *testing.T) {
 // One player's full list must not stop the bot accepting everyone else, and their request waits.
 func TestFriendSyncerSkipsPlayerWithFullList(t *testing.T) {
 	client := &syncFriendClient{
-		accept: func(context.Context) ([]Person, error) {
-			return nil, &AcceptFriendRequestsError{Failed: []Person{{XUID: "full"}, {XUID: "2"}, {XUID: "3"}}}
-		},
 		add: func(_ context.Context, xuid string) error {
 			if xuid == "full" {
 				return &xblsocial.ResponseError{StatusCode: 403, Code: 1028}
 			}
 			return nil
 		},
+	}
+	client.accept = func(context.Context) ([]Person, error) {
+		return nil, &AcceptFriendRequestsError{Failed: client.pending("full", "2", "3")}
 	}
 	syncer := FriendSyncer{Client: client, Config: FriendSyncConfig{AutoFriend: true}}
 	var state friendSyncRunState
@@ -178,6 +178,64 @@ func TestFriendSyncerSkipsPlayerWithFullList(t *testing.T) {
 	}
 	if opts := state.options(now, false); !opts.add {
 		t.Fatal("adds paused for one player's full list")
+	}
+}
+
+// A delay Xbox puts on refused players holds only them; a 429 still pauses every add.
+func TestFriendSyncerDelayHoldsOnlyRefusedPlayers(t *testing.T) {
+	client := &syncFriendClient{
+		add: func(_ context.Context, xuid string) error {
+			switch xuid {
+			case "slow":
+				return &xblsocial.ResponseError{StatusCode: http.StatusBadRequest, RetryAfter: 2 * time.Hour}
+			case "limited":
+				return &xblsocial.ResponseError{StatusCode: http.StatusTooManyRequests, RetryAfter: time.Minute}
+			}
+			return nil
+		},
+	}
+	refused := true
+	client.accept = func(context.Context) ([]Person, error) {
+		if refused {
+			return nil, &AcceptFriendRequestsError{Failed: client.pending("held"), Waits: map[string]time.Duration{"held": 12 * time.Hour}}
+		}
+		return nil, &AcceptFriendRequestsError{Failed: client.pending("held", "slow", "ok")}
+	}
+	syncer := FriendSyncer{Client: client, Config: FriendSyncConfig{AutoFriend: true}}
+	var state friendSyncRunState
+	now := time.Now()
+	pass := func() {
+		t.Helper()
+		result, err := syncer.syncWithOptions(context.Background(), state.options(now, false))
+		if err != nil {
+			t.Fatal(err)
+		}
+		state.record(now, result)
+	}
+
+	pass()
+	if len(client.added) != 0 {
+		t.Fatalf("retried %v one by one, want the refused batch's delay honoured", client.added)
+	}
+	if !state.options(now, false).add {
+		t.Fatal("one player's delay paused every add")
+	}
+	refused = false
+	pass()
+	pass()
+	if !slices.Equal(client.added, []string{"slow", "ok", "ok"}) {
+		t.Fatalf("attempts = %v, want held skipped and slow tried once", client.added)
+	}
+	if !state.options(now, false).add {
+		t.Fatal("one player's delay paused every add")
+	}
+
+	client.accept = func(context.Context) ([]Person, error) {
+		return nil, &AcceptFriendRequestsError{Failed: client.pending("limited")}
+	}
+	pass()
+	if state.options(now, false).add {
+		t.Fatal("a 429 must pause every add")
 	}
 }
 
@@ -620,6 +678,7 @@ type syncFriendClient struct {
 	added   []string
 	removed []string
 	lists   int
+	skip    func(string) bool // from the last accept
 }
 
 func (c *syncFriendClient) removals() []string {
@@ -635,11 +694,27 @@ func (c *syncFriendClient) Friends(context.Context) ([]Person, error) {
 	return c.people, nil
 }
 
-func (c *syncFriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]Person, error) {
+func (c *syncFriendClient) AcceptPendingFriendRequests(ctx context.Context, skip func(string) bool) ([]Person, error) {
+	c.mu.Lock()
+	c.skip = skip
+	c.mu.Unlock()
 	if c.accept != nil {
 		return c.accept(ctx)
 	}
 	return nil, nil
+}
+
+// pending returns the people the last accept did not skip, as the real client would send them.
+func (c *syncFriendClient) pending(xuids ...string) []Person {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var people []Person
+	for _, xuid := range xuids {
+		if c.skip == nil || !c.skip(xuid) {
+			people = append(people, Person{XUID: xuid})
+		}
+	}
+	return people
 }
 
 func (c *syncFriendClient) AddFriend(ctx context.Context, xuid string) error {

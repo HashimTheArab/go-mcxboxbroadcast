@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"maps"
 	"net/http"
 	"strconv"
 	"time"
@@ -14,9 +15,9 @@ import (
 // FriendAPI is the account's friend list as the syncer sees it.
 type FriendAPI interface {
 	Friends(ctx context.Context) ([]Person, error)
-	// AcceptPendingFriendRequests returns who was accepted; failed people are
-	// reported through *AcceptFriendRequestsError.
-	AcceptPendingFriendRequests(ctx context.Context) ([]Person, error)
+	// AcceptPendingFriendRequests accepts the requests skip does not report and returns who was
+	// accepted; failed people are reported through *AcceptFriendRequestsError.
+	AcceptPendingFriendRequests(ctx context.Context, skip func(xuid string) bool) ([]Person, error)
 	AddFriend(ctx context.Context, xuid string) error
 	RemoveFriend(ctx context.Context, xuid string) error
 }
@@ -68,7 +69,7 @@ type friendSyncOptions struct {
 	expire bool
 	add    bool
 	remove bool
-	// skip holds players whose own friend list was recently full; their requests wait.
+	// skip maps players whose requests wait, for a full list or an Xbox delay, to when they may be retried.
 	skip map[string]time.Time
 }
 
@@ -81,6 +82,7 @@ type friendSyncRunState struct {
 	listFullUntil    time.Time
 	// fullPlayers maps players refused for a full list to when; a player's request waits an hour.
 	fullPlayers map[string]time.Time
+	waiting     map[string]time.Time // players Xbox asked to retry later, to when
 	lastAccept  time.Time
 }
 
@@ -89,8 +91,21 @@ func (s *friendSyncRunState) options(now time.Time, expire bool) friendSyncOptio
 		expire: expire,
 		add:    !now.Before(s.addRetryUntil) && !now.Before(s.listFullUntil),
 		remove: !now.Before(s.removeRetryUntil),
-		skip:   s.fullPlayers,
+		skip:   s.skipped(),
 	}
+}
+
+func (s *friendSyncRunState) skipped() map[string]time.Time {
+	skip := maps.Clone(s.waiting)
+	if skip == nil {
+		skip = make(map[string]time.Time, len(s.fullPlayers))
+	}
+	for xuid, at := range s.fullPlayers {
+		if until := at.Add(friendListFullBackoff); until.After(skip[xuid]) {
+			skip[xuid] = until
+		}
+	}
+	return skip
 }
 
 // record applies a pass's backoffs and reports whether the bot's own list was just found full.
@@ -115,6 +130,17 @@ func (s *friendSyncRunState) record(now time.Time, result friendSyncResult) (lis
 	for _, xuid := range result.fullPlayers {
 		s.fullPlayers[xuid] = now
 	}
+	for xuid, until := range s.waiting {
+		if !now.Before(until) {
+			delete(s.waiting, xuid)
+		}
+	}
+	for xuid, delay := range result.waits {
+		if s.waiting == nil {
+			s.waiting = make(map[string]time.Time)
+		}
+		s.waiting[xuid] = now.Add(delay)
+	}
 	// Xbox refuses every accept once the bot's own list is full; one player's full list only fails them.
 	refused := 0
 	for _, at := range s.fullPlayers {
@@ -135,8 +161,16 @@ type friendSyncResult struct {
 	readRetryAfter   time.Duration
 	addRetryAfter    time.Duration
 	removeRetryAfter time.Duration
-	accepted         int      // friend requests accepted
-	fullPlayers      []string // players refused because a friend list was full
+	accepted         int                      // friend requests accepted
+	fullPlayers      []string                 // players refused because a friend list was full
+	waits            map[string]time.Duration // players Xbox asked to retry later, and how long
+}
+
+func (r *friendSyncResult) wait(xuid string, delay time.Duration) {
+	if r.waits == nil {
+		r.waits = make(map[string]time.Duration)
+	}
+	r.waits[xuid] = delay
 }
 
 // addBlocked stops a pass on rate limits, and once enough refusals with no accept suggest the bot is full.
@@ -208,8 +242,13 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 // could not update are retried one by one to find restricted accounts.
 func (s FriendSyncer) acceptPending(ctx context.Context, opts friendSyncOptions, result *friendSyncResult) {
 	s.debug(ctx, "accepting pending friend requests")
+	now := time.Now()
+	skip := func(xuid string) bool {
+		until, ok := opts.skip[xuid]
+		return ok && now.Before(until)
+	}
 	operationCtx, cancel := xboxOperationContext(ctx)
-	accepted, err := s.Client.AcceptPendingFriendRequests(operationCtx)
+	accepted, err := s.Client.AcceptPendingFriendRequests(operationCtx, skip)
 	cancel()
 	for _, p := range accepted {
 		s.added(ctx, p, "pending_requests")
@@ -219,13 +258,14 @@ func (s FriendSyncer) acceptPending(ctx context.Context, opts friendSyncOptions,
 	switch {
 	case err == nil:
 	case errors.As(err, &failed):
-		now := time.Now()
 		for _, p := range failed.Failed {
+			if delay := failed.Waits[p.XUID]; delay > 0 {
+				s.warn(ctx, "xbox refused friend request; it waits", "xuid", p.XUID, "gamertag", p.Gamertag, "retry_after", delay)
+				result.wait(p.XUID, delay)
+				continue
+			}
 			if result.addBlocked() {
 				break
-			}
-			if at, ok := opts.skip[p.XUID]; ok && now.Sub(at) < friendListFullBackoff {
-				continue
 			}
 			s.addFriend(ctx, p, result)
 		}
@@ -262,8 +302,11 @@ func (s FriendSyncer) addFriend(ctx context.Context, p Person, result *friendSyn
 		s.warn(ctx, "friend list full; their request waits an hour", "xuid", p.XUID, "gamertag", p.Gamertag)
 		result.fullPlayers = append(result.fullPlayers, p.XUID)
 	default:
-		if delay := retryDelay(err); delay > 0 {
+		// Only a rate limit pauses every add; another error's delay is for this player.
+		if delay := retryDelay(err); delay > 0 && errors.Is(err, xblsocial.ErrRateLimited) {
 			result.addRetryAfter = delay
+		} else if delay > 0 {
+			result.wait(p.XUID, delay)
 		}
 		if s.Log != nil {
 			s.Log.Warn("add friend", "xuid", p.XUID, "gamertag", p.Gamertag, "err", err)
