@@ -313,6 +313,29 @@ func TestFriendSyncRunStateSkipsUntilLaterHoldEnds(t *testing.T) {
 	}
 }
 
+// Delays from earlier batches hold their players even when a later batch's rate limit pauses adds.
+func TestFriendSyncerAppliesWaitsAndLaterBatchFailure(t *testing.T) {
+	client := &syncFriendClient{accept: func(context.Context) ([]Person, error) {
+		return nil, &AcceptFriendRequestsError{
+			Failed: []Person{{XUID: "held"}},
+			Waits:  map[string]time.Duration{"held": 12 * time.Hour},
+			Err:    &xblsocial.ResponseError{Method: http.MethodPost, StatusCode: http.StatusTooManyRequests, RetryAfter: time.Minute},
+		}
+	}}
+	syncer := FriendSyncer{Client: client, Config: FriendSyncConfig{AutoFriend: true}}
+	var state friendSyncRunState
+	now := time.Now()
+	result, _ := syncer.syncWithOptions(context.Background(), state.options(now, false))
+	state.record(now, result)
+	if len(client.added) != 0 {
+		t.Fatalf("retried %v after the rate limit", client.added)
+	}
+	later := state.options(now.Add(2*time.Minute), false)
+	if _, held := later.skip["held"]; !held || !later.add || state.options(now, false).add {
+		t.Fatalf("want adds paused for the rate limit only and held waiting 12h; add=%v held=%v", later.add, held)
+	}
+}
+
 func TestFriendSyncerExpiresInactiveFriendsOnly(t *testing.T) {
 	old := time.Now().Add(-48 * time.Hour)
 	history := &syncHistoryStore{lastSeen: map[string]time.Time{"old": old, "recent": time.Now()}}

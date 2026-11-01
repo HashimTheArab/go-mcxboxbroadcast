@@ -32,16 +32,23 @@ var friendListConfig = xblsocial.PeopleListConfig{Undecorated: true}
 // applies a lower limit to a particular account or request.
 const addFriendsBatchSize = 50
 
-// AcceptFriendRequestsError reports a successful bulk accept response that
-// still failed to update one or more pending friend requests.
+// AcceptFriendRequestsError reports pending friend requests a bulk accept
+// failed to update. With Err set, a later batch failed and Failed holds only
+// the players earlier batches refused with a delay.
 type AcceptFriendRequestsError struct {
 	Failed []Person
 	Waits  map[string]time.Duration // failed XUIDs Xbox asked to retry later, and how long
+	Err    error                    // the failure that stopped the accept, if one did
 }
 
 func (e *AcceptFriendRequestsError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("accept pending friend requests: %v (%d users wait)", e.Err, len(e.Failed))
+	}
 	return fmt.Sprintf("accept pending friend requests: failed to update %d users", len(e.Failed))
 }
+
+func (e *AcceptFriendRequestsError) Unwrap() error { return e.Err }
 
 // Friends returns the authenticated account's friends.
 func (c FriendClient) Friends(ctx context.Context) ([]Person, error) {
@@ -93,7 +100,16 @@ func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context, skip func
 		}
 	}
 	if bulkErr != nil {
-		return accepted, bulkErr
+		if len(waits) == 0 {
+			return accepted, bulkErr
+		}
+		var held []Person
+		for _, xuid := range xuids {
+			if _, ok := waits[xuid]; ok {
+				held = append(held, byXUID[xuid])
+			}
+		}
+		return accepted, &AcceptFriendRequestsError{Failed: held, Waits: waits, Err: bulkErr}
 	}
 	var failed []Person
 	for _, xuid := range xuids {

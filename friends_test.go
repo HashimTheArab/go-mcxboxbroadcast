@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -332,6 +333,40 @@ func TestFriendClientAcceptPendingFriendRequestsDelaysOnlyNamedUsers(t *testing.
 				t.Fatalf("waits = %s, want %s", got, tc.want)
 			}
 		})
+	}
+}
+
+// A later batch's failure keeps the delays an earlier refused batch reported.
+func TestFriendClientAcceptPendingFriendRequestsKeepsWaitsWhenLaterBatchFails(t *testing.T) {
+	people := make([]map[string]string, addFriendsBatchSize+1)
+	for i := range people {
+		people[i] = map[string]string{"xuid": strconv.Itoa(i + 1)}
+	}
+	list, err := json.Marshal(map[string]any{"people": people})
+	if err != nil {
+		t.Fatal(err)
+	}
+	posts := 0
+	client := FriendClient{Social: newTestSocialClient(
+		&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method == http.MethodGet {
+				return response(http.StatusOK, string(list)), nil
+			}
+			posts++
+			if posts == 1 {
+				r := response(http.StatusBadRequest, `{"updatedPeople":[],"failedToUpdate":["1"]}`)
+				r.Header.Set("Retry-After", "43200")
+				return r, nil
+			}
+			return response(http.StatusTooManyRequests, ""), nil
+		})})}
+	_, err = client.AcceptPendingFriendRequests(context.Background(), nil)
+	var acceptErr *AcceptFriendRequestsError
+	if !errors.As(err, &acceptErr) || fmt.Sprint(acceptErr.Waits) != "map[1:12h0m0s]" || len(acceptErr.Failed) != 1 {
+		t.Fatalf("got %T %v, want player 1 waiting 12h", err, err)
+	}
+	if !errors.Is(err, xblsocial.ErrRateLimited) {
+		t.Fatalf("lost the later batch's rate limit: %v", err)
 	}
 }
 

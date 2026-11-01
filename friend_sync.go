@@ -256,13 +256,19 @@ func (s FriendSyncer) acceptPending(ctx context.Context, opts friendSyncOptions,
 	}
 	result.accepted += len(accepted)
 	var failed *AcceptFriendRequestsError
-	switch {
-	case err == nil:
-	case errors.As(err, &failed):
+	if errors.As(err, &failed) {
 		for _, p := range failed.Failed {
 			if delay := failed.Waits[p.XUID]; delay > 0 {
 				s.warn(ctx, "xbox refused friend request; it waits", "xuid", p.XUID, "gamertag", p.Gamertag, "retry_after", delay)
 				result.wait(p.XUID, delay)
+			}
+		}
+	}
+	switch {
+	case err == nil:
+	case failed != nil && failed.Err == nil:
+		for _, p := range failed.Failed {
+			if _, waits := failed.Waits[p.XUID]; waits {
 				continue
 			}
 			if result.addBlocked() {
