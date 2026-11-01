@@ -98,7 +98,7 @@ type friendCount struct {
 	friends    int
 	countedAt  time.Time
 	retryAfter time.Time // after a failed count-only list
-	full       bool      // the syncer's own-list-full backoff is active
+	full       bool      // the syncer reports the account's own list full
 }
 
 func (c *friendCount) setFull(full bool) {

@@ -169,8 +169,9 @@ func TestFriendSyncerSkipsPlayerWithFullList(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if state.record(now, result) {
-			t.Fatalf("pass %d: one player's full list paused the bot", pass)
+		state.record(now, result)
+		if state.full {
+			t.Fatalf("pass %d: one player's full list marked the bot full", pass)
 		}
 	}
 	if !slices.Equal(client.added, []string{"full", "2", "3", "2", "3"}) {
@@ -459,14 +460,24 @@ func TestFriendSyncRunStateTracksSeparateAddAndRemoveBackoff(t *testing.T) {
 	if opts := state.options(now.Add(time.Second), false); opts.add || !opts.remove {
 		t.Fatalf("options = %+v, want adds paused and removals running", opts)
 	}
-	if !state.record(now, friendSyncResult{fullPlayers: []string{"1", "2"}}) {
-		t.Fatal("two refused players with no accept did not mark the list full")
+}
+
+// New players refused after the first pass, with no accept between, report the list full
+// without pausing adds; the next accept clears it.
+func TestFriendSyncRunStateReportsFullFromNewRefusals(t *testing.T) {
+	now := time.Now()
+	var state friendSyncRunState
+	state.record(now, friendSyncResult{pendingRead: true})
+	state.record(now, friendSyncResult{pendingRead: true, fullPlayers: []string{"1", "2"}})
+	if !state.full {
+		t.Fatal("two new refused players with no accept did not report the list full")
 	}
-	if opts := state.options(now.Add(2*time.Minute), false); opts.add {
-		t.Fatal("adds resumed while the friend list is full")
+	if !state.options(now, false).add {
+		t.Fatal("a full report paused adds")
 	}
-	if opts := state.options(now.Add(friendListFullBackoff), false); !opts.add {
-		t.Fatal("adds did not resume after the full-list backoff")
+	state.record(now, friendSyncResult{pendingRead: true, accepted: 1})
+	if state.full {
+		t.Fatal("an accept did not clear the full report")
 	}
 }
 
@@ -474,14 +485,54 @@ func TestFriendSyncRunStateTracksSeparateAddAndRemoveBackoff(t *testing.T) {
 func TestFriendSyncRunStateNeedsRefusalsSinceLastAccept(t *testing.T) {
 	now := time.Now()
 	var state friendSyncRunState
-	if state.record(now, friendSyncResult{fullPlayers: []string{"1"}}) {
-		t.Fatal("one refusal marked the list full")
-	}
-	if state.record(now.Add(time.Minute), friendSyncResult{accepted: 1}) {
-		t.Fatal("an accept marked the list full")
-	}
-	if state.record(now.Add(2*time.Minute), friendSyncResult{fullPlayers: []string{"2"}}) {
+	state.record(now, friendSyncResult{pendingRead: true})
+	state.record(now, friendSyncResult{pendingRead: true, fullPlayers: []string{"1"}})
+	state.record(now.Add(time.Minute), friendSyncResult{pendingRead: true, accepted: 1})
+	state.record(now.Add(2*time.Minute), friendSyncResult{pendingRead: true, fullPlayers: []string{"2"}})
+	if state.full {
 		t.Fatal("refusals on both sides of an accept marked the list full")
+	}
+}
+
+// A first pass that could not read the pending list is not the baseline.
+func TestFriendSyncerBaselineWaitsForPendingRead(t *testing.T) {
+	readFails := true
+	client := &syncFriendClient{
+		add: func(context.Context, string) error { return &xblsocial.ResponseError{StatusCode: 403, Code: 1028} },
+	}
+	client.accept = func(context.Context) ([]Person, error) {
+		if readFails {
+			return nil, &xblsocial.ResponseError{Method: http.MethodGet, StatusCode: http.StatusServiceUnavailable}
+		}
+		return nil, &AcceptFriendRequestsError{Failed: client.pending("chronic1", "chronic2")}
+	}
+	syncer := FriendSyncer{Client: client, Config: FriendSyncConfig{AutoFriend: true}}
+	var state friendSyncRunState
+	syncer.runSync(t.Context(), &state, false)
+	readFails = false
+	syncer.runSync(t.Context(), &state, false)
+	if state.full {
+		t.Fatal("players refused at the first readable pass marked the bot full")
+	}
+}
+
+// Players whose own lists stay full are refused at the first pass and after every hold;
+// neither marks the bot full, but a bot that starts full is still found by new players.
+func TestFriendSyncRunStateIgnoresFirstPassAndRepeatRefusals(t *testing.T) {
+	now := time.Now()
+	var state friendSyncRunState
+	state.record(now, friendSyncResult{pendingRead: true, fullPlayers: []string{"chronic1", "chronic2"}})
+	if state.full {
+		t.Fatal("first-pass refusals marked the bot full")
+	}
+	later := now.Add(friendListFullBackoff)
+	state.record(later, friendSyncResult{pendingRead: true, fullPlayers: []string{"chronic1", "chronic2"}})
+	if state.full {
+		t.Fatal("repeat refusals marked the bot full")
+	}
+	state.record(later, friendSyncResult{pendingRead: true, fullPlayers: []string{"new1", "new2"}})
+	if !state.full {
+		t.Fatal("two new refused players did not mark the bot full")
 	}
 }
 
