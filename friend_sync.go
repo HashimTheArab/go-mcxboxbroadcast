@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
@@ -14,9 +15,9 @@ import (
 // FriendAPI is the account's friend list as the syncer sees it.
 type FriendAPI interface {
 	Friends(ctx context.Context) ([]Person, error)
-	// AcceptPendingFriendRequests returns who was accepted; failed people are
-	// reported through *AcceptFriendRequestsError.
-	AcceptPendingFriendRequests(ctx context.Context) ([]Person, error)
+	// AcceptPendingFriendRequests accepts the requests skip does not report and returns who was
+	// accepted; failed people are reported through *AcceptFriendRequestsError.
+	AcceptPendingFriendRequests(ctx context.Context, skip func(xuid string) bool) ([]Person, error)
 	AddFriend(ctx context.Context, xuid string) error
 	RemoveFriend(ctx context.Context, xuid string) error
 }
@@ -59,6 +60,7 @@ type FriendSyncer struct {
 
 const (
 	friendListFullBackoff = time.Hour
+	refusedBackoff        = time.Hour // how long a player Xbox refuses with no reason or delay waits
 	// fullListPlayers is how many different players must be refused for a full list, with no
 	// accept since, before the bot treats its own list as full. One refusal is that player's list.
 	fullListPlayers = 2
@@ -68,8 +70,8 @@ type friendSyncOptions struct {
 	expire bool
 	add    bool
 	remove bool
-	// skip holds players whose own friend list was recently full; their requests wait.
-	skip map[string]time.Time
+	// skip holds players whose requests wait, for a full list, a refusal or an Xbox delay.
+	skip map[string]struct{}
 }
 
 // friendSyncRunState tracks per-operation rate-limit backoff between runs.
@@ -81,6 +83,7 @@ type friendSyncRunState struct {
 	listFullUntil    time.Time
 	// fullPlayers maps players refused for a full list to when; a player's request waits an hour.
 	fullPlayers map[string]time.Time
+	waiting     map[string]time.Time // players Xbox asked to retry later, to when
 	lastAccept  time.Time
 }
 
@@ -89,8 +92,23 @@ func (s *friendSyncRunState) options(now time.Time, expire bool) friendSyncOptio
 		expire: expire,
 		add:    !now.Before(s.addRetryUntil) && !now.Before(s.listFullUntil),
 		remove: !now.Before(s.removeRetryUntil),
-		skip:   s.fullPlayers,
+		skip:   s.skipped(now),
 	}
+}
+
+func (s *friendSyncRunState) skipped(now time.Time) map[string]struct{} {
+	skip := make(map[string]struct{})
+	for xuid, until := range s.waiting {
+		if now.Before(until) {
+			skip[xuid] = struct{}{}
+		}
+	}
+	for xuid, at := range s.fullPlayers {
+		if now.Before(at.Add(friendListFullBackoff)) {
+			skip[xuid] = struct{}{}
+		}
+	}
+	return skip
 }
 
 // record applies a pass's backoffs and reports whether the bot's own list was just found full.
@@ -115,6 +133,17 @@ func (s *friendSyncRunState) record(now time.Time, result friendSyncResult) (lis
 	for _, xuid := range result.fullPlayers {
 		s.fullPlayers[xuid] = now
 	}
+	for xuid, until := range s.waiting {
+		if !now.Before(until) {
+			delete(s.waiting, xuid)
+		}
+	}
+	for xuid, delay := range result.waits {
+		if s.waiting == nil {
+			s.waiting = make(map[string]time.Time)
+		}
+		s.waiting[xuid] = now.Add(delay)
+	}
 	// Xbox refuses every accept once the bot's own list is full; one player's full list only fails them.
 	refused := 0
 	for _, at := range s.fullPlayers {
@@ -135,8 +164,16 @@ type friendSyncResult struct {
 	readRetryAfter   time.Duration
 	addRetryAfter    time.Duration
 	removeRetryAfter time.Duration
-	accepted         int      // friend requests accepted
-	fullPlayers      []string // players refused because a friend list was full
+	accepted         int                      // friend requests accepted
+	fullPlayers      []string                 // players refused because a friend list was full
+	waits            map[string]time.Duration // players Xbox asked to retry later, and how long
+}
+
+func (r *friendSyncResult) wait(xuid string, delay time.Duration) {
+	if r.waits == nil {
+		r.waits = make(map[string]time.Duration)
+	}
+	r.waits[xuid] = delay
 }
 
 // addBlocked stops a pass on rate limits, and once enough refusals with no accept suggest the bot is full.
@@ -208,24 +245,41 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 // could not update are retried one by one to find restricted accounts.
 func (s FriendSyncer) acceptPending(ctx context.Context, opts friendSyncOptions, result *friendSyncResult) {
 	s.debug(ctx, "accepting pending friend requests")
+	skip := func(xuid string) bool {
+		_, ok := opts.skip[xuid]
+		return ok
+	}
 	operationCtx, cancel := xboxOperationContext(ctx)
-	accepted, err := s.Client.AcceptPendingFriendRequests(operationCtx)
+	accepted, err := s.Client.AcceptPendingFriendRequests(operationCtx, skip)
 	cancel()
 	for _, p := range accepted {
 		s.added(ctx, p, "pending_requests")
 	}
 	result.accepted += len(accepted)
 	var failed *AcceptFriendRequestsError
+	if errors.As(err, &failed) {
+		var held int
+		var longest time.Duration
+		for _, p := range failed.Failed {
+			if delay := failed.Waits[p.XUID]; delay > 0 {
+				s.debug(ctx, "friend request waits", "xuid", p.XUID, "gamertag", p.Gamertag, "retry_after", delay)
+				result.wait(p.XUID, delay)
+				held, longest = held+1, max(longest, delay)
+			}
+		}
+		if held > 0 {
+			s.warn(ctx, "xbox refused friend requests; they wait", "players", held, "retry_after", longest)
+		}
+	}
 	switch {
 	case err == nil:
-	case errors.As(err, &failed):
-		now := time.Now()
+	case failed != nil && failed.Err == nil:
 		for _, p := range failed.Failed {
+			if _, waits := failed.Waits[p.XUID]; waits {
+				continue
+			}
 			if result.addBlocked() {
 				break
-			}
-			if at, ok := opts.skip[p.XUID]; ok && now.Sub(at) < friendListFullBackoff {
-				continue
 			}
 			s.addFriend(ctx, p, result)
 		}
@@ -235,7 +289,7 @@ func (s FriendSyncer) acceptPending(ctx context.Context, opts friendSyncOptions,
 			if errors.As(err, &responseErr) && responseErr.Method == http.MethodGet {
 				// The pending list shares PeopleHub's read quota with Friends.
 				result.readRetryAfter = delay
-			} else {
+			} else if pausesAllAdds(err) {
 				result.addRetryAfter = delay
 			}
 		}
@@ -262,8 +316,14 @@ func (s FriendSyncer) addFriend(ctx context.Context, p Person, result *friendSyn
 		s.warn(ctx, "friend list full; their request waits an hour", "xuid", p.XUID, "gamertag", p.Gamertag)
 		result.fullPlayers = append(result.fullPlayers, p.XUID)
 	default:
-		if delay := retryDelay(err); delay > 0 {
+		switch delay := retryDelay(err); {
+		case delay > 0 && pausesAllAdds(err):
 			result.addRetryAfter = delay
+		case delay > 0 && aboutPlayers(err):
+			result.wait(p.XUID, delay)
+		case aboutPlayers(err):
+			// Asking again every pass is what earns long delays from Xbox.
+			result.wait(p.XUID, refusedBackoff)
 		}
 		if s.Log != nil {
 			s.Log.Warn("add friend", "xuid", p.XUID, "gamertag", p.Gamertag, "err", err)
@@ -412,6 +472,20 @@ func (s FriendSyncer) debug(ctx context.Context, msg string, args ...any) {
 	if s.Log != nil {
 		s.Log.DebugContext(ctx, msg, args...)
 	}
+}
+
+// pausesAllAdds reports a delay for the whole account: a rate limit or a server fault. Other
+// answers are about the request or its players.
+func pausesAllAdds(err error) bool {
+	var responseErr *xblsocial.ResponseError
+	return errors.As(err, &responseErr) && (responseErr.StatusCode == http.StatusTooManyRequests || responseErr.StatusCode >= 500)
+}
+
+// aboutPlayers reports an answer about the request's players rather than the account or its
+// token, so a delay or refusal holds just them.
+func aboutPlayers(err error) bool {
+	var responseErr *xblsocial.ResponseError
+	return errors.As(err, &responseErr) && slices.Contains([]int{http.StatusBadRequest, http.StatusNotFound, http.StatusConflict}, responseErr.StatusCode)
 }
 
 func retryDelay(err error) time.Duration {

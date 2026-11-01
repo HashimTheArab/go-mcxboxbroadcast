@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -68,7 +69,7 @@ func TestFriendClientAcceptPendingFriendRequestsUsesAddFriends(t *testing.T) {
 			return nil, nil
 		})))}
 
-	accepted, err := client.AcceptPendingFriendRequests(context.Background())
+	accepted, err := client.AcceptPendingFriendRequests(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +120,7 @@ func TestFriendClientAcceptPendingFriendRequestsBatchesAdds(t *testing.T) {
 			return nil, nil
 		})})}
 
-	accepted, err := client.AcceptPendingFriendRequests(context.Background())
+	accepted, err := client.AcceptPendingFriendRequests(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +161,7 @@ func TestFriendClientAcceptPendingFriendRequestsSplitsLimitErrors(t *testing.T) 
 			return nil, nil
 		})})}
 
-	accepted, err := client.AcceptPendingFriendRequests(context.Background())
+	accepted, err := client.AcceptPendingFriendRequests(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +189,7 @@ func TestFriendClientAcceptPendingFriendRequestsReturnsRetryAfterError(t *testin
 			return nil, nil
 		})})}
 
-	_, err := client.AcceptPendingFriendRequests(context.Background())
+	_, err := client.AcceptPendingFriendRequests(context.Background(), nil)
 	if err == nil {
 		t.Fatal("expected retry-after error")
 	}
@@ -215,7 +216,7 @@ func TestFriendClientAcceptPendingFriendRequestsReportsFailedUpdates(t *testing.
 			return nil, nil
 		})})}
 
-	accepted, err := client.AcceptPendingFriendRequests(context.Background())
+	accepted, err := client.AcceptPendingFriendRequests(context.Background(), nil)
 	if err == nil {
 		t.Fatal("expected failed updates error")
 	}
@@ -228,6 +229,184 @@ func TestFriendClientAcceptPendingFriendRequestsReportsFailedUpdates(t *testing.
 	}
 	if len(acceptErr.Failed) != 1 || acceptErr.Failed[0].XUID != "2" || acceptErr.Failed[0].Gamertag != "Two" {
 		t.Fatalf("failed people = %#v, want Two", acceptErr.Failed)
+	}
+}
+
+// A batch Xbox refuses entirely comes back as 400; every user must still reach the per-user retry.
+func TestFriendClientAcceptPendingFriendRequestsReportsRefusedBatch(t *testing.T) {
+	client := FriendClient{Social: newTestSocialClient(
+		&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.Method {
+			case http.MethodGet:
+				return response(http.StatusOK, `{"people":[{"xuid":"1","gamertag":"One"},{"xuid":"2","gamertag":"Two"}]}`), nil
+			case http.MethodPost:
+				return response(http.StatusBadRequest, `{"updatedPeople":[],"failedToUpdate":["1","2"]}`), nil
+			default:
+				t.Fatalf("unexpected request %s %s", req.Method, req.URL)
+			}
+			return nil, nil
+		})})}
+
+	accepted, err := client.AcceptPendingFriendRequests(context.Background(), nil)
+	if len(accepted) != 0 {
+		t.Fatalf("accepted people = %#v, want none", accepted)
+	}
+	var acceptErr *AcceptFriendRequestsError
+	if !errors.As(err, &acceptErr) {
+		t.Fatalf("expected accept failure error, got %T: %v", err, err)
+	}
+	if got := fmt.Sprint(acceptErr.Failed); got != "[{1 One} {2 Two}]" {
+		t.Fatalf("failed people = %s, want One and Two", got)
+	}
+}
+
+// An uncoded 400 that is not a refused batch stays an error.
+func TestFriendClientAcceptPendingFriendRequestsKeepsOtherBadRequests(t *testing.T) {
+	client := FriendClient{Social: newTestSocialClient(
+		&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method == http.MethodGet {
+				return response(http.StatusOK, `{"people":[{"xuid":"1","gamertag":"One"}]}`), nil
+			}
+			return response(http.StatusBadRequest, `{"error":"bad request"}`), nil
+		})})}
+	_, err := client.AcceptPendingFriendRequests(context.Background(), nil)
+	var responseErr *xblsocial.ResponseError
+	if !errors.As(err, &responseErr) {
+		t.Fatalf("expected social response error, got %T: %v", err, err)
+	}
+}
+
+// A refused batch's delay is reported with its players, and skipped players are not sent.
+func TestFriendClientAcceptPendingFriendRequestsReportsRefusedBatchDelay(t *testing.T) {
+	var sent []string
+	client := FriendClient{Social: newTestSocialClient(
+		&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method == http.MethodGet {
+				return response(http.StatusOK, `{"people":[{"xuid":"1","gamertag":"One"},{"xuid":"2","gamertag":"Two"}]}`), nil
+			}
+			var body struct {
+				XUIDs []string `json:"xuids"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			sent = body.XUIDs
+			r := response(http.StatusBadRequest, `{"updatedPeople":[],"failedToUpdate":["1"]}`)
+			r.Header.Set("Retry-After", "43200")
+			return r, nil
+		})})}
+	_, err := client.AcceptPendingFriendRequests(context.Background(), func(xuid string) bool { return xuid == "2" })
+	var acceptErr *AcceptFriendRequestsError
+	if !errors.As(err, &acceptErr) {
+		t.Fatalf("expected accept failure error, got %T: %v", err, err)
+	}
+	if fmt.Sprint(sent) != "[1]" || fmt.Sprint(acceptErr.Failed) != "[{1 One}]" || acceptErr.Waits["1"] != 12*time.Hour {
+		t.Fatalf("sent %v, failed %v waiting %v; want only One, waiting 12h", sent, acceptErr.Failed, acceptErr.Waits)
+	}
+}
+
+// A refused batch's delay holds only the users Xbox named; a cut-short body names no one.
+func TestFriendClientAcceptPendingFriendRequestsDelaysOnlyNamedUsers(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body string
+		want string
+	}{
+		"named":     {`{"updatedPeople":[],"failedToUpdate":["1"]}`, "map[1:12h0m0s]"},
+		"cut short": {`{"updatedPeople":[],"failedToUpdate":["1",`, "map[]"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := FriendClient{Social: newTestSocialClient(
+				&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					if req.Method == http.MethodGet {
+						return response(http.StatusOK, `{"people":[{"xuid":"1"},{"xuid":"2"}]}`), nil
+					}
+					r := response(http.StatusBadRequest, tc.body)
+					r.Header.Set("Retry-After", "43200")
+					return r, nil
+				})})}
+			_, err := client.AcceptPendingFriendRequests(context.Background(), nil)
+			var acceptErr *AcceptFriendRequestsError
+			if !errors.As(err, &acceptErr) || len(acceptErr.Failed) != 2 {
+				t.Fatalf("expected both users failed, got %T: %v", err, err)
+			}
+			if got := fmt.Sprint(acceptErr.Waits); got != tc.want {
+				t.Fatalf("waits = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// A later batch's failure keeps the delays an earlier refused batch reported.
+func TestFriendClientAcceptPendingFriendRequestsKeepsWaitsWhenLaterBatchFails(t *testing.T) {
+	people := make([]map[string]string, addFriendsBatchSize+1)
+	for i := range people {
+		people[i] = map[string]string{"xuid": strconv.Itoa(i + 1)}
+	}
+	list, err := json.Marshal(map[string]any{"people": people})
+	if err != nil {
+		t.Fatal(err)
+	}
+	posts := 0
+	client := FriendClient{Social: newTestSocialClient(
+		&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method == http.MethodGet {
+				return response(http.StatusOK, string(list)), nil
+			}
+			posts++
+			if posts == 1 {
+				r := response(http.StatusBadRequest, `{"updatedPeople":[],"failedToUpdate":["1"]}`)
+				r.Header.Set("Retry-After", "43200")
+				return r, nil
+			}
+			return response(http.StatusTooManyRequests, ""), nil
+		})})}
+	_, err = client.AcceptPendingFriendRequests(context.Background(), nil)
+	var acceptErr *AcceptFriendRequestsError
+	if !errors.As(err, &acceptErr) || fmt.Sprint(acceptErr.Waits) != "map[1:12h0m0s]" || len(acceptErr.Failed) != 1 {
+		t.Fatalf("got %T %v, want player 1 waiting 12h", err, err)
+	}
+	if !errors.Is(err, xblsocial.ErrRateLimited) {
+		t.Fatalf("lost the later batch's rate limit: %v", err)
+	}
+}
+
+// A bulk 4xx with a delay that is not a refused batch holds every user it sent.
+func TestFriendClientAcceptPendingFriendRequestsHoldsBatchForRequestDelay(t *testing.T) {
+	client := FriendClient{Social: newTestSocialClient(
+		&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method == http.MethodGet {
+				return response(http.StatusOK, `{"people":[{"xuid":"1"},{"xuid":"2"}]}`), nil
+			}
+			r := response(http.StatusBadRequest, `{"code":1049,"description":"Bad request"}`)
+			r.Header.Set("Retry-After", "43200")
+			return r, nil
+		})})}
+	_, err := client.AcceptPendingFriendRequests(context.Background(), nil)
+	var acceptErr *AcceptFriendRequestsError
+	if !errors.As(err, &acceptErr) || fmt.Sprint(acceptErr.Waits) != "map[1:12h0m0s 2:12h0m0s]" {
+		t.Fatalf("got %T %v, want both users waiting 12h", err, err)
+	}
+	var responseErr *xblsocial.ResponseError
+	if !errors.As(err, &responseErr) || responseErr.Code != 1049 {
+		t.Fatalf("lost the bulk error: %v", err)
+	}
+}
+
+// An auth error's delay on a bulk add is not about the players, so it holds no one.
+func TestFriendClientAcceptPendingFriendRequestsDoesNotHoldForAuthDelay(t *testing.T) {
+	client := FriendClient{Social: newTestSocialClient(
+		&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method == http.MethodGet {
+				return response(http.StatusOK, `{"people":[{"xuid":"1"}]}`), nil
+			}
+			r := response(http.StatusUnauthorized, "")
+			r.Header.Set("Retry-After", "60")
+			return r, nil
+		})})}
+	_, err := client.AcceptPendingFriendRequests(context.Background(), nil)
+	var acceptErr *AcceptFriendRequestsError
+	if errors.As(err, &acceptErr) {
+		t.Fatalf("a 401 held players: %v", acceptErr.Waits)
 	}
 }
 
@@ -283,7 +462,7 @@ func TestFriendClientAcceptPendingFriendRequestsSkipsGuests(t *testing.T) {
 			}
 			return response(http.StatusOK, `{"people":[{"xuid":"4503599627370497"}]}`), nil
 		})})}
-	accepted, err := client.AcceptPendingFriendRequests(context.Background())
+	accepted, err := client.AcceptPendingFriendRequests(context.Background(), nil)
 	if err != nil || len(accepted) != 0 {
 		t.Fatalf("accepted = %#v, err = %v", accepted, err)
 	}

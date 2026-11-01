@@ -2,8 +2,12 @@ package broadcaster
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"strings"
+	"time"
 
 	xblsocial "github.com/df-mc/go-xsapi/v2/social"
 )
@@ -28,15 +32,23 @@ var friendListConfig = xblsocial.PeopleListConfig{Undecorated: true}
 // applies a lower limit to a particular account or request.
 const addFriendsBatchSize = 50
 
-// AcceptFriendRequestsError reports a successful bulk accept response that
-// still failed to update one or more pending friend requests.
+// AcceptFriendRequestsError reports pending friend requests a bulk accept
+// failed to update. With Err set, a later batch failed and Failed holds only
+// the players earlier batches refused with a delay.
 type AcceptFriendRequestsError struct {
 	Failed []Person
+	Waits  map[string]time.Duration // failed XUIDs Xbox asked to retry later, and how long
+	Err    error                    // the failure that stopped the accept, if one did
 }
 
 func (e *AcceptFriendRequestsError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("accept pending friend requests: %v (%d users wait)", e.Err, len(e.Failed))
+	}
 	return fmt.Sprintf("accept pending friend requests: failed to update %d users", len(e.Failed))
 }
+
+func (e *AcceptFriendRequestsError) Unwrap() error { return e.Err }
 
 // Friends returns the authenticated account's friends.
 func (c FriendClient) Friends(ctx context.Context) ([]Person, error) {
@@ -47,9 +59,9 @@ func (c FriendClient) Friends(ctx context.Context) ([]Person, error) {
 	return peopleFromSocialUsers(users), nil
 }
 
-// AcceptPendingFriendRequests accepts incoming Xbox friend requests with
-// bounded add calls and returns the people that Xbox reported as updated.
-func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]Person, error) {
+// AcceptPendingFriendRequests accepts incoming Xbox friend requests, except
+// those skip reports, and returns the people that Xbox reported as updated.
+func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context, skip func(xuid string) bool) ([]Person, error) {
 	pending, err := c.Social.People(ctx, xblsocial.PeopleListIncomingFriendRequests, xblsocial.PeopleListConfig{Undecorated: true})
 	if err != nil {
 		return nil, err
@@ -57,7 +69,7 @@ func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]Person
 	xuids := make([]string, 0, len(pending))
 	byXUID := make(map[string]Person, len(pending))
 	for _, user := range pending {
-		if user.XUID == "" || isGuestXUID(user.XUID) {
+		if user.XUID == "" || isGuestXUID(user.XUID) || (skip != nil && skip(user.XUID)) {
 			continue
 		}
 		xuids = append(xuids, user.XUID)
@@ -69,9 +81,10 @@ func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]Person
 
 	updatedXUIDs := make([]string, 0, len(xuids))
 	var bulkErr error
+	waits := make(map[string]time.Duration)
 	for start := 0; start < len(xuids); start += addFriendsBatchSize {
 		end := min(start+addFriendsBatchSize, len(xuids))
-		updated, err := addFriends(ctx, c.Social, xuids[start:end])
+		updated, err := addFriends(ctx, c.Social, xuids[start:end], waits)
 		updatedXUIDs = append(updatedXUIDs, updated...)
 		if err != nil {
 			bulkErr = err
@@ -87,7 +100,16 @@ func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]Person
 		}
 	}
 	if bulkErr != nil {
-		return accepted, bulkErr
+		if len(waits) == 0 {
+			return accepted, bulkErr
+		}
+		var held []Person
+		for _, xuid := range xuids {
+			if _, ok := waits[xuid]; ok {
+				held = append(held, byXUID[xuid])
+			}
+		}
+		return accepted, &AcceptFriendRequestsError{Failed: held, Waits: waits, Err: bulkErr}
 	}
 	var failed []Person
 	for _, xuid := range xuids {
@@ -96,27 +118,60 @@ func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]Person
 		}
 	}
 	if len(failed) > 0 {
-		return accepted, &AcceptFriendRequestsError{Failed: failed}
+		return accepted, &AcceptFriendRequestsError{Failed: failed, Waits: waits}
 	}
 	return accepted, nil
 }
 
 // addFriends retries Xbox's bulk-limit response with progressively smaller
-// batches. Successful work from the first half is retained if the second half
-// fails for an unrelated reason such as rate limiting.
-func addFriends(ctx context.Context, client *xblsocial.Client, xuids []string) ([]string, error) {
+// batches, and adds the users of a refused batch that asked for a delay to waits.
+// Successful work from the first half is retained if the second half fails
+// for an unrelated reason such as rate limiting.
+func addFriends(ctx context.Context, client *xblsocial.Client, xuids []string, waits map[string]time.Duration) ([]string, error) {
 	result, err := client.AddFriends(ctx, xuids)
+	if refused, named, wait := batchRefused(err); refused {
+		// Reporting none updated lists every user as failed.
+		if wait > 0 {
+			for _, xuid := range named {
+				waits[xuid] = wait
+			}
+		}
+		return nil, nil
+	}
 	if err == nil || len(xuids) == 1 || !errors.Is(err, xblsocial.ErrBulkOperationLimit) {
+		// A delay on an answer about this request, not the account, holds the users it sent.
+		if delay := retryDelay(err); delay > 0 && aboutPlayers(err) {
+			for _, xuid := range xuids {
+				waits[xuid] = delay
+			}
+		}
 		return result.Updated, err
 	}
 
 	middle := len(xuids) / 2
-	left, err := addFriends(ctx, client, xuids[:middle])
+	left, err := addFriends(ctx, client, xuids[:middle], waits)
 	if err != nil {
 		return left, err
 	}
-	right, err := addFriends(ctx, client, xuids[middle:])
+	right, err := addFriends(ctx, client, xuids[middle:], waits)
 	return append(left, right...), err
+}
+
+// batchRefused reports Xbox's answer when it refuses every user in a bulk add
+// (400 with no service code and a failedToUpdate body), the users it named, and
+// the delay it asked for. The delay is for those users, not the account, which
+// Xbox limits with 429. A body cut short names no one.
+func batchRefused(err error) (refused bool, named []string, wait time.Duration) {
+	var responseErr *xblsocial.ResponseError
+	if !errors.As(err, &responseErr) || responseErr.StatusCode != http.StatusBadRequest ||
+		responseErr.Code != 0 || !strings.Contains(responseErr.Body, `"failedToUpdate"`) {
+		return false, nil, 0
+	}
+	var result xblsocial.BulkFriendsResult
+	if json.Unmarshal([]byte(responseErr.Body), &result) == nil {
+		named = result.Failed
+	}
+	return true, named, responseErr.RetryAfter
 }
 
 // AddFriend accepts the user's pending request, or sends one.

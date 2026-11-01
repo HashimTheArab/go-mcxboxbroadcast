@@ -151,15 +151,15 @@ func TestFriendSyncerStopsRetriesWhenFriendListIsFull(t *testing.T) {
 // One player's full list must not stop the bot accepting everyone else, and their request waits.
 func TestFriendSyncerSkipsPlayerWithFullList(t *testing.T) {
 	client := &syncFriendClient{
-		accept: func(context.Context) ([]Person, error) {
-			return nil, &AcceptFriendRequestsError{Failed: []Person{{XUID: "full"}, {XUID: "2"}, {XUID: "3"}}}
-		},
 		add: func(_ context.Context, xuid string) error {
 			if xuid == "full" {
 				return &xblsocial.ResponseError{StatusCode: 403, Code: 1028}
 			}
 			return nil
 		},
+	}
+	client.accept = func(context.Context) ([]Person, error) {
+		return nil, &AcceptFriendRequestsError{Failed: client.pending("full", "2", "3")}
 	}
 	syncer := FriendSyncer{Client: client, Config: FriendSyncConfig{AutoFriend: true}}
 	var state friendSyncRunState
@@ -178,6 +178,181 @@ func TestFriendSyncerSkipsPlayerWithFullList(t *testing.T) {
 	}
 	if opts := state.options(now, false); !opts.add {
 		t.Fatal("adds paused for one player's full list")
+	}
+}
+
+// A delay Xbox puts on refused players holds only them; a 429 still pauses every add.
+func TestFriendSyncerDelayHoldsOnlyRefusedPlayers(t *testing.T) {
+	client := &syncFriendClient{
+		add: func(_ context.Context, xuid string) error {
+			switch xuid {
+			case "slow":
+				return &xblsocial.ResponseError{StatusCode: http.StatusBadRequest, RetryAfter: 2 * time.Hour}
+			case "limited":
+				return &xblsocial.ResponseError{StatusCode: http.StatusTooManyRequests, RetryAfter: time.Minute}
+			}
+			return nil
+		},
+	}
+	refused := true
+	client.accept = func(context.Context) ([]Person, error) {
+		if refused {
+			return nil, &AcceptFriendRequestsError{Failed: client.pending("held"), Waits: map[string]time.Duration{"held": 12 * time.Hour}}
+		}
+		return nil, &AcceptFriendRequestsError{Failed: client.pending("held", "slow", "ok")}
+	}
+	syncer := FriendSyncer{Client: client, Config: FriendSyncConfig{AutoFriend: true}}
+	var state friendSyncRunState
+	now := time.Now()
+	pass := func() {
+		t.Helper()
+		result, err := syncer.syncWithOptions(context.Background(), state.options(now, false))
+		if err != nil {
+			t.Fatal(err)
+		}
+		state.record(now, result)
+	}
+
+	pass()
+	if len(client.added) != 0 {
+		t.Fatalf("retried %v one by one, want the refused batch's delay honoured", client.added)
+	}
+	if !state.options(now, false).add {
+		t.Fatal("one player's delay paused every add")
+	}
+	refused = false
+	pass()
+	pass()
+	if !slices.Equal(client.added, []string{"slow", "ok", "ok"}) {
+		t.Fatalf("attempts = %v, want held skipped and slow tried once", client.added)
+	}
+	if !state.options(now, false).add {
+		t.Fatal("one player's delay paused every add")
+	}
+
+	client.accept = func(context.Context) ([]Person, error) {
+		return nil, &AcceptFriendRequestsError{Failed: client.pending("limited")}
+	}
+	pass()
+	if state.options(now, false).add {
+		t.Fatal("a 429 must pause every add")
+	}
+}
+
+// Only a 429 or a server fault on the bulk add pauses every add; other errors' delays do not.
+func TestFriendSyncerBulkErrorPausesOnlyForAccountLimits(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err   error
+		pause bool
+	}{
+		"coded 400":   {&xblsocial.ResponseError{Method: http.MethodPost, StatusCode: http.StatusBadRequest, Code: 1049, RetryAfter: 12 * time.Hour}, false},
+		"uncoded 400": {&xblsocial.ResponseError{Method: http.MethodPost, StatusCode: http.StatusBadRequest, RetryAfter: 12 * time.Hour}, false},
+		"503":         {&xblsocial.ResponseError{Method: http.MethodPost, StatusCode: http.StatusServiceUnavailable, RetryAfter: time.Minute}, true},
+		"429":         {&xblsocial.ResponseError{Method: http.MethodPost, StatusCode: http.StatusTooManyRequests, RetryAfter: time.Minute}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := &syncFriendClient{accept: func(context.Context) ([]Person, error) { return nil, tc.err }}
+			syncer := FriendSyncer{Client: client, Config: FriendSyncConfig{AutoFriend: true}}
+			var state friendSyncRunState
+			now := time.Now()
+			result, _ := syncer.syncWithOptions(context.Background(), state.options(now, false))
+			state.record(now, result)
+			if paused := !state.options(now, false).add; paused != tc.pause {
+				t.Fatalf("adds paused = %v, want %v", paused, tc.pause)
+			}
+		})
+	}
+}
+
+// A player refused with no reason or delay waits refusedBackoff, then is asked again.
+func TestFriendSyncerHoldsRefusedPlayerUntilBackoffEnds(t *testing.T) {
+	client := &syncFriendClient{
+		add: func(context.Context, string) error {
+			return &xblsocial.ResponseError{StatusCode: http.StatusBadRequest}
+		},
+	}
+	client.accept = func(context.Context) ([]Person, error) {
+		return nil, &AcceptFriendRequestsError{Failed: client.pending("refused")}
+	}
+	syncer := FriendSyncer{Client: client, Config: FriendSyncConfig{AutoFriend: true}}
+	var state friendSyncRunState
+	start := time.Now()
+	for _, at := range []time.Time{start, start.Add(time.Minute), start.Add(refusedBackoff)} {
+		result, err := syncer.syncWithOptions(context.Background(), state.options(at, false))
+		if err != nil {
+			t.Fatal(err)
+		}
+		state.record(at, result)
+	}
+	if !slices.Equal(client.added, []string{"refused", "refused"}) {
+		t.Fatalf("attempts = %v, want one before and one after the backoff", client.added)
+	}
+}
+
+// An auth error on a one-by-one add is not about the player, so it does not hold them.
+func TestFriendSyncerDoesNotHoldPlayerForAuthError(t *testing.T) {
+	client := &syncFriendClient{
+		add: func(context.Context, string) error {
+			return &xblsocial.ResponseError{StatusCode: http.StatusUnauthorized}
+		},
+	}
+	client.accept = func(context.Context) ([]Person, error) {
+		return nil, &AcceptFriendRequestsError{Failed: client.pending("p")}
+	}
+	syncer := FriendSyncer{Client: client, Config: FriendSyncConfig{AutoFriend: true}}
+	var state friendSyncRunState
+	now := time.Now()
+	result, _ := syncer.syncWithOptions(context.Background(), state.options(now, false))
+	state.record(now, result)
+	if _, held := state.options(now.Add(time.Minute), false).skip["p"]; held {
+		t.Fatal("a 401 held the player")
+	}
+}
+
+// A player held for a full list and an Xbox delay stays skipped until the later hold ends.
+func TestFriendSyncRunStateSkipsUntilLaterHoldEnds(t *testing.T) {
+	now := time.Now()
+	var state friendSyncRunState
+	state.record(now, friendSyncResult{
+		accepted:    1,
+		fullPlayers: []string{"p"},
+		waits:       map[string]time.Duration{"p": 2 * time.Hour},
+	})
+	for _, tc := range []struct {
+		at   time.Duration
+		held bool
+	}{{90 * time.Minute, true}, {2 * time.Hour, false}} {
+		_, held := state.options(now.Add(tc.at), false).skip["p"]
+		if held != tc.held {
+			t.Fatalf("held at %s = %v, want %v", tc.at, held, tc.held)
+		}
+	}
+	state.record(now.Add(2*time.Hour), friendSyncResult{})
+	if len(state.waiting) != 0 || len(state.fullPlayers) != 0 {
+		t.Fatalf("expired holds kept: waiting %v, full %v", state.waiting, state.fullPlayers)
+	}
+}
+
+// Delays from earlier batches hold their players even when a later batch's rate limit pauses adds.
+func TestFriendSyncerAppliesWaitsAndLaterBatchFailure(t *testing.T) {
+	client := &syncFriendClient{accept: func(context.Context) ([]Person, error) {
+		return nil, &AcceptFriendRequestsError{
+			Failed: []Person{{XUID: "held"}},
+			Waits:  map[string]time.Duration{"held": 12 * time.Hour},
+			Err:    &xblsocial.ResponseError{Method: http.MethodPost, StatusCode: http.StatusTooManyRequests, RetryAfter: time.Minute},
+		}
+	}}
+	syncer := FriendSyncer{Client: client, Config: FriendSyncConfig{AutoFriend: true}}
+	var state friendSyncRunState
+	now := time.Now()
+	result, _ := syncer.syncWithOptions(context.Background(), state.options(now, false))
+	state.record(now, result)
+	if len(client.added) != 0 {
+		t.Fatalf("retried %v after the rate limit", client.added)
+	}
+	later := state.options(now.Add(2*time.Minute), false)
+	if _, held := later.skip["held"]; !held || !later.add || state.options(now, false).add {
+		t.Fatalf("want adds paused for the rate limit only and held waiting 12h; add=%v held=%v", later.add, held)
 	}
 }
 
@@ -620,6 +795,7 @@ type syncFriendClient struct {
 	added   []string
 	removed []string
 	lists   int
+	skip    func(string) bool // from the last accept
 }
 
 func (c *syncFriendClient) removals() []string {
@@ -635,11 +811,27 @@ func (c *syncFriendClient) Friends(context.Context) ([]Person, error) {
 	return c.people, nil
 }
 
-func (c *syncFriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]Person, error) {
+func (c *syncFriendClient) AcceptPendingFriendRequests(ctx context.Context, skip func(string) bool) ([]Person, error) {
+	c.mu.Lock()
+	c.skip = skip
+	c.mu.Unlock()
 	if c.accept != nil {
 		return c.accept(ctx)
 	}
 	return nil, nil
+}
+
+// pending returns the people the last accept did not skip, as the real client would send them.
+func (c *syncFriendClient) pending(xuids ...string) []Person {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var people []Person
+	for _, xuid := range xuids {
+		if c.skip == nil || !c.skip(xuid) {
+			people = append(people, Person{XUID: xuid})
+		}
+	}
+	return people
 }
 
 func (c *syncFriendClient) AddFriend(ctx context.Context, xuid string) error {
