@@ -231,6 +231,34 @@ func TestFriendClientAcceptPendingFriendRequestsReportsFailedUpdates(t *testing.
 	}
 }
 
+// A batch Xbox refuses entirely comes back as 400; every user must still reach the per-user retry.
+func TestFriendClientAcceptPendingFriendRequestsReportsRefusedBatch(t *testing.T) {
+	client := FriendClient{Social: newTestSocialClient(
+		&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.Method {
+			case http.MethodGet:
+				return response(http.StatusOK, `{"people":[{"xuid":"1","gamertag":"One"},{"xuid":"2","gamertag":"Two"}]}`), nil
+			case http.MethodPost:
+				return response(http.StatusBadRequest, `{"updatedPeople":[],"failedToUpdate":["1","2"]}`), nil
+			default:
+				t.Fatalf("unexpected request %s %s", req.Method, req.URL)
+			}
+			return nil, nil
+		})})}
+
+	accepted, err := client.AcceptPendingFriendRequests(context.Background())
+	if len(accepted) != 0 {
+		t.Fatalf("accepted people = %#v, want none", accepted)
+	}
+	var acceptErr *AcceptFriendRequestsError
+	if !errors.As(err, &acceptErr) {
+		t.Fatalf("expected accept failure error, got %T: %v", err, err)
+	}
+	if got := fmt.Sprint(acceptErr.Failed); got != "[{1 One} {2 Two}]" {
+		t.Fatalf("failed people = %s, want One and Two", got)
+	}
+}
+
 // Friends reads only the friend list, undecorated with the default contract, like MCXboxBroadcast.
 func TestFriendClientFriendsReadsFriendList(t *testing.T) {
 	var requests []string

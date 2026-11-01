@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 
 	xblsocial "github.com/df-mc/go-xsapi/v2/social"
 )
@@ -106,6 +107,12 @@ func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]Person
 // fails for an unrelated reason such as rate limiting.
 func addFriends(ctx context.Context, client *xblsocial.Client, xuids []string) ([]string, error) {
 	result, err := client.AddFriends(ctx, xuids)
+	var responseErr *xblsocial.ResponseError
+	if errors.As(err, &responseErr) && responseErr.StatusCode == http.StatusBadRequest && responseErr.Code == 0 {
+		// Xbox answers 400 with no service code when it refuses every user in the
+		// batch; reporting none updated sends each one through the per-user retry.
+		return nil, nil
+	}
 	if err == nil || len(xuids) == 1 || !errors.Is(err, xblsocial.ErrBulkOperationLimit) {
 		return result.Updated, err
 	}
