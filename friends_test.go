@@ -370,6 +370,28 @@ func TestFriendClientAcceptPendingFriendRequestsKeepsWaitsWhenLaterBatchFails(t 
 	}
 }
 
+// A bulk 4xx with a delay that is not a refused batch holds every user it sent.
+func TestFriendClientAcceptPendingFriendRequestsHoldsBatchForRequestDelay(t *testing.T) {
+	client := FriendClient{Social: newTestSocialClient(
+		&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method == http.MethodGet {
+				return response(http.StatusOK, `{"people":[{"xuid":"1"},{"xuid":"2"}]}`), nil
+			}
+			r := response(http.StatusBadRequest, `{"code":1049,"description":"Bad request"}`)
+			r.Header.Set("Retry-After", "43200")
+			return r, nil
+		})})}
+	_, err := client.AcceptPendingFriendRequests(context.Background(), nil)
+	var acceptErr *AcceptFriendRequestsError
+	if !errors.As(err, &acceptErr) || fmt.Sprint(acceptErr.Waits) != "map[1:12h0m0s 2:12h0m0s]" {
+		t.Fatalf("got %T %v, want both users waiting 12h", err, err)
+	}
+	var responseErr *xblsocial.ResponseError
+	if !errors.As(err, &responseErr) || responseErr.Code != 1049 {
+		t.Fatalf("lost the bulk error: %v", err)
+	}
+}
+
 // Friends reads only the friend list, undecorated with the default contract, like MCXboxBroadcast.
 func TestFriendClientFriendsReadsFriendList(t *testing.T) {
 	var requests []string

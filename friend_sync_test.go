@@ -289,6 +289,26 @@ func TestFriendSyncerHoldsRefusedPlayerUntilBackoffEnds(t *testing.T) {
 	}
 }
 
+// An auth error on a one-by-one add is not about the player, so it does not hold them.
+func TestFriendSyncerDoesNotHoldPlayerForAuthError(t *testing.T) {
+	client := &syncFriendClient{
+		add: func(context.Context, string) error {
+			return &xblsocial.ResponseError{StatusCode: http.StatusUnauthorized}
+		},
+	}
+	client.accept = func(context.Context) ([]Person, error) {
+		return nil, &AcceptFriendRequestsError{Failed: client.pending("p")}
+	}
+	syncer := FriendSyncer{Client: client, Config: FriendSyncConfig{AutoFriend: true}}
+	var state friendSyncRunState
+	now := time.Now()
+	result, _ := syncer.syncWithOptions(context.Background(), state.options(now, false))
+	state.record(now, result)
+	if _, held := state.options(now.Add(time.Minute), false).skip["p"]; held {
+		t.Fatal("a 401 held the player")
+	}
+}
+
 // A player held for a full list and an Xbox delay stays skipped until the later hold ends.
 func TestFriendSyncRunStateSkipsUntilLaterHoldEnds(t *testing.T) {
 	now := time.Now()

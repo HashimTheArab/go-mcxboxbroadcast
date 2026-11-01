@@ -139,6 +139,12 @@ func addFriends(ctx context.Context, client *xblsocial.Client, xuids []string, w
 		return nil, nil
 	}
 	if err == nil || len(xuids) == 1 || !errors.Is(err, xblsocial.ErrBulkOperationLimit) {
+		// A delay on an answer about this request, not the account, holds the users it sent.
+		if delay := retryDelay(err); delay > 0 && !pausesAllAdds(err) {
+			for _, xuid := range xuids {
+				waits[xuid] = delay
+			}
+		}
 		return result.Updated, err
 	}
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
@@ -315,8 +316,8 @@ func (s FriendSyncer) addFriend(ctx context.Context, p Person, result *friendSyn
 			result.addRetryAfter = delay
 		case delay > 0:
 			result.wait(p.XUID, delay)
-		case errors.As(err, &responseErr) && responseErr.StatusCode >= 400 && responseErr.StatusCode < 500:
-			// Asking again every pass is what earns long delays from Xbox.
+		case errors.As(err, &responseErr) && slices.Contains([]int{http.StatusBadRequest, http.StatusNotFound, http.StatusConflict}, responseErr.StatusCode):
+			// Asking again every pass is what earns long delays from Xbox. Auth errors are not about the player.
 			result.wait(p.XUID, refusedBackoff)
 		}
 		if s.Log != nil {
