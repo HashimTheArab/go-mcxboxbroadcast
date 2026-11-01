@@ -138,8 +138,9 @@ only on a network where just your scraper can reach it. It reports:
   sync and each expiry scan (or, with expiry off, on the next friend sync once
   the count is 30 minutes old), and adjusted for adds and removals in between.
   It is missing until friend sync first runs.
-- `mcxboxbroadcast_friend_list_full`: 1 while Xbox refuses friend requests
-  because the account's own list is full.
+- `mcxboxbroadcast_friend_list_full`: 1 once Xbox has refused 2 players for a
+  full list on their first try, with no accept since, which points at the
+  account's own list. It returns to 0 on the next accept. Adds keep running.
 - `mcxboxbroadcast_relayed_joins_total`: join offers relayed since start.
 
 ### Signaling

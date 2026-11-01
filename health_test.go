@@ -54,7 +54,7 @@ func TestHealthDoesNotWaitForLifecycleLock(t *testing.T) {
 	}
 }
 
-// Two players refused for a full list with no accept since mark the account's own list full in Health.
+// Two new players refused for a full list after the first pass, with no accept since, mark the list full in Health.
 func TestHealthReportsFriendListFullFromSync(t *testing.T) {
 	b := &Broadcaster{}
 	refused := []Person{{XUID: "1"}}
@@ -71,14 +71,16 @@ func TestHealthReportsFriendListFullFromSync(t *testing.T) {
 		friendCount: &b.health.friends,
 	}
 	var state friendSyncRunState
-	syncer.runSync(t.Context(), &state, false)
-	if b.Health().FriendListFull {
-		t.Fatal("one refused player marked the account's list full")
-	}
+	syncer.runSync(t.Context(), &state, false) // the first pass only records who is refused
 	refused = []Person{{XUID: "2"}}
 	syncer.runSync(t.Context(), &state, false)
+	if b.Health().FriendListFull {
+		t.Fatal("one new refused player marked the account's list full")
+	}
+	refused = []Person{{XUID: "3"}}
+	syncer.runSync(t.Context(), &state, false)
 	if !b.Health().FriendListFull {
-		t.Fatal("two refused players did not mark the account's list full")
+		t.Fatal("two new refused players did not mark the account's list full")
 	}
 }
 
