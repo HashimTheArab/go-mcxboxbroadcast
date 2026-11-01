@@ -2,6 +2,7 @@ package broadcaster
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -112,10 +113,10 @@ func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context, skip func
 // for an unrelated reason such as rate limiting.
 func addFriends(ctx context.Context, client *xblsocial.Client, xuids []string, waits map[string]time.Duration) ([]string, error) {
 	result, err := client.AddFriends(ctx, xuids)
-	if refused, wait := batchRefused(err); refused {
+	if refused, named, wait := batchRefused(err); refused {
 		// Reporting none updated lists every user as failed.
 		if wait > 0 {
-			for _, xuid := range xuids {
+			for _, xuid := range named {
 				waits[xuid] = wait
 			}
 		}
@@ -135,15 +136,20 @@ func addFriends(ctx context.Context, client *xblsocial.Client, xuids []string, w
 }
 
 // batchRefused reports Xbox's answer when it refuses every user in a bulk add
-// (400 with no service code and a failedToUpdate body) and the delay it asked
-// for. The delay names those users, not the account, which Xbox limits with 429.
-func batchRefused(err error) (bool, time.Duration) {
+// (400 with no service code and a failedToUpdate body), the users it named, and
+// the delay it asked for. The delay is for those users, not the account, which
+// Xbox limits with 429. A body cut short names no one.
+func batchRefused(err error) (refused bool, named []string, wait time.Duration) {
 	var responseErr *xblsocial.ResponseError
-	if errors.As(err, &responseErr) && responseErr.StatusCode == http.StatusBadRequest &&
-		responseErr.Code == 0 && strings.Contains(responseErr.Body, `"failedToUpdate"`) {
-		return true, responseErr.RetryAfter
+	if !errors.As(err, &responseErr) || responseErr.StatusCode != http.StatusBadRequest ||
+		responseErr.Code != 0 || !strings.Contains(responseErr.Body, `"failedToUpdate"`) {
+		return false, nil, 0
 	}
-	return false, 0
+	var result xblsocial.BulkFriendsResult
+	if json.Unmarshal([]byte(responseErr.Body), &result) == nil {
+		named = result.Failed
+	}
+	return true, named, responseErr.RetryAfter
 }
 
 // AddFriend accepts the user's pending request, or sends one.

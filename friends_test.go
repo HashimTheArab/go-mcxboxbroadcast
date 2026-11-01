@@ -304,6 +304,37 @@ func TestFriendClientAcceptPendingFriendRequestsReportsRefusedBatchDelay(t *test
 	}
 }
 
+// A refused batch's delay holds only the users Xbox named; a cut-short body names no one.
+func TestFriendClientAcceptPendingFriendRequestsDelaysOnlyNamedUsers(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body string
+		want string
+	}{
+		"named":     {`{"updatedPeople":[],"failedToUpdate":["1"]}`, "map[1:12h0m0s]"},
+		"cut short": {`{"updatedPeople":[],"failedToUpdate":["1",`, "map[]"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := FriendClient{Social: newTestSocialClient(
+				&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					if req.Method == http.MethodGet {
+						return response(http.StatusOK, `{"people":[{"xuid":"1"},{"xuid":"2"}]}`), nil
+					}
+					r := response(http.StatusBadRequest, tc.body)
+					r.Header.Set("Retry-After", "43200")
+					return r, nil
+				})})}
+			_, err := client.AcceptPendingFriendRequests(context.Background(), nil)
+			var acceptErr *AcceptFriendRequestsError
+			if !errors.As(err, &acceptErr) || len(acceptErr.Failed) != 2 {
+				t.Fatalf("expected both users failed, got %T: %v", err, err)
+			}
+			if got := fmt.Sprint(acceptErr.Waits); got != tc.want {
+				t.Fatalf("waits = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
 // Friends reads only the friend list, undecorated with the default contract, like MCXboxBroadcast.
 func TestFriendClientFriendsReadsFriendList(t *testing.T) {
 	var requests []string
