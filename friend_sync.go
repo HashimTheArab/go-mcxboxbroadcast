@@ -258,11 +258,17 @@ func (s FriendSyncer) acceptPending(ctx context.Context, opts friendSyncOptions,
 	result.accepted += len(accepted)
 	var failed *AcceptFriendRequestsError
 	if errors.As(err, &failed) {
+		var held int
+		var longest time.Duration
 		for _, p := range failed.Failed {
 			if delay := failed.Waits[p.XUID]; delay > 0 {
-				s.warn(ctx, "xbox refused friend request; it waits", "xuid", p.XUID, "gamertag", p.Gamertag, "retry_after", delay)
+				s.debug(ctx, "friend request waits", "xuid", p.XUID, "gamertag", p.Gamertag, "retry_after", delay)
 				result.wait(p.XUID, delay)
+				held, longest = held+1, max(longest, delay)
 			}
+		}
+		if held > 0 {
+			s.warn(ctx, "xbox refused friend requests; they wait", "players", held, "retry_after", longest)
 		}
 	}
 	switch {
@@ -310,14 +316,13 @@ func (s FriendSyncer) addFriend(ctx context.Context, p Person, result *friendSyn
 		s.warn(ctx, "friend list full; their request waits an hour", "xuid", p.XUID, "gamertag", p.Gamertag)
 		result.fullPlayers = append(result.fullPlayers, p.XUID)
 	default:
-		var responseErr *xblsocial.ResponseError
 		switch delay := retryDelay(err); {
 		case delay > 0 && pausesAllAdds(err):
 			result.addRetryAfter = delay
-		case delay > 0:
+		case delay > 0 && aboutPlayers(err):
 			result.wait(p.XUID, delay)
-		case errors.As(err, &responseErr) && slices.Contains([]int{http.StatusBadRequest, http.StatusNotFound, http.StatusConflict}, responseErr.StatusCode):
-			// Asking again every pass is what earns long delays from Xbox. Auth errors are not about the player.
+		case aboutPlayers(err):
+			// Asking again every pass is what earns long delays from Xbox.
 			result.wait(p.XUID, refusedBackoff)
 		}
 		if s.Log != nil {
@@ -474,6 +479,13 @@ func (s FriendSyncer) debug(ctx context.Context, msg string, args ...any) {
 func pausesAllAdds(err error) bool {
 	var responseErr *xblsocial.ResponseError
 	return errors.As(err, &responseErr) && (responseErr.StatusCode == http.StatusTooManyRequests || responseErr.StatusCode >= 500)
+}
+
+// aboutPlayers reports an answer about the request's players rather than the account or its
+// token, so a delay or refusal holds just them.
+func aboutPlayers(err error) bool {
+	var responseErr *xblsocial.ResponseError
+	return errors.As(err, &responseErr) && slices.Contains([]int{http.StatusBadRequest, http.StatusNotFound, http.StatusConflict}, responseErr.StatusCode)
 }
 
 func retryDelay(err error) time.Duration {

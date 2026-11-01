@@ -392,6 +392,24 @@ func TestFriendClientAcceptPendingFriendRequestsHoldsBatchForRequestDelay(t *tes
 	}
 }
 
+// An auth error's delay on a bulk add is not about the players, so it holds no one.
+func TestFriendClientAcceptPendingFriendRequestsDoesNotHoldForAuthDelay(t *testing.T) {
+	client := FriendClient{Social: newTestSocialClient(
+		&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method == http.MethodGet {
+				return response(http.StatusOK, `{"people":[{"xuid":"1"}]}`), nil
+			}
+			r := response(http.StatusUnauthorized, "")
+			r.Header.Set("Retry-After", "60")
+			return r, nil
+		})})}
+	_, err := client.AcceptPendingFriendRequests(context.Background(), nil)
+	var acceptErr *AcceptFriendRequestsError
+	if errors.As(err, &acceptErr) {
+		t.Fatalf("a 401 held players: %v", acceptErr.Waits)
+	}
+}
+
 // Friends reads only the friend list, undecorated with the default contract, like MCXboxBroadcast.
 func TestFriendClientFriendsReadsFriendList(t *testing.T) {
 	var requests []string
