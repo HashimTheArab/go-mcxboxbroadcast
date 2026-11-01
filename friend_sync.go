@@ -594,7 +594,7 @@ func (s FriendSyncer) runSync(ctx context.Context, state *friendSyncRunState, ex
 		if state.full {
 			s.Log.Error("xbox refuses new friend requests; the friend list may be full", "refused_players", len(state.fresh))
 		} else {
-			s.Log.Info("xbox accepts friend requests again")
+			s.Log.Info("friend list no longer looks full")
 		}
 	}
 	s.friendCount.setFull(state.full)
