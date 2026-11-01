@@ -59,10 +59,10 @@ type FriendSyncer struct {
 }
 
 const (
-	friendListFullBackoff = time.Hour
-	refusedBackoff        = time.Hour // how long a player Xbox refuses with no reason or delay waits
-	// fullListPlayers is how many different players refused for the first time, with no accept
-	// since, make the bot report its own list as full. One refusal is that player's own list.
+	fullListHold   = time.Hour // how long a player refused for a full list waits; also how long their refusal counts
+	refusedBackoff = time.Hour // how long a player Xbox refuses with no reason or delay waits
+	// fullListPlayers is how many different players refused for the first time in the last hour,
+	// with no accept since, make the bot report its own list as full. One refusal is that player's own list.
 	fullListPlayers = 2
 )
 
@@ -71,7 +71,8 @@ type friendSyncOptions struct {
 	add    bool
 	remove bool
 	// skip holds players whose requests wait, for a full list, a refusal or an Xbox delay.
-	skip map[string]struct{}
+	skip          map[string]struct{}
+	refusedBefore map[string]struct{} // players refused for a full list on an earlier pass; read only
 }
 
 // friendSyncRunState tracks per-operation rate-limit backoff between runs.
@@ -86,17 +87,20 @@ type friendSyncRunState struct {
 	// refusedBefore holds every player refused for a full list since start. Their repeat refusals,
 	// and refusals at the first pass, say nothing new about the bot's own list.
 	refusedBefore map[string]struct{}
-	fresh         map[string]struct{} // first refusals since the last accept, after the first pass
-	started       bool                // a pass has read the pending list
-	full          bool                // the bot's own list looks full: Xbox has started refusing new players
+	// fresh maps first refusals since the last accept, after the first pass, to when. They expire
+	// so a false full clears even if the app stops sending the bot new players.
+	fresh   map[string]time.Time
+	started bool // a pass has read the pending list
+	full    bool // the bot's own list looks full: Xbox has started refusing new players
 }
 
 func (s *friendSyncRunState) options(now time.Time, expire bool) friendSyncOptions {
 	return friendSyncOptions{
-		expire: expire,
-		add:    !now.Before(s.addRetryUntil),
-		remove: !now.Before(s.removeRetryUntil),
-		skip:   s.skipped(now),
+		expire:        expire,
+		add:           !now.Before(s.addRetryUntil),
+		remove:        !now.Before(s.removeRetryUntil),
+		skip:          s.skipped(now),
+		refusedBefore: s.refusedBefore,
 	}
 }
 
@@ -108,7 +112,7 @@ func (s *friendSyncRunState) skipped(now time.Time) map[string]struct{} {
 		}
 	}
 	for xuid, at := range s.fullPlayers {
-		if now.Before(at.Add(friendListFullBackoff)) {
+		if now.Before(at.Add(fullListHold)) {
 			skip[xuid] = struct{}{}
 		}
 	}
@@ -127,11 +131,16 @@ func (s *friendSyncRunState) record(now time.Time, result friendSyncResult) {
 	if s.fullPlayers == nil {
 		s.fullPlayers = make(map[string]time.Time)
 		s.refusedBefore = make(map[string]struct{})
-		s.fresh = make(map[string]struct{})
+		s.fresh = make(map[string]time.Time)
 	}
 	for xuid, at := range s.fullPlayers {
-		if now.Sub(at) >= friendListFullBackoff {
+		if now.Sub(at) >= fullListHold {
 			delete(s.fullPlayers, xuid)
+		}
+	}
+	for xuid, at := range s.fresh {
+		if now.Sub(at) >= fullListHold {
+			delete(s.fresh, xuid)
 		}
 	}
 	if result.accepted > 0 {
@@ -144,7 +153,7 @@ func (s *friendSyncRunState) record(now time.Time, result friendSyncResult) {
 		}
 		s.refusedBefore[xuid] = struct{}{}
 		if s.started && result.accepted == 0 {
-			s.fresh[xuid] = struct{}{}
+			s.fresh[xuid] = now
 		}
 	}
 	s.started = s.started || result.pendingRead
@@ -180,9 +189,22 @@ func (r *friendSyncResult) wait(xuid string, delay time.Duration) {
 	r.waits[xuid] = delay
 }
 
-// addBlocked stops a pass on rate limits, and once enough refusals with no accept suggest the bot is full.
-func (r friendSyncResult) addBlocked() bool {
-	return r.addRetryAfter > 0 || (r.accepted == 0 && len(r.fullPlayers) >= fullListPlayers)
+// addBlocked stops a pass on rate limits, and once enough players refused for the first time,
+// with no accept, suggest the bot is full. Repeat refusals are those players' own lists.
+func (r friendSyncResult) addBlocked(refusedBefore map[string]struct{}) bool {
+	if r.addRetryAfter > 0 {
+		return true
+	}
+	if r.accepted > 0 {
+		return false
+	}
+	var first int
+	for _, xuid := range r.fullPlayers {
+		if _, seen := refusedBefore[xuid]; !seen {
+			first++
+		}
+	}
+	return first >= fullListPlayers
 }
 
 // Sync accepts pending friend requests and expires inactive friends once.
@@ -284,7 +306,7 @@ func (s FriendSyncer) acceptPending(ctx context.Context, opts friendSyncOptions,
 			if _, waits := failed.Waits[p.XUID]; waits {
 				continue
 			}
-			if result.addBlocked() {
+			if result.addBlocked(opts.refusedBefore) {
 				break
 			}
 			s.addFriend(ctx, p, result)
@@ -572,7 +594,7 @@ func (s FriendSyncer) runSync(ctx context.Context, state *friendSyncRunState, ex
 		if state.full {
 			s.Log.Error("xbox refuses new friend requests; the friend list may be full", "refused_players", len(state.fresh))
 		} else {
-			s.Log.Info("xbox accepts friend requests again")
+			s.Log.Info("friend list no longer looks full")
 		}
 	}
 	s.friendCount.setFull(state.full)

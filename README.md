@@ -139,8 +139,10 @@ only on a network where just your scraper can reach it. It reports:
   the count is 30 minutes old), and adjusted for adds and removals in between.
   It is missing until friend sync first runs.
 - `mcxboxbroadcast_friend_list_full`: 1 once Xbox has refused 2 players for a
-  full list on their first try, with no accept since, which points at the
-  account's own list. It returns to 0 on the next accept. Adds keep running.
+  full list within an hour, with no accept since, which points at the account's
+  own list. Only a player's first refusal since start counts, and none at the
+  first sync. It returns to 0 on the next accept, or once fewer than 2 such
+  refusals are under an hour old. Adds keep running.
 - `mcxboxbroadcast_relayed_joins_total`: join offers relayed since start.
 
 ### Signaling

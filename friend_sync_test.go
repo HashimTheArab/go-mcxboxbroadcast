@@ -148,6 +148,27 @@ func TestFriendSyncerStopsRetriesWhenFriendListIsFull(t *testing.T) {
 	}
 }
 
+// Players refused on an earlier pass have full lists of their own and must not stop the pass.
+func TestFriendSyncerRepeatRefusalsDoNotStopRetries(t *testing.T) {
+	client := &syncFriendClient{
+		accept: func(context.Context) ([]Person, error) {
+			return nil, &AcceptFriendRequestsError{Failed: []Person{{XUID: "1"}, {XUID: "2"}, {XUID: "3"}}}
+		},
+		add: func(_ context.Context, xuid string) error {
+			if xuid == "3" {
+				return nil
+			}
+			return &xblsocial.ResponseError{StatusCode: 403, Code: 1028}
+		},
+	}
+	var result friendSyncResult
+	opts := friendSyncOptions{refusedBefore: map[string]struct{}{"1": {}, "2": {}}}
+	FriendSyncer{Client: client}.acceptPending(context.Background(), opts, &result)
+	if !slices.Equal(client.added, []string{"1", "2", "3"}) || result.accepted != 1 {
+		t.Fatalf("added=%v accepted=%d, want every player tried", client.added, result.accepted)
+	}
+}
+
 // One player's full list must not stop the bot accepting everyone else, and their request waits.
 func TestFriendSyncerSkipsPlayerWithFullList(t *testing.T) {
 	client := &syncFriendClient{
@@ -481,6 +502,22 @@ func TestFriendSyncRunStateReportsFullFromNewRefusals(t *testing.T) {
 	}
 }
 
+// A full report with no accept since clears an hour later, as the app then sends the bot no players.
+func TestFriendSyncRunStateFullReportExpires(t *testing.T) {
+	now := time.Now()
+	var state friendSyncRunState
+	state.record(now, friendSyncResult{pendingRead: true})
+	state.record(now, friendSyncResult{pendingRead: true, fullPlayers: []string{"1", "2"}})
+	state.record(now.Add(fullListHold-time.Second), friendSyncResult{pendingRead: true})
+	if !state.full {
+		t.Fatal("the full report cleared before the hour ended")
+	}
+	state.record(now.Add(fullListHold), friendSyncResult{pendingRead: true, fullPlayers: []string{"1", "2"}})
+	if state.full {
+		t.Fatal("old refusals and their repeats kept the bot full")
+	}
+}
+
 // Refusals separated by a successful accept are separate players' full lists, not the bot's.
 func TestFriendSyncRunStateNeedsRefusalsSinceLastAccept(t *testing.T) {
 	now := time.Now()
@@ -525,7 +562,7 @@ func TestFriendSyncRunStateIgnoresFirstPassAndRepeatRefusals(t *testing.T) {
 	if state.full {
 		t.Fatal("first-pass refusals marked the bot full")
 	}
-	later := now.Add(friendListFullBackoff)
+	later := now.Add(fullListHold)
 	state.record(later, friendSyncResult{pendingRead: true, fullPlayers: []string{"chronic1", "chronic2"}})
 	if state.full {
 		t.Fatal("repeat refusals marked the bot full")
