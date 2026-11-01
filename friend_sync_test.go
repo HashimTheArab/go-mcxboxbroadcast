@@ -239,6 +239,80 @@ func TestFriendSyncerDelayHoldsOnlyRefusedPlayers(t *testing.T) {
 	}
 }
 
+// Only a 429 or a server fault on the bulk add pauses every add; other errors' delays do not.
+func TestFriendSyncerBulkErrorPausesOnlyForAccountLimits(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err   error
+		pause bool
+	}{
+		"coded 400":   {&xblsocial.ResponseError{Method: http.MethodPost, StatusCode: http.StatusBadRequest, Code: 1049, RetryAfter: 12 * time.Hour}, false},
+		"uncoded 400": {&xblsocial.ResponseError{Method: http.MethodPost, StatusCode: http.StatusBadRequest, RetryAfter: 12 * time.Hour}, false},
+		"503":         {&xblsocial.ResponseError{Method: http.MethodPost, StatusCode: http.StatusServiceUnavailable, RetryAfter: time.Minute}, true},
+		"429":         {&xblsocial.ResponseError{Method: http.MethodPost, StatusCode: http.StatusTooManyRequests, RetryAfter: time.Minute}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := &syncFriendClient{accept: func(context.Context) ([]Person, error) { return nil, tc.err }}
+			syncer := FriendSyncer{Client: client, Config: FriendSyncConfig{AutoFriend: true}}
+			var state friendSyncRunState
+			now := time.Now()
+			result, _ := syncer.syncWithOptions(context.Background(), state.options(now, false))
+			state.record(now, result)
+			if paused := !state.options(now, false).add; paused != tc.pause {
+				t.Fatalf("adds paused = %v, want %v", paused, tc.pause)
+			}
+		})
+	}
+}
+
+// A player refused with no reason or delay waits refusedBackoff, then is asked again.
+func TestFriendSyncerHoldsRefusedPlayerUntilBackoffEnds(t *testing.T) {
+	client := &syncFriendClient{
+		add: func(context.Context, string) error {
+			return &xblsocial.ResponseError{StatusCode: http.StatusBadRequest}
+		},
+	}
+	client.accept = func(context.Context) ([]Person, error) {
+		return nil, &AcceptFriendRequestsError{Failed: client.pending("refused")}
+	}
+	syncer := FriendSyncer{Client: client, Config: FriendSyncConfig{AutoFriend: true}}
+	var state friendSyncRunState
+	start := time.Now()
+	for _, at := range []time.Time{start, start.Add(time.Minute), start.Add(refusedBackoff)} {
+		result, err := syncer.syncWithOptions(context.Background(), state.options(at, false))
+		if err != nil {
+			t.Fatal(err)
+		}
+		state.record(at, result)
+	}
+	if !slices.Equal(client.added, []string{"refused", "refused"}) {
+		t.Fatalf("attempts = %v, want one before and one after the backoff", client.added)
+	}
+}
+
+// A player held for a full list and an Xbox delay stays skipped until the later hold ends.
+func TestFriendSyncRunStateSkipsUntilLaterHoldEnds(t *testing.T) {
+	now := time.Now()
+	var state friendSyncRunState
+	state.record(now, friendSyncResult{
+		accepted:    1,
+		fullPlayers: []string{"p"},
+		waits:       map[string]time.Duration{"p": 2 * time.Hour},
+	})
+	for _, tc := range []struct {
+		at   time.Duration
+		held bool
+	}{{90 * time.Minute, true}, {2 * time.Hour, false}} {
+		_, held := state.options(now.Add(tc.at), false).skip["p"]
+		if held != tc.held {
+			t.Fatalf("held at %s = %v, want %v", tc.at, held, tc.held)
+		}
+	}
+	state.record(now.Add(2*time.Hour), friendSyncResult{})
+	if len(state.waiting) != 0 || len(state.fullPlayers) != 0 {
+		t.Fatalf("expired holds kept: waiting %v, full %v", state.waiting, state.fullPlayers)
+	}
+}
+
 func TestFriendSyncerExpiresInactiveFriendsOnly(t *testing.T) {
 	old := time.Now().Add(-48 * time.Hour)
 	history := &syncHistoryStore{lastSeen: map[string]time.Time{"old": old, "recent": time.Now()}}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"maps"
 	"net/http"
 	"strconv"
 	"time"
@@ -60,6 +59,7 @@ type FriendSyncer struct {
 
 const (
 	friendListFullBackoff = time.Hour
+	refusedBackoff        = time.Hour // how long a player Xbox refuses with no reason or delay waits
 	// fullListPlayers is how many different players must be refused for a full list, with no
 	// accept since, before the bot treats its own list as full. One refusal is that player's list.
 	fullListPlayers = 2
@@ -69,8 +69,8 @@ type friendSyncOptions struct {
 	expire bool
 	add    bool
 	remove bool
-	// skip maps players whose requests wait, for a full list or an Xbox delay, to when they may be retried.
-	skip map[string]time.Time
+	// skip holds players whose requests wait, for a full list, a refusal or an Xbox delay.
+	skip map[string]struct{}
 }
 
 // friendSyncRunState tracks per-operation rate-limit backoff between runs.
@@ -91,18 +91,20 @@ func (s *friendSyncRunState) options(now time.Time, expire bool) friendSyncOptio
 		expire: expire,
 		add:    !now.Before(s.addRetryUntil) && !now.Before(s.listFullUntil),
 		remove: !now.Before(s.removeRetryUntil),
-		skip:   s.skipped(),
+		skip:   s.skipped(now),
 	}
 }
 
-func (s *friendSyncRunState) skipped() map[string]time.Time {
-	skip := maps.Clone(s.waiting)
-	if skip == nil {
-		skip = make(map[string]time.Time, len(s.fullPlayers))
+func (s *friendSyncRunState) skipped(now time.Time) map[string]struct{} {
+	skip := make(map[string]struct{})
+	for xuid, until := range s.waiting {
+		if now.Before(until) {
+			skip[xuid] = struct{}{}
+		}
 	}
 	for xuid, at := range s.fullPlayers {
-		if until := at.Add(friendListFullBackoff); until.After(skip[xuid]) {
-			skip[xuid] = until
+		if now.Before(at.Add(friendListFullBackoff)) {
+			skip[xuid] = struct{}{}
 		}
 	}
 	return skip
@@ -242,10 +244,9 @@ func (s FriendSyncer) syncWithOptions(ctx context.Context, opts friendSyncOption
 // could not update are retried one by one to find restricted accounts.
 func (s FriendSyncer) acceptPending(ctx context.Context, opts friendSyncOptions, result *friendSyncResult) {
 	s.debug(ctx, "accepting pending friend requests")
-	now := time.Now()
 	skip := func(xuid string) bool {
-		until, ok := opts.skip[xuid]
-		return ok && now.Before(until)
+		_, ok := opts.skip[xuid]
+		return ok
 	}
 	operationCtx, cancel := xboxOperationContext(ctx)
 	accepted, err := s.Client.AcceptPendingFriendRequests(operationCtx, skip)
@@ -275,7 +276,7 @@ func (s FriendSyncer) acceptPending(ctx context.Context, opts friendSyncOptions,
 			if errors.As(err, &responseErr) && responseErr.Method == http.MethodGet {
 				// The pending list shares PeopleHub's read quota with Friends.
 				result.readRetryAfter = delay
-			} else {
+			} else if pausesAllAdds(err) {
 				result.addRetryAfter = delay
 			}
 		}
@@ -302,11 +303,15 @@ func (s FriendSyncer) addFriend(ctx context.Context, p Person, result *friendSyn
 		s.warn(ctx, "friend list full; their request waits an hour", "xuid", p.XUID, "gamertag", p.Gamertag)
 		result.fullPlayers = append(result.fullPlayers, p.XUID)
 	default:
-		// Only a rate limit pauses every add; another error's delay is for this player.
-		if delay := retryDelay(err); delay > 0 && errors.Is(err, xblsocial.ErrRateLimited) {
+		var responseErr *xblsocial.ResponseError
+		switch delay := retryDelay(err); {
+		case delay > 0 && pausesAllAdds(err):
 			result.addRetryAfter = delay
-		} else if delay > 0 {
+		case delay > 0:
 			result.wait(p.XUID, delay)
+		case errors.As(err, &responseErr) && responseErr.StatusCode >= 400 && responseErr.StatusCode < 500:
+			// Asking again every pass is what earns long delays from Xbox.
+			result.wait(p.XUID, refusedBackoff)
 		}
 		if s.Log != nil {
 			s.Log.Warn("add friend", "xuid", p.XUID, "gamertag", p.Gamertag, "err", err)
@@ -455,6 +460,13 @@ func (s FriendSyncer) debug(ctx context.Context, msg string, args ...any) {
 	if s.Log != nil {
 		s.Log.DebugContext(ctx, msg, args...)
 	}
+}
+
+// pausesAllAdds reports a delay for the whole account: a rate limit or a server fault. Other
+// answers are about the request or its players.
+func pausesAllAdds(err error) bool {
+	var responseErr *xblsocial.ResponseError
+	return errors.As(err, &responseErr) && (responseErr.StatusCode == http.StatusTooManyRequests || responseErr.StatusCode >= 500)
 }
 
 func retryDelay(err error) time.Duration {
