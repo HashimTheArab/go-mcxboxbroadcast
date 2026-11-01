@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	xblsocial "github.com/df-mc/go-xsapi/v2/social"
 )
@@ -107,10 +108,8 @@ func (c FriendClient) AcceptPendingFriendRequests(ctx context.Context) ([]Person
 // fails for an unrelated reason such as rate limiting.
 func addFriends(ctx context.Context, client *xblsocial.Client, xuids []string) ([]string, error) {
 	result, err := client.AddFriends(ctx, xuids)
-	var responseErr *xblsocial.ResponseError
-	if errors.As(err, &responseErr) && responseErr.StatusCode == http.StatusBadRequest && responseErr.Code == 0 {
-		// Xbox answers 400 with no service code when it refuses every user in the
-		// batch; reporting none updated sends each one through the per-user retry.
+	if batchRefused(err) {
+		// Reporting none updated sends each user through the per-user retry.
 		return nil, nil
 	}
 	if err == nil || len(xuids) == 1 || !errors.Is(err, xblsocial.ErrBulkOperationLimit) {
@@ -124,6 +123,14 @@ func addFriends(ctx context.Context, client *xblsocial.Client, xuids []string) (
 	}
 	right, err := addFriends(ctx, client, xuids[middle:])
 	return append(left, right...), err
+}
+
+// batchRefused reports Xbox's answer when it refuses every user in a bulk add:
+// 400 with no service code and a failedToUpdate body. A retry delay keeps the error so it is honoured.
+func batchRefused(err error) bool {
+	var responseErr *xblsocial.ResponseError
+	return errors.As(err, &responseErr) && responseErr.StatusCode == http.StatusBadRequest &&
+		responseErr.Code == 0 && responseErr.RetryAfter == 0 && strings.Contains(responseErr.Body, `"failedToUpdate"`)
 }
 
 // AddFriend accepts the user's pending request, or sends one.

@@ -259,6 +259,33 @@ func TestFriendClientAcceptPendingFriendRequestsReportsRefusedBatch(t *testing.T
 	}
 }
 
+// Other uncoded 400s, and any 400 asking for a delay, stay errors so the syncer backs off.
+func TestFriendClientAcceptPendingFriendRequestsKeepsOtherBadRequests(t *testing.T) {
+	for name, resp := range map[string]func() *http.Response{
+		"other body": func() *http.Response { return response(http.StatusBadRequest, `{"error":"bad request"}`) },
+		"retry after": func() *http.Response {
+			r := response(http.StatusBadRequest, `{"updatedPeople":[],"failedToUpdate":["1"]}`)
+			r.Header.Set("Retry-After", "11")
+			return r
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := FriendClient{Social: newTestSocialClient(
+				&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					if req.Method == http.MethodGet {
+						return response(http.StatusOK, `{"people":[{"xuid":"1","gamertag":"One"}]}`), nil
+					}
+					return resp(), nil
+				})})}
+			_, err := client.AcceptPendingFriendRequests(context.Background())
+			var responseErr *xblsocial.ResponseError
+			if !errors.As(err, &responseErr) {
+				t.Fatalf("expected social response error, got %T: %v", err, err)
+			}
+		})
+	}
+}
+
 // Friends reads only the friend list, undecorated with the default contract, like MCXboxBroadcast.
 func TestFriendClientFriendsReadsFriendList(t *testing.T) {
 	var requests []string
