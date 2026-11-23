@@ -65,7 +65,7 @@ require (
 
 replace (
 	github.com/df-mc/go-nethernet => github.com/hashimthearab/go-nethernet v0.0.0-20261122191312-3a7d9b5732d2
-	github.com/df-mc/go-xsapi/v2 => github.com/hashimthearab/go-xsapi/v2 v2.0.0-20261123132253-98bd9e17fe99
+	github.com/df-mc/go-xsapi/v2 => github.com/hashimthearab/go-xsapi/v2 v2.0.0-20261123133254-8804876c85e2
 	github.com/sandertv/go-raknet => github.com/hashimthearab/go-raknet v1.15.1-0.20260908193618-2049463566ca
 	github.com/sandertv/gophertunnel => github.com/hashimthearab/gophertunnel v1.25.3-0.20261030224434-9331d09aae90
 )

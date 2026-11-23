@@ -29,8 +29,8 @@ github.com/hashimthearab/go-nethernet v0.0.0-20261122191312-3a7d9b5732d2 h1:xVAo
 github.com/hashimthearab/go-nethernet v0.0.0-20261122191312-3a7d9b5732d2/go.mod h1:i7ARmxFlDs8EYEYOmtFplsZo0v059C+bsGVFrScxY08=
 github.com/hashimthearab/go-raknet v1.15.1-0.20260908193618-2049463566ca h1:C1HGBjObux+PjxQlbfGZ+hj67WSFwnfh+5ath5UH9vo=
 github.com/hashimthearab/go-raknet v1.15.1-0.20260908193618-2049463566ca/go.mod h1:/yysjwfCXm2+2OY8mBazLzcxJ3irnylKCyG3FLgUPVU=
-github.com/hashimthearab/go-xsapi/v2 v2.0.0-20261123132253-98bd9e17fe99 h1:MDdrZ3m0ixSLoRYi/jRJU5rN/st6vnX9SRbd+ejxwt8=
-github.com/hashimthearab/go-xsapi/v2 v2.0.0-20261123132253-98bd9e17fe99/go.mod h1:vuSdUfdc95nLo4xvY/mlxIKj5hjB86LhVMF2Q90H4Bs=
+github.com/hashimthearab/go-xsapi/v2 v2.0.0-20261123133254-8804876c85e2 h1:ttOqLpHy80mGjpRxdmvgJSmPwP+ZBSUq4o0oiWmTOcc=
+github.com/hashimthearab/go-xsapi/v2 v2.0.0-20261123133254-8804876c85e2/go.mod h1:vuSdUfdc95nLo4xvY/mlxIKj5hjB86LhVMF2Q90H4Bs=
 github.com/hashimthearab/gophertunnel v1.25.3-0.20261030224434-9331d09aae90 h1:88XpNxBdZrPi9b9rRMFRke5AVstafkbFqJ768+KIQCQ=
 github.com/hashimthearab/gophertunnel v1.25.3-0.20261030224434-9331d09aae90/go.mod h1:wUc5HKnBbc2tT4mHTvgjKrFmhmoo1DAvbrIW6T7Xlyw=
 github.com/klauspost/compress v1.18.7 h1:aUyZsS4kH3QTKurYhAOwAHxllVPnOthb3vPfnF1Ehjw=
