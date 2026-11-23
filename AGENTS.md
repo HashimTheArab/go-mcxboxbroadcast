@@ -8,9 +8,11 @@ broadcaster. Put maintenance guidance and implementation constraints here.
 Treat `go.mod` as the source of truth for versions and replacements.
 
 - `go-xsapi/v2` owns Xbox Live MPSD/RTA sessions, social APIs, and presence.
-  It currently uses the upstream module directly.
+  It currently uses the `HashimTheArab/go-xsapi` fork's `lunar` branch. Drop the
+  replacement once upstream replaces silent RTA sockets.
 - `go-nethernet` owns the NetherNet HTTP signaling client (`endpoint`) that
   relays join offers. Use it rather than hand-rolling `/v1/join` requests.
+  It currently uses the `HashimTheArab/go-nethernet` fork's `lunar` branch.
 - `gophertunnel` owns Xbox signaling, room announcements, session metadata, and
   multiplayer token verification. It currently uses the
   `HashimTheArab/gophertunnel` fork. Before removing the replacement, verify that
